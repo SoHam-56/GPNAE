@@ -1,0 +1,36 @@
+Vivado Simulator v2025.1.0
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+Running: /home/admin/Xilinx/2025.1/Vivado/bin/unwrapped/lnx64.o/xelab --incr --debug typical --relax --mt 8 -L xil_defaultlib -L uvm -L unisims_ver -L unimacro_ver -L secureip --snapshot TB_gpnae_behav xil_defaultlib.TB_gpnae xil_defaultlib.glbl -log elaborate.log 
+Using 8 slave threads.
+Starting static elaboration
+Pass Through NonSizing Optimizer
+Completed static elaboration
+Starting simulation data flow analysis
+Completed simulation data flow analysis
+Time Resolution for simulation is 1ps
+Compiling module xil_defaultlib.PE5B
+Compiling module xil_defaultlib.dual_port_ram(ADDR_LINES=5)
+Compiling module xil_defaultlib.InputFIFO
+Compiling module xil_defaultlib.cntlz8
+Compiling module xil_defaultlib.cntlz24
+Compiling module xil_defaultlib.fp32_down
+Compiling module xil_defaultlib.R4Booth(N=12)
+Compiling module xil_defaultlib.R4Booth(N=13)
+Compiling module xil_defaultlib.karatsuba_default
+Compiling module xil_defaultlib.multiply_32
+Compiling module xil_defaultlib.SeLu
+Compiling module xil_defaultlib.rom_block
+Compiling module xil_defaultlib.CoeffROM
+Compiling module xil_defaultlib.Adder_32
+Compiling module xil_defaultlib.datapath
+Compiling module xil_defaultlib.controller
+Compiling module xil_defaultlib.mac
+Compiling module xil_defaultlib.fp32_up_down
+Compiling module xil_defaultlib.divu(WIDTH=24,FBITS=23)
+Compiling module xil_defaultlib.divide_32
+Compiling module xil_defaultlib.sigtan
+Compiling module xil_defaultlib.gpnae
+Compiling module xil_defaultlib.TB_gpnae
+Compiling module xil_defaultlib.glbl
+Built simulation snapshot TB_gpnae_behav

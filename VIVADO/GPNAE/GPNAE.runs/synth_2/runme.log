@@ -1,0 +1,426 @@
+
+*** Running vivado
+    with args -log gpnae.vds -m64 -product Vivado -mode batch -messageDb vivado.pb -notrace -source gpnae.tcl
+
+
+****** Vivado v2025.1 (64-bit)
+  **** SW Build 6140274 on Wed May 21 22:58:25 MDT 2025
+  **** IP Build 6138677 on Thu May 22 03:10:11 MDT 2025
+  **** SharedData Build 6139179 on Tue May 20 17:58:58 MDT 2025
+  **** Start of session at: Fri Jun 27 00:56:29 2025
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source gpnae.tcl -notrace
+Command: read_checkpoint -auto_incremental -incremental /home/admin/Desktop/GPNAE/VIVADO/GPNAE/GPNAE.srcs/utils_1/imports/synth_2/gpnae.dcp
+INFO: [Vivado 12-5825] Read reference checkpoint from /home/admin/Desktop/GPNAE/VIVADO/GPNAE/GPNAE.srcs/utils_1/imports/synth_2/gpnae.dcp for incremental synthesis
+INFO: [Vivado 12-7989] Please ensure there are no constraint changes
+Command: synth_design -top gpnae -part xc7z020clg400-1 -directive PerformanceOptimized -fsm_extraction one_hot -keep_equivalent_registers -resource_sharing off -no_lc -shreg_min_size 5
+Starting synth_design
+Attempting to get a license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Common 17-349] Got license for feature 'Synthesis' and/or device 'xc7z020'
+INFO: [Device 21-403] Loading part xc7z020clg400-1
+INFO: [Designutils 20-5440] No compile time benefit to using incremental synthesis; A full resynthesis will be run
+INFO: [Designutils 20-4379] Flow is switching to default flow due to incremental criteria not met. If you would like to alter this behaviour and have the flow terminate instead, please set the following parameter config_implementation {autoIncr.Synth.RejectBehavior Terminate}
+INFO: [Synth 8-7079] Multithreading enabled for synth_design using a maximum of 7 processes.
+INFO: [Synth 8-7078] Launching helper process for spawning children vivado processes
+INFO: [Synth 8-7075] Helper process launched with PID 39064
+---------------------------------------------------------------------------------
+Starting RTL Elaboration : Time (s): cpu = 00:00:03 ; elapsed = 00:00:04 . Memory (MB): peak = 2130.133 ; gain = 443.711 ; free physical = 427 ; free virtual = 10560
+---------------------------------------------------------------------------------
+INFO: [Synth 8-6157] synthesizing module 'gpnae' [/home/admin/Desktop/GPNAE/src/gpnae.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'InputFIFO' [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/InputFIFO.v:3]
+	Parameter DATA_WIDTH bound to: 32 - type: integer 
+	Parameter ADDR_LINES bound to: 5 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'PE5B' [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/PE5B.v:1]
+INFO: [Synth 8-6155] done synthesizing module 'PE5B' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/PE5B.v:1]
+INFO: [Synth 8-6157] synthesizing module 'dual_port_ram' [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/RAM.v:3]
+	Parameter DATA_WIDTH bound to: 32 - type: integer 
+	Parameter ADDR_LINES bound to: 5 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'dual_port_ram' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/RAM.v:3]
+INFO: [Synth 8-6155] done synthesizing module 'InputFIFO' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/InputFIFO.v:3]
+INFO: [Synth 8-6157] synthesizing module 'SeLu' [/home/admin/Desktop/GPNAE/src/SeLu.sv:3]
+INFO: [Synth 8-6157] synthesizing module 'fp32_down' [/home/admin/Desktop/GPNAE/src/Down.sv:191]
+INFO: [Synth 8-6157] synthesizing module 'cntlz24' [/home/admin/Desktop/GPNAE/src/TyMAC/LZC.v:22]
+INFO: [Synth 8-6157] synthesizing module 'cntlz8' [/home/admin/Desktop/GPNAE/src/TyMAC/LZC.v:1]
+INFO: [Synth 8-6155] done synthesizing module 'cntlz8' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/LZC.v:1]
+INFO: [Synth 8-6155] done synthesizing module 'cntlz24' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/LZC.v:22]
+INFO: [Synth 8-6155] done synthesizing module 'fp32_down' (0#1) [/home/admin/Desktop/GPNAE/src/Down.sv:191]
+INFO: [Synth 8-6157] synthesizing module 'multiply_32' [/home/admin/Desktop/GPNAE/src/TyMAC/Multiplier_FP32.sv:3]
+INFO: [Synth 8-6157] synthesizing module 'karatsuba' [/home/admin/Desktop/GPNAE/src/TyMAC/UnSig_Karatsuba.sv:3]
+	Parameter WIDTH bound to: 24 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'R4Booth' [/home/admin/Desktop/GPNAE/src/TyMAC/UnSig_R4Booth.v:3]
+	Parameter N bound to: 12 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'R4Booth' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/UnSig_R4Booth.v:3]
+INFO: [Synth 8-6157] synthesizing module 'R4Booth__parameterized0' [/home/admin/Desktop/GPNAE/src/TyMAC/UnSig_R4Booth.v:3]
+	Parameter N bound to: 13 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'R4Booth__parameterized0' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/UnSig_R4Booth.v:3]
+INFO: [Synth 8-6155] done synthesizing module 'karatsuba' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/UnSig_Karatsuba.sv:3]
+INFO: [Synth 8-6155] done synthesizing module 'multiply_32' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/Multiplier_FP32.sv:3]
+INFO: [Synth 8-6155] done synthesizing module 'SeLu' (0#1) [/home/admin/Desktop/GPNAE/src/SeLu.sv:3]
+INFO: [Synth 8-6157] synthesizing module 'mac' [/home/admin/Desktop/GPNAE/src/TyMAC/MAC.sv:108]
+	Parameter DATA_WIDTH bound to: 32'sb00000000000000000000000000100000 
+	Parameter ADDR_LINES bound to: 32'sb00000000000000000000000000000101 
+INFO: [Synth 8-6157] synthesizing module 'CoeffROM' [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/CoeffROM.v:4]
+	Parameter DATA_WIDTH bound to: 32 - type: integer 
+	Parameter ADDR_LINES bound to: 5 - type: integer 
+	Parameter INIT_FILE bound to: taylor_coeffs.mem - type: string 
+INFO: [Synth 8-6157] synthesizing module 'rom_block' [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/ROM.v:3]
+	Parameter DATA_WIDTH bound to: 32 - type: integer 
+	Parameter ADDR_LINES bound to: 5 - type: integer 
+	Parameter INIT_FILE bound to: taylor_coeffs.mem - type: string 
+INFO: [Synth 8-3876] $readmem data file 'taylor_coeffs.mem' is read successfully [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/ROM.v:25]
+INFO: [Synth 8-6155] done synthesizing module 'rom_block' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/ROM.v:3]
+INFO: [Synth 8-6155] done synthesizing module 'CoeffROM' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/Memory/CoeffROM.v:4]
+INFO: [Synth 8-6157] synthesizing module 'datapath' [/home/admin/Desktop/GPNAE/src/TyMAC/datapath.v:3]
+	Parameter DATA_WIDTH bound to: 32 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'Adder_32' [/home/admin/Desktop/GPNAE/src/TyMAC/Adder_FP32.v:3]
+INFO: [Synth 8-6155] done synthesizing module 'Adder_32' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/Adder_FP32.v:3]
+INFO: [Synth 8-6155] done synthesizing module 'datapath' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/datapath.v:3]
+INFO: [Synth 8-6157] synthesizing module 'controller' [/home/admin/Desktop/GPNAE/src/TyMAC/controller.sv:163]
+	Parameter ADDR_LINES bound to: 32'sb00000000000000000000000000000101 
+INFO: [Synth 8-6155] done synthesizing module 'controller' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/controller.sv:163]
+INFO: [Synth 8-6155] done synthesizing module 'mac' (0#1) [/home/admin/Desktop/GPNAE/src/TyMAC/MAC.sv:108]
+INFO: [Synth 8-6157] synthesizing module 'sigtan' [/home/admin/Desktop/GPNAE/src/sigtan.sv:3]
+INFO: [Synth 8-6157] synthesizing module 'fp32_up_down' [/home/admin/Desktop/GPNAE/src/UpDown.sv:267]
+INFO: [Synth 8-6155] done synthesizing module 'fp32_up_down' (0#1) [/home/admin/Desktop/GPNAE/src/UpDown.sv:267]
+INFO: [Synth 8-6157] synthesizing module 'divide_32' [/home/admin/Desktop/GPNAE/src/Divider/Divider_FP32.sv:3]
+INFO: [Synth 8-6157] synthesizing module 'divu' [/home/admin/Desktop/GPNAE/src/Divider/divu.sv:8]
+	Parameter WIDTH bound to: 24 - type: integer 
+	Parameter FBITS bound to: 23 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'divu' (0#1) [/home/admin/Desktop/GPNAE/src/Divider/divu.sv:8]
+INFO: [Synth 8-6155] done synthesizing module 'divide_32' (0#1) [/home/admin/Desktop/GPNAE/src/Divider/Divider_FP32.sv:3]
+INFO: [Synth 8-6155] done synthesizing module 'sigtan' (0#1) [/home/admin/Desktop/GPNAE/src/sigtan.sv:3]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/admin/Desktop/GPNAE/src/gpnae.sv:171]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/admin/Desktop/GPNAE/src/gpnae.sv:159]
+INFO: [Synth 8-226] default block is never used [/home/admin/Desktop/GPNAE/src/gpnae.sv:226]
+INFO: [Synth 8-6155] done synthesizing module 'gpnae' (0#1) [/home/admin/Desktop/GPNAE/src/gpnae.sv:4]
+WARNING: [Synth 8-6014] Unused sequential element valid_stage_reg[25] was removed.  [/home/admin/Desktop/GPNAE/src/Divider/Divider_FP32.sv:163]
+---------------------------------------------------------------------------------
+Finished RTL Elaboration : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2218.102 ; gain = 531.680 ; free physical = 317 ; free virtual = 10452
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Handling Custom Attributes
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Handling Custom Attributes : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2232.945 ; gain = 546.523 ; free physical = 308 ; free virtual = 10441
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished RTL Optimization Phase 1 : Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 2232.945 ; gain = 546.523 ; free physical = 308 ; free virtual = 10441
+---------------------------------------------------------------------------------
+Netlist sorting complete. Time (s): cpu = 00:00:00.04 ; elapsed = 00:00:00.04 . Memory (MB): peak = 2232.945 ; gain = 0.000 ; free physical = 298 ; free virtual = 10412
+INFO: [Project 1-570] Preparing netlist for logic optimization
+
+Processing XDC Constraints
+Initializing timing engine
+Parsing XDC File [/home/admin/Desktop/GPNAE/VIVADO/GPNAE/GPNAE.srcs/constrs_1/new/speed.xdc]
+Finished Parsing XDC File [/home/admin/Desktop/GPNAE/VIVADO/GPNAE/GPNAE.srcs/constrs_1/new/speed.xdc]
+Completed Processing XDC Constraints
+
+Netlist sorting complete. Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2355.684 ; gain = 0.000 ; free physical = 247 ; free virtual = 10382
+INFO: [Project 1-111] Unisim Transformation Summary:
+No Unisim elements were transformed.
+
+Constraint Validation Runtime : Time (s): cpu = 00:00:00.08 ; elapsed = 00:00:00.03 . Memory (MB): peak = 2355.719 ; gain = 0.000 ; free physical = 247 ; free virtual = 10381
+INFO: [Designutils 20-5440] No compile time benefit to using incremental synthesis; A full resynthesis will be run
+INFO: [Designutils 20-4379] Flow is switching to default flow due to incremental criteria not met. If you would like to alter this behaviour and have the flow terminate instead, please set the following parameter config_implementation {autoIncr.Synth.RejectBehavior Terminate}
+---------------------------------------------------------------------------------
+Finished Constraint Validation : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2355.719 ; gain = 669.297 ; free physical = 285 ; free virtual = 10418
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Loading Part and Timing Information
+---------------------------------------------------------------------------------
+Loading part: xc7z020clg400-1
+---------------------------------------------------------------------------------
+Finished Loading Part and Timing Information : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2363.688 ; gain = 677.266 ; free physical = 285 ; free virtual = 10416
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Applying 'set_property' XDC Constraints
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished applying 'set_property' XDC Constraints : Time (s): cpu = 00:00:11 ; elapsed = 00:00:11 . Memory (MB): peak = 2363.688 ; gain = 677.266 ; free physical = 285 ; free virtual = 10417
+---------------------------------------------------------------------------------
+WARNING: [Synth 8-3936] Found unconnected internal register 'final_sum_reg' and it is trimmed from '4' to '2' bits. [/home/admin/Desktop/GPNAE/src/TyMAC/Multiplier_FP32.sv:126]
+INFO: [Synth 8-802] inferred FSM for state register 'current_state_reg' in module 'controller'
+WARNING: [Synth 8-3936] Found unconnected internal register 'final_diff_reg' and it is trimmed from '5' to '2' bits. [/home/admin/Desktop/GPNAE/src/Divider/Divider_FP32.sv:139]
+INFO: [Synth 8-802] inferred FSM for state register 'current_state_reg' in module 'gpnae'
+---------------------------------------------------------------------------------------------------
+                   State |                     New Encoding |                Previous Encoding 
+---------------------------------------------------------------------------------------------------
+                    IDLE |                       0000000001 |                             0000
+          RESET_DATAPATH |                       0000000010 |                             0001
+             LOAD_SIGNAL |                       0000000100 |                             0010
+              LOAD_COEFF |                       0000001000 |                             0011
+                MULTIPLY |                       0000010000 |                             0100
+                WAIT_MUL |                       0000100000 |                             0101
+                     ADD |                       0001000000 |                             0110
+                WAIT_ADD |                       0010000000 |                             0111
+             CHECK_TERMS |                       0100000000 |                             1000
+            STORE_RESULT |                       1000000000 |                             1001
+---------------------------------------------------------------------------------------------------
+INFO: [Synth 8-3354] encoded FSM with state register 'current_state_reg' using encoding 'one-hot' in module 'controller'
+---------------------------------------------------------------------------------------------------
+                   State |                     New Encoding |                Previous Encoding 
+---------------------------------------------------------------------------------------------------
+                    IDLE |                         00000001 |                              000
+               WAIT_LAST |                         00000010 |                              001
+                      OP |                         00000100 |                              010
+              SELU_CHECK |                         00001000 |                              011
+                SELU_POS |                         00010000 |                              100
+                SELU_NEG |                         00100000 |                              101
+                 SIGMOID |                         01000000 |                              110
+                    TANH |                         10000000 |                              111
+---------------------------------------------------------------------------------------------------
+INFO: [Synth 8-3354] encoded FSM with state register 'current_state_reg' using encoding 'one-hot' in module 'gpnae'
+---------------------------------------------------------------------------------
+Finished RTL Optimization Phase 2 : Time (s): cpu = 00:00:11 ; elapsed = 00:00:12 . Memory (MB): peak = 2363.688 ; gain = 677.266 ; free physical = 299 ; free virtual = 10433
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start RTL Component Statistics 
+---------------------------------------------------------------------------------
+Detailed RTL Component Info : 
++---Adders : 
+	   2 Input   48 Bit       Adders := 4     
+	   2 Input   32 Bit       Adders := 1     
+	   2 Input   26 Bit       Adders := 6     
+	   4 Input   26 Bit       Adders := 2     
+	   3 Input   26 Bit       Adders := 2     
+	   2 Input   25 Bit       Adders := 4     
+	   3 Input   25 Bit       Adders := 6     
+	   2 Input   24 Bit       Adders := 12    
+	   4 Input   24 Bit       Adders := 4     
+	   3 Input   24 Bit       Adders := 1     
+	   2 Input   13 Bit       Adders := 4     
+	   3 Input    8 Bit       Adders := 4     
+	   2 Input    8 Bit       Adders := 10    
+	   2 Input    6 Bit       Adders := 1     
+	   2 Input    5 Bit       Adders := 6     
+	   3 Input    5 Bit       Adders := 1     
+	   2 Input    3 Bit       Adders := 2     
+	   3 Input    3 Bit       Adders := 5     
+	   4 Input    3 Bit       Adders := 2     
+	   3 Input    2 Bit       Adders := 2     
+	   4 Input    2 Bit       Adders := 1     
++---XORs : 
+	   2 Input      8 Bit         XORs := 4     
+	   2 Input      1 Bit         XORs := 7     
++---Registers : 
+	               48 Bit    Registers := 18    
+	               32 Bit    Registers := 12    
+	               26 Bit    Registers := 28    
+	               25 Bit    Registers := 3     
+	               24 Bit    Registers := 80    
+	               23 Bit    Registers := 18    
+	               13 Bit    Registers := 8     
+	               12 Bit    Registers := 16    
+	                8 Bit    Registers := 82    
+	                6 Bit    Registers := 1     
+	                5 Bit    Registers := 2     
+	                3 Bit    Registers := 10    
+	                2 Bit    Registers := 3     
+	                1 Bit    Registers := 167   
++---RAMs : 
+	             1024 Bit	(32 X 32 bit)          RAMs := 1     
++---ROMs : 
+	                    ROMs := 1     
++---Muxes : 
+	   2 Input   32 Bit        Muxes := 9     
+	   7 Input   32 Bit        Muxes := 1     
+	   2 Input   30 Bit        Muxes := 1     
+	   2 Input   25 Bit        Muxes := 6     
+	   2 Input   24 Bit        Muxes := 9     
+	   2 Input   23 Bit        Muxes := 19    
+	  10 Input   10 Bit        Muxes := 1     
+	   2 Input   10 Bit        Muxes := 2     
+	   2 Input    8 Bit        Muxes := 24    
+	   8 Input    8 Bit        Muxes := 1     
+	   4 Input    8 Bit        Muxes := 1     
+	   2 Input    5 Bit        Muxes := 9     
+	  10 Input    5 Bit        Muxes := 1     
+	   2 Input    3 Bit        Muxes := 1     
+	   7 Input    3 Bit        Muxes := 1     
+	   2 Input    2 Bit        Muxes := 1     
+	   8 Input    2 Bit        Muxes := 1     
+	   2 Input    1 Bit        Muxes := 15    
+	  10 Input    1 Bit        Muxes := 4     
+	   3 Input    1 Bit        Muxes := 1     
+	   8 Input    1 Bit        Muxes := 2     
+	   7 Input    1 Bit        Muxes := 5     
+---------------------------------------------------------------------------------
+Finished RTL Component Statistics 
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Part Resource Summary
+---------------------------------------------------------------------------------
+Part Resources:
+DSPs: 220 (col length:60)
+BRAMs: 280 (col length: RAMB18 60 RAMB36 30)
+---------------------------------------------------------------------------------
+Finished Part Resource Summary
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Cross Boundary and Area Optimization
+---------------------------------------------------------------------------------
+WARNING: [Synth 8-7080] Parallel synthesis criteria is not met
+---------------------------------------------------------------------------------
+Finished Cross Boundary and Area Optimization : Time (s): cpu = 00:00:27 ; elapsed = 00:00:28 . Memory (MB): peak = 2413.711 ; gain = 727.289 ; free physical = 628 ; free virtual = 10263
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+
+ROM: Preliminary Mapping Report
++------------+-------------------------------+---------------+----------------+
+|Module Name | RTL Object                    | Depth x Width | Implemented As | 
++------------+-------------------------------+---------------+----------------+
+|mac         | coeff_rom_inst/ROM/data_o_reg | 32x32         | Block RAM      | 
++------------+-------------------------------+---------------+----------------+
+
+
+Block RAM: Preliminary Mapping Report (see note below)
++----------------+---------------+------------------------+---+---+------------------------+---+---+------------------+--------+--------+
+|Module Name     | RTL Object    | PORT A (Depth x Width) | W | R | PORT B (Depth x Width) | W | R | Ports driving FF | RAMB18 | RAMB36 | 
++----------------+---------------+------------------------+---+---+------------------------+---+---+------------------+--------+--------+
+|input_fifo_inst | FIFO/BRAM_reg | 32 x 32(READ_FIRST)    | W |   | 32 x 32(WRITE_FIRST)   |   | R | Port A and B     | 1      | 0      | 
++----------------+---------------+------------------------+---+---+------------------------+---+---+------------------+--------+--------+
+
+Note: The table above is a preliminary report that shows the Block RAMs at the current stage of the synthesis flow. Some Block RAMs may be reimplemented as non Block RAM primitives later in the synthesis flow. Multiple instantiated Block RAMs are reported only once. 
+---------------------------------------------------------------------------------
+Finished ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Applying XDC Timing Constraints
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Applying XDC Timing Constraints : Time (s): cpu = 00:00:31 ; elapsed = 00:00:32 . Memory (MB): peak = 2430.711 ; gain = 744.289 ; free physical = 606 ; free virtual = 10241
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Timing Optimization
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Timing Optimization : Time (s): cpu = 00:00:33 ; elapsed = 00:00:34 . Memory (MB): peak = 2456.742 ; gain = 770.320 ; free physical = 590 ; free virtual = 10225
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+
+Block RAM: Final Mapping Report
++----------------+---------------+------------------------+---+---+------------------------+---+---+------------------+--------+--------+
+|Module Name     | RTL Object    | PORT A (Depth x Width) | W | R | PORT B (Depth x Width) | W | R | Ports driving FF | RAMB18 | RAMB36 | 
++----------------+---------------+------------------------+---+---+------------------------+---+---+------------------+--------+--------+
+|input_fifo_inst | FIFO/BRAM_reg | 32 x 32(READ_FIRST)    | W |   | 32 x 32(WRITE_FIRST)   |   | R | Port A and B     | 1      | 0      | 
++----------------+---------------+------------------------+---+---+------------------------+---+---+------------------+--------+--------+
+
+---------------------------------------------------------------------------------
+Finished ROM, RAM, DSP, Shift Register and Retiming Reporting
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Technology Mapping
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Technology Mapping : Time (s): cpu = 00:00:35 ; elapsed = 00:00:36 . Memory (MB): peak = 2480.766 ; gain = 794.344 ; free physical = 627 ; free virtual = 10232
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Flattening Before IO Insertion
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Final Netlist Cleanup
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished IO Insertion : Time (s): cpu = 00:00:38 ; elapsed = 00:00:39 . Memory (MB): peak = 2614.578 ; gain = 928.156 ; free physical = 430 ; free virtual = 10067
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Instances
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Instances : Time (s): cpu = 00:00:38 ; elapsed = 00:00:39 . Memory (MB): peak = 2614.578 ; gain = 928.156 ; free physical = 430 ; free virtual = 10067
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Rebuilding User Hierarchy
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Rebuilding User Hierarchy : Time (s): cpu = 00:00:38 ; elapsed = 00:00:39 . Memory (MB): peak = 2614.578 ; gain = 928.156 ; free physical = 431 ; free virtual = 10068
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Ports
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Ports : Time (s): cpu = 00:00:38 ; elapsed = 00:00:39 . Memory (MB): peak = 2614.578 ; gain = 928.156 ; free physical = 431 ; free virtual = 10067
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Handling Custom Attributes
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Handling Custom Attributes : Time (s): cpu = 00:00:38 ; elapsed = 00:00:40 . Memory (MB): peak = 2618.547 ; gain = 932.125 ; free physical = 423 ; free virtual = 10059
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Renaming Generated Nets
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Finished Renaming Generated Nets : Time (s): cpu = 00:00:38 ; elapsed = 00:00:40 . Memory (MB): peak = 2618.547 ; gain = 932.125 ; free physical = 419 ; free virtual = 10055
+---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
+Start Writing Synthesis Report
+---------------------------------------------------------------------------------
+
+Report BlackBoxes: 
++-+--------------+----------+
+| |BlackBox name |Instances |
++-+--------------+----------+
++-+--------------+----------+
+
+Report Cell Usage: 
++------+---------+------+
+|      |Cell     |Count |
++------+---------+------+
+|1     |BUFG     |     5|
+|2     |CARRY4   |   340|
+|3     |LUT1     |   154|
+|4     |LUT2     |  1021|
+|5     |LUT3     |   628|
+|6     |LUT4     |   628|
+|7     |LUT5     |   577|
+|8     |LUT6     |   928|
+|9     |RAMB18E1 |     2|
+|11    |FDCE     |  2612|
+|12    |FDPE     |     2|
+|13    |FDRE     |  1779|
+|14    |IBUF     |    43|
+|15    |OBUF     |    36|
++------+---------+------+
+---------------------------------------------------------------------------------
+Finished Writing Synthesis Report : Time (s): cpu = 00:00:38 ; elapsed = 00:00:40 . Memory (MB): peak = 2618.547 ; gain = 932.125 ; free physical = 419 ; free virtual = 10055
+---------------------------------------------------------------------------------
+Synthesis finished with 0 errors, 0 critical warnings and 3 warnings.
+Synthesis Optimization Runtime : Time (s): cpu = 00:00:36 ; elapsed = 00:00:38 . Memory (MB): peak = 2618.547 ; gain = 809.352 ; free physical = 419 ; free virtual = 10055
+Synthesis Optimization Complete : Time (s): cpu = 00:00:38 ; elapsed = 00:00:40 . Memory (MB): peak = 2618.555 ; gain = 932.125 ; free physical = 419 ; free virtual = 10055
+INFO: [Project 1-571] Translating synthesized netlist
+Netlist sorting complete. Time (s): cpu = 00:00:00.04 ; elapsed = 00:00:00.05 . Memory (MB): peak = 2618.555 ; gain = 0.000 ; free physical = 560 ; free virtual = 10197
+INFO: [Netlist 29-17] Analyzing 342 Unisim elements for replacement
+INFO: [Netlist 29-28] Unisim Transformation completed in 0 CPU seconds
+INFO: [Project 1-570] Preparing netlist for logic optimization
+INFO: [Opt 31-138] Pushed 0 inverter(s) to 0 load pin(s).
+Netlist sorting complete. Time (s): cpu = 00:00:00.01 ; elapsed = 00:00:00 . Memory (MB): peak = 2618.555 ; gain = 0.000 ; free physical = 536 ; free virtual = 10172
+INFO: [Project 1-111] Unisim Transformation Summary:
+No Unisim elements were transformed.
+
+Synth Design complete | Checksum: 2c4b732b
+INFO: [Common 17-83] Releasing license: Synthesis
+72 Infos, 4 Warnings, 0 Critical Warnings and 0 Errors encountered.
+synth_design completed successfully
+synth_design: Time (s): cpu = 00:00:46 ; elapsed = 00:00:45 . Memory (MB): peak = 2618.582 ; gain = 1030.871 ; free physical = 555 ; free virtual = 10191
+INFO: [Common 17-2834] synth_design peak Physical Memory [PSS] (MB): overall = 1836.096; main = 1819.870; forked = 276.289
+INFO: [Common 17-2834] synth_design peak Virtual Memory [VSS] (MB): overall = 3370.391; main = 2618.551; forked = 956.676
+Write ShapeDB Complete: Time (s): cpu = 00:00:00.02 ; elapsed = 00:00:00 . Memory (MB): peak = 2642.559 ; gain = 0.000 ; free physical = 556 ; free virtual = 10192
+INFO: [Common 17-1381] The checkpoint '/home/admin/Desktop/GPNAE/VIVADO/GPNAE/GPNAE.runs/synth_2/gpnae.dcp' has been generated.
+INFO: [Vivado 12-24828] Executing command : report_utilization -file gpnae_utilization_synth.rpt -pb gpnae_utilization_synth.pb
+INFO: [Common 17-206] Exiting Vivado at Fri Jun 27 00:57:19 2025...
