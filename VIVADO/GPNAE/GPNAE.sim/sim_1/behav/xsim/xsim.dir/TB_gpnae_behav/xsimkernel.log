@@ -1,4 +1,0 @@
-Running: xsim.dir/TB_gpnae_behav/xsimk -simmode gui -wdb TB_gpnae_behav.wdb -simrunnum 0 -socket 44379
-Design successfully loaded
-Design Loading Memory Usage: 197016 KB (Peak: 197024 KB)
-Design Loading CPU Usage: 850 ms
