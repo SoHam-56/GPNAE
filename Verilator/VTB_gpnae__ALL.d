@@ -1,7 +1,7 @@
 VTB_gpnae__ALL.o: VTB_gpnae__ALL.cpp VTB_gpnae.cpp VTB_gpnae__pch.h \
  /usr/share/verilator/include/verilated.h \
- /usr/share/verilator/include/verilatedos.h \
  /usr/share/verilator/include/verilated_config.h \
+ /usr/share/verilator/include/verilatedos.h \
  /usr/share/verilator/include/verilated_types.h \
  /usr/share/verilator/include/verilated_funcs.h VTB_gpnae__Syms.h \
  /usr/share/verilator/include/verilated_vcd_c.h \
@@ -18,5 +18,6 @@ VTB_gpnae__ALL.o: VTB_gpnae__ALL.cpp VTB_gpnae.cpp VTB_gpnae__pch.h \
  VTB_gpnae___024root__DepSet_h73ffe91b__0__Slow.cpp \
  VTB_gpnae___024root__DepSet_hd45dcbed__0__Slow.cpp \
  VTB_gpnae_multiply_32__Slow.cpp \
+ VTB_gpnae_multiply_32__DepSet_h9c539aec__0__Slow.cpp \
  VTB_gpnae_multiply_32__DepSet_h2af1d838__0__Slow.cpp VTB_gpnae__Syms.cpp \
  VTB_gpnae__Trace__0__Slow.cpp VTB_gpnae__TraceDecls__0__Slow.cpp

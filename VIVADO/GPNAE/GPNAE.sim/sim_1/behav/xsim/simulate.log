@@ -1,6 +1,6 @@
 Time resolution is 1 ps
 
-Starting SELU test
+Starting SELU test with Terms = 14
 Time=5000: State changed to IDLE
 Time=5000: Reset phase completed
 Time=25000: State changed to SELU
@@ -36,277 +36,75 @@ Signal 28: Took 4 cycles to write
 Time=1215000: All signals loaded
 Signal 29: Took 4 cycles to write
 Buffer writing completed in 120 cycles
-Time=9025000: Processed=1, Done_o=1, Took 780 cycles since last done
-Time=9025000: Processing complete, Final result = bfd4bc13
-Time=16495000: Processed=2, Done_o=1, Took 747 cycles since last done
-Time=16495000: Processing complete, Final result = bfd423e6
-Time=23965000: Processed=3, Done_o=1, Took 747 cycles since last done
-Time=23965000: Processing complete, Final result = bfd34d3d
-Time=31435000: Processed=4, Done_o=1, Took 747 cycles since last done
-Time=31435000: Processing complete, Final result = bfd21e09
-Time=38905000: Processed=5, Done_o=1, Took 747 cycles since last done
-Time=38905000: Processing complete, Final result = bfd07204
-Time=46375000: Processed=6, Done_o=1, Took 747 cycles since last done
-Time=46375000: Processing complete, Final result = bfce15cc
-Time=53845000: Processed=7, Done_o=1, Took 747 cycles since last done
-Time=53845000: Processing complete, Final result = bfcac0c9
-Time=61315000: Processed=8, Done_o=1, Took 747 cycles since last done
-Time=61315000: Processing complete, Final result = bfc60c87
-Time=68785000: Processed=9, Done_o=1, Took 747 cycles since last done
-Time=68785000: Processing complete, Final result = bfbf687a
-Time=76255000: Processed=10, Done_o=1, Took 747 cycles since last done
-Time=76255000: Processing complete, Final result = bfb60864
-Time=83725000: Processed=11, Done_o=1, Took 747 cycles since last done
-Time=83725000: Processing complete, Final result = bfa8cc16
-Time=91195000: Processed=12, Done_o=1, Took 747 cycles since last done
-Time=91195000: Processing complete, Final result = bf961cac
-Time=98665000: Processed=13, Done_o=1, Took 747 cycles since last done
-Time=98665000: Processing complete, Final result = bf77775d
-Time=106135000: Processed=14, Done_o=1, Took 747 cycles since last done
-Time=106135000: Processing complete, Final result = bf2cfc5c
-Time=113605000: Processed=15, Done_o=1, Took 747 cycles since last done
-Time=113605000: Processing complete, Final result = be87ad2d
-Time=121015000: Processed=16, Done_o=1, Took 741 cycles since last done
-Time=121015000: Processing complete, Final result = 3e3980c8
-Time=121225000: Processed=17, Done_o=1, Took 21 cycles since last done
-Time=121225000: Processing complete, Final result = 3e3980c8
-Time=121275000: Processed=18, Done_o=1, Took 5 cycles since last done
-Time=121275000: Processing complete, Final result = 3e3980c8
-Time=121325000: Processed=19, Done_o=1, Took 5 cycles since last done
-Time=121325000: Processing complete, Final result = 3e3980c8
-Time=121375000: Processed=20, Done_o=1, Took 5 cycles since last done
-Time=121375000: Processing complete, Final result = 3e3980c8
-Time=121425000: Processed=21, Done_o=1, Took 5 cycles since last done
-Time=121425000: Processing complete, Final result = 3f0b2097
-Time=121475000: Processed=22, Done_o=1, Took 5 cycles since last done
-Time=121475000: Processing complete, Final result = 3f67e0fb
-Time=121525000: Processed=23, Done_o=1, Took 5 cycles since last done
-Time=121525000: Processing complete, Final result = 3fa250b1
-Time=121575000: Processed=24, Done_o=1, Took 5 cycles since last done
-Time=121575000: Processing complete, Final result = 3fd0b0e2
-Time=121625000: Processed=25, Done_o=1, Took 5 cycles since last done
-Time=121625000: Processing complete, Final result = 3fff1115
-Time=121675000: Processed=26, Done_o=1, Took 5 cycles since last done
-Time=121675000: Processing complete, Final result = 4016b8a4
-Time=121725000: Processed=27, Done_o=1, Took 5 cycles since last done
-Time=121725000: Processing complete, Final result = 402de8bc
-Time=121775000: Processed=28, Done_o=1, Took 5 cycles since last done
-Time=121775000: Processing complete, Final result = 404518d5
-Time=121825000: Processed=29, Done_o=1, Took 5 cycles since last done
-Time=121825000: Processing complete, Final result = 405c48ef
-Time=121875000: Processed=30, Done_o=1, Took 5 cycles since last done
+Time=5175000: Processing complete, Final result = bfd0f0a2
+Time=5175000: Processed=1, Done_o=1, Took 395 cycles since last done
+Time=8805000: Processing complete, Final result = bfd2d1bb
+Time=8805000: Processed=2, Done_o=1, Took 363 cycles since last done
+Time=12435000: Processing complete, Final result = bfd2e0be
+Time=12435000: Processed=3, Done_o=1, Took 363 cycles since last done
+Time=16065000: Processing complete, Final result = bfd1fe71
+Time=16065000: Processed=4, Done_o=1, Took 363 cycles since last done
+Time=19695000: Processing complete, Final result = bfd069ce
+Time=19695000: Processed=5, Done_o=1, Took 363 cycles since last done
+Time=23325000: Processing complete, Final result = bfce13ef
+Time=23325000: Processed=6, Done_o=1, Took 363 cycles since last done
+Time=26955000: Processing complete, Final result = bfcac06b
+Time=26955000: Processed=7, Done_o=1, Took 363 cycles since last done
+Time=30585000: Processing complete, Final result = bfc60c82
+Time=30585000: Processed=8, Done_o=1, Took 363 cycles since last done
+Time=34215000: Processing complete, Final result = bfbf6877
+Time=34215000: Processed=9, Done_o=1, Took 363 cycles since last done
+Time=37845000: Processing complete, Final result = bfb60864
+Time=37845000: Processed=10, Done_o=1, Took 363 cycles since last done
+Time=41475000: Processing complete, Final result = bfa8cc16
+Time=41475000: Processed=11, Done_o=1, Took 363 cycles since last done
+Time=45105000: Processing complete, Final result = bf961cac
+Time=45105000: Processed=12, Done_o=1, Took 363 cycles since last done
+Time=48735000: Processing complete, Final result = bf77775d
+Time=48735000: Processed=13, Done_o=1, Took 363 cycles since last done
+Time=52365000: Processing complete, Final result = bf2cfc5c
+Time=52365000: Processed=14, Done_o=1, Took 363 cycles since last done
+Time=55995000: Processing complete, Final result = be87ad2d
+Time=55995000: Processed=15, Done_o=1, Took 363 cycles since last done
+Time=59565000: Processing complete, Final result = 3e3980c8
+Time=59565000: Processed=16, Done_o=1, Took 357 cycles since last done
+Time=59775000: Processing complete, Final result = 3e3980c8
+Time=59775000: Processed=17, Done_o=1, Took 21 cycles since last done
+Time=59985000: Processing complete, Final result = 3f0b2097
+Time=59985000: Processed=18, Done_o=1, Took 21 cycles since last done
+Time=60195000: Processing complete, Final result = 3f67e0fb
+Time=60195000: Processed=19, Done_o=1, Took 21 cycles since last done
+Time=60405000: Processing complete, Final result = 3fa250b1
+Time=60405000: Processed=20, Done_o=1, Took 21 cycles since last done
+Time=60615000: Processing complete, Final result = 3fd0b0e2
+Time=60615000: Processed=21, Done_o=1, Took 21 cycles since last done
+Time=60825000: Processing complete, Final result = 3fff1115
+Time=60825000: Processed=22, Done_o=1, Took 21 cycles since last done
+Time=61035000: Processing complete, Final result = 4016b8a4
+Time=61035000: Processed=23, Done_o=1, Took 21 cycles since last done
+Time=61245000: Processing complete, Final result = 402de8bc
+Time=61245000: Processed=24, Done_o=1, Took 21 cycles since last done
+Time=61455000: Processing complete, Final result = 404518d5
+Time=61455000: Processed=25, Done_o=1, Took 21 cycles since last done
+Time=61665000: Processing complete, Final result = 405c48ef
+Time=61665000: Processed=26, Done_o=1, Took 21 cycles since last done
+Time=61875000: Processing complete, Final result = 40737908
+Time=61875000: Processed=27, Done_o=1, Took 21 cycles since last done
+Time=62085000: Processing complete, Final result = 40855491
+Time=62085000: Processed=28, Done_o=1, Took 21 cycles since last done
+Time=62295000: Processing complete, Final result = 4090ec9e
+Time=62295000: Processed=29, Done_o=1, Took 21 cycles since last done
+Time=62505000: Processing complete, Final result = 409c84ab
+Time=62505000: Processed=30, Done_o=1, Took 21 cycles since last done
 SELU test completed
 Buffer write time: 120 cycles
-Processing time (without buffer write): 12065 cycles
-Total operation time (with buffer write): 12185 cycles
-Average cycles per input: 4 cycles
-
-Starting Sigmoid test
-Time=121875000: State changed to IDLE
-Time=121875000: Processing complete, Final result = 40737908
-Time=121885000: Test completed
-Time=121895000: Reset phase completed
-Time=121905000: State changed to Sigmoid
-Signal 0: Took 4 cycles to write
-Signal 1: Took 4 cycles to write
-Signal 2: Took 4 cycles to write
-Signal 3: Took 4 cycles to write
-Signal 4: Took 4 cycles to write
-Signal 5: Took 4 cycles to write
-Signal 6: Took 4 cycles to write
-Signal 7: Took 4 cycles to write
-Signal 8: Took 4 cycles to write
-Signal 9: Took 4 cycles to write
-Signal 10: Took 4 cycles to write
-Signal 11: Took 4 cycles to write
-Signal 12: Took 4 cycles to write
-Signal 13: Took 4 cycles to write
-Signal 14: Took 4 cycles to write
-Signal 15: Took 4 cycles to write
-Signal 16: Took 4 cycles to write
-Signal 17: Took 4 cycles to write
-Signal 18: Took 4 cycles to write
-Signal 19: Took 4 cycles to write
-Signal 20: Took 4 cycles to write
-Signal 21: Took 4 cycles to write
-Signal 22: Took 4 cycles to write
-Signal 23: Took 4 cycles to write
-Signal 24: Took 4 cycles to write
-Signal 25: Took 4 cycles to write
-Signal 26: Took 4 cycles to write
-Signal 27: Took 4 cycles to write
-Signal 28: Took 4 cycles to write
-Time=123095000: All signals loaded
-Signal 29: Took 4 cycles to write
-Buffer writing completed in 120 cycles
-Time=131235000: Processed=1, Done_o=1, Took 813 cycles since last done
-Time=131235000: Processing complete, Final result = xxxxxxxx
-Time=138705000: Processed=2, Done_o=1, Took 747 cycles since last done
-Time=138705000: Processing complete, Final result = 3bdb4bc2
-Time=146175000: Processed=3, Done_o=1, Took 747 cycles since last done
-Time=146175000: Processing complete, Final result = 3c1a6403
-Time=153645000: Processed=4, Done_o=1, Took 747 cycles since last done
-Time=153645000: Processing complete, Final result = 3c5916be
-Time=161115000: Processed=5, Done_o=1, Took 747 cycles since last done
-Time=161115000: Processing complete, Final result = 3c9869ce
-Time=168585000: Processed=6, Done_o=1, Took 747 cycles since last done
-Time=168585000: Processing complete, Final result = 3cd589a9
-Time=176055000: Processed=7, Done_o=1, Took 747 cycles since last done
-Time=176055000: Processing complete, Final result = 3d152121
-Time=183525000: Processed=8, Done_o=1, Took 747 cycles since last done
-Time=183525000: Processing complete, Final result = 3d4f6c68
-Time=190995000: Processed=9, Done_o=1, Took 747 cycles since last done
-Time=190995000: Processing complete, Final result = 3d8f6cc6
-Time=198465000: Processed=10, Done_o=1, Took 747 cycles since last done
-Time=198465000: Processing complete, Final result = 3dc4cdb7
-Time=205935000: Processed=11, Done_o=1, Took 747 cycles since last done
-Time=205935000: Processing complete, Final result = 3e05a195
-Time=213405000: Processed=12, Done_o=1, Took 747 cycles since last done
-Time=213405000: Processing complete, Final result = 3e330892
-Time=220875000: Processed=13, Done_o=1, Took 747 cycles since last done
-Time=220875000: Processing complete, Final result = 3e6bc6cc
-Time=228345000: Processed=14, Done_o=1, Took 747 cycles since last done
-Time=228345000: Processing complete, Final result = 3e98043a
-Time=235815000: Processed=15, Done_o=1, Took 747 cycles since last done
-Time=235815000: Processing complete, Final result = 3ebf3b10
-Time=243285000: Processed=16, Done_o=1, Took 747 cycles since last done
-Time=243285000: Processing complete, Final result = 3ee9fc4c
-Time=250755000: Processed=17, Done_o=1, Took 747 cycles since last done
-Time=250755000: Processing complete, Final result = 3f0b01da
-Time=258225000: Processed=18, Done_o=1, Took 747 cycles since last done
-Time=258225000: Processing complete, Final result = 3f206277
-Time=265695000: Processed=19, Done_o=1, Took 747 cycles since last done
-Time=265695000: Processing complete, Final result = 3f33fde2
-Time=273165000: Processed=20, Done_o=1, Took 747 cycles since last done
-Time=273165000: Processing complete, Final result = 3f450e4c
-Time=280635000: Processed=21, Done_o=1, Took 747 cycles since last done
-Time=280635000: Processing complete, Final result = 3f533dda
-Time=288105000: Processed=22, Done_o=1, Took 747 cycles since last done
-Time=288105000: Processing complete, Final result = 3f5e9798
-Time=295575000: Processed=23, Done_o=1, Took 747 cycles since last done
-Time=295575000: Processing complete, Final result = 3f676646
-Time=303045000: Processed=24, Done_o=1, Took 747 cycles since last done
-Time=303045000: Processing complete, Final result = 3f6e126a
-Time=310515000: Processed=25, Done_o=1, Took 747 cycles since last done
-Time=310515000: Processing complete, Final result = 3f730938
-Time=317985000: Processed=26, Done_o=1, Took 747 cycles since last done
-Time=317985000: Processing complete, Final result = 3f76adec
-Time=325455000: Processed=27, Done_o=1, Took 747 cycles since last done
-Time=325455000: Processing complete, Final result = 3f7953b2
-Time=332925000: Processed=28, Done_o=1, Took 747 cycles since last done
-Time=332925000: Processing complete, Final result = 3f7b3caa
-Time=340395000: Processed=29, Done_o=1, Took 747 cycles since last done
-Time=340395000: Processing complete, Final result = 3f7c9b94
-Time=347865000: Processed=30, Done_o=1, Took 747 cycles since last done
-Sigmoid test completed
-Buffer write time: 120 cycles
-Processing time (without buffer write): 22476 cycles
-Total operation time (with buffer write): 22596 cycles
-Average cycles per input: 4 cycles
-
-Starting Tanh test
-Time=347865000: State changed to IDLE
-Time=347865000: Processing complete, Final result = 3f7d967a
-Time=347895000: State changed to Tanh
-Signal 0: Took 4 cycles to write
-Signal 1: Took 4 cycles to write
-Signal 2: Took 4 cycles to write
-Signal 3: Took 4 cycles to write
-Signal 4: Took 4 cycles to write
-Signal 5: Took 4 cycles to write
-Signal 6: Took 4 cycles to write
-Signal 7: Took 4 cycles to write
-Signal 8: Took 4 cycles to write
-Signal 9: Took 4 cycles to write
-Signal 10: Took 4 cycles to write
-Signal 11: Took 4 cycles to write
-Signal 12: Took 4 cycles to write
-Signal 13: Took 4 cycles to write
-Signal 14: Took 4 cycles to write
-Signal 15: Took 4 cycles to write
-Signal 16: Took 4 cycles to write
-Signal 17: Took 4 cycles to write
-Signal 18: Took 4 cycles to write
-Signal 19: Took 4 cycles to write
-Signal 20: Took 4 cycles to write
-Signal 21: Took 4 cycles to write
-Signal 22: Took 4 cycles to write
-Signal 23: Took 4 cycles to write
-Signal 24: Took 4 cycles to write
-Signal 25: Took 4 cycles to write
-Signal 26: Took 4 cycles to write
-Signal 27: Took 4 cycles to write
-Signal 28: Took 4 cycles to write
-Signal 29: Took 4 cycles to write
-Buffer writing completed in 120 cycles
-Time=357225000: Processed=1, Done_o=1, Took 813 cycles since last done
-Time=357225000: Processing complete, Final result = 3f7e4960
-Time=364695000: Processed=2, Done_o=1, Took 747 cycles since last done
-Time=364695000: Processing complete, Final result = bf7faccd
-Time=372165000: Processed=3, Done_o=1, Took 747 cycles since last done
-Time=372165000: Processing complete, Final result = bf8000d4
-Time=379635000: Processed=4, Done_o=1, Took 747 cycles since last done
-Time=379635000: Processing complete, Final result = bf7ff864
-Time=387105000: Processed=5, Done_o=1, Took 747 cycles since last done
-Time=387105000: Processing complete, Final result = bf7fd403
-Time=394575000: Processed=6, Done_o=1, Took 747 cycles since last done
-Time=394575000: Processing complete, Final result = bf7fa330
-Time=402045000: Processed=7, Done_o=1, Took 747 cycles since last done
-Time=402045000: Processing complete, Final result = bf7f4593
-Time=409515000: Processed=8, Done_o=1, Took 747 cycles since last done
-Time=409515000: Processing complete, Final result = bf7e8c2e
-Time=416985000: Processed=9, Done_o=1, Took 747 cycles since last done
-Time=416985000: Processing complete, Final result = bf7d1d00
-Time=424455000: Processed=10, Done_o=1, Took 747 cycles since last done
-Time=424455000: Processing complete, Final result = bf7a4726
-Time=431925000: Processed=11, Done_o=1, Took 747 cycles since last done
-Time=431925000: Processing complete, Final result = bf74b883
-Time=439395000: Processed=12, Done_o=1, Took 747 cycles since last done
-Time=439395000: Processing complete, Final result = bf6a006f
-Time=446865000: Processed=13, Done_o=1, Took 747 cycles since last done
-Time=446865000: Processing complete, Final result = bf55f378
-Time=454335000: Processed=14, Done_o=1, Took 747 cycles since last done
-Time=454335000: Processing complete, Final result = bf3283b6
-Time=461805000: Processed=15, Done_o=1, Took 747 cycles since last done
-Time=461805000: Processing complete, Final result = bef37da6
-Time=469275000: Processed=16, Done_o=1, Took 747 cycles since last done
-Time=469275000: Processing complete, Final result = be2ed2a2
-Time=476745000: Processed=17, Done_o=1, Took 747 cycles since last done
-Time=476745000: Processing complete, Final result = 3e2ed2a4
-Time=484215000: Processed=18, Done_o=1, Took 747 cycles since last done
-Time=484215000: Processing complete, Final result = 3ef37da8
-Time=491685000: Processed=19, Done_o=1, Took 747 cycles since last done
-Time=491685000: Processing complete, Final result = 3f3283b2
-Time=499155000: Processed=20, Done_o=1, Took 747 cycles since last done
-Time=499155000: Processing complete, Final result = 3f55f374
-Time=506625000: Processed=21, Done_o=1, Took 747 cycles since last done
-Time=506625000: Processing complete, Final result = 3f6a0074
-Time=514095000: Processed=22, Done_o=1, Took 747 cycles since last done
-Time=514095000: Processing complete, Final result = 3f74b890
-Time=521565000: Processed=23, Done_o=1, Took 747 cycles since last done
-Time=521565000: Processing complete, Final result = 3f7a4726
-Time=529035000: Processed=24, Done_o=1, Took 747 cycles since last done
-Time=529035000: Processing complete, Final result = 3f7d1ce6
-Time=536505000: Processed=25, Done_o=1, Took 747 cycles since last done
-Time=536505000: Processing complete, Final result = 3f7e8c1c
-Time=543975000: Processed=26, Done_o=1, Took 747 cycles since last done
-Time=543975000: Processing complete, Final result = 3f7f4524
-Time=551445000: Processed=27, Done_o=1, Took 747 cycles since last done
-Time=551445000: Processing complete, Final result = 3f7fa22c
-Time=558915000: Processed=28, Done_o=1, Took 747 cycles since last done
-Time=558915000: Processing complete, Final result = 3f7fd0e8
-Time=566385000: Processed=29, Done_o=1, Took 747 cycles since last done
-Time=566385000: Processing complete, Final result = 3f7fe85e
-Time=573855000: Processed=30, Done_o=1, Took 747 cycles since last done
-Tanh test completed
-Buffer write time: 120 cycles
-Processing time (without buffer write): 22476 cycles
-Total operation time (with buffer write): 22596 cycles
+Processing time (without buffer write): 6128 cycles
+Total operation time (with buffer write): 6248 cycles
 Average cycles per input: 4 cycles
 
 Test Summary:
 Total signals processed: 30
-Total clock cycles: 22597
-Time=573855000: Test completed
-Time=573865000: Reset phase completed
-$finish called at time : 573955 ns : File "/home/admin/Desktop/GPNAE/testbenches/TB_gpnae.sv" Line 245
+Total clock cycles: 6249
+Time=62505000: Test completed
+Time=62515000: Reset phase completed
+$finish called at time : 62605 ns : File "/home/admin/Desktop/GPNAE/testbenches/TB_gpnae.sv" Line 297

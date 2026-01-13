@@ -25,41 +25,41 @@ VM_TRACE_VCD = 1
 ### Object file lists...
 # Generated module classes, fast-path, compile with highest optimization
 VM_CLASSES_FAST += \
-	VTB_gpnae \
-	VTB_gpnae___024root__DepSet_h73ffe91b__0 \
-	VTB_gpnae___024root__DepSet_hd45dcbed__0 \
-	VTB_gpnae_multiply_32__DepSet_h9c539aec__0 \
-	VTB_gpnae_multiply_32__DepSet_h2af1d838__0 \
-	VTB_gpnae__main \
+  VTB_gpnae \
+  VTB_gpnae___024root__DepSet_h73ffe91b__0 \
+  VTB_gpnae___024root__DepSet_hd45dcbed__0 \
+  VTB_gpnae_multiply_32__DepSet_h9c539aec__0 \
+  VTB_gpnae_multiply_32__DepSet_h2af1d838__0 \
+  VTB_gpnae__main \
 
 # Generated module classes, non-fast-path, compile with low/medium optimization
 VM_CLASSES_SLOW += \
-	VTB_gpnae__ConstPool_0 \
-	VTB_gpnae___024root__Slow \
-	VTB_gpnae___024root__DepSet_h73ffe91b__0__Slow \
-	VTB_gpnae___024root__DepSet_hd45dcbed__0__Slow \
-	VTB_gpnae_multiply_32__Slow \
-	VTB_gpnae_multiply_32__DepSet_h2af1d838__0__Slow \
+  VTB_gpnae__ConstPool_0 \
+  VTB_gpnae___024root__Slow \
+  VTB_gpnae___024root__DepSet_h73ffe91b__0__Slow \
+  VTB_gpnae___024root__DepSet_hd45dcbed__0__Slow \
+  VTB_gpnae_multiply_32__Slow \
+  VTB_gpnae_multiply_32__DepSet_h9c539aec__0__Slow \
+  VTB_gpnae_multiply_32__DepSet_h2af1d838__0__Slow \
 
 # Generated support classes, fast-path, compile with highest optimization
 VM_SUPPORT_FAST += \
-	VTB_gpnae__Trace__0 \
+  VTB_gpnae__Trace__0 \
 
 # Generated support classes, non-fast-path, compile with low/medium optimization
 VM_SUPPORT_SLOW += \
-	VTB_gpnae__Syms \
-	VTB_gpnae__Trace__0__Slow \
-	VTB_gpnae__TraceDecls__0__Slow \
+  VTB_gpnae__Syms \
+  VTB_gpnae__Trace__0__Slow \
+  VTB_gpnae__TraceDecls__0__Slow \
 
 # Global classes, need linked once per executable, fast-path, compile with highest optimization
 VM_GLOBAL_FAST += \
-	verilated \
-	verilated_vcd_c \
-	verilated_timing \
-	verilated_threads \
+  verilated \
+  verilated_vcd_c \
+  verilated_timing \
+  verilated_threads \
 
 # Global classes, need linked once per executable, non-fast-path, compile with low/medium optimization
 VM_GLOBAL_SLOW += \
-
 
 # Verilated -*- Makefile -*-

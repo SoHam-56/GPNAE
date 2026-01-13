@@ -14,9 +14,9 @@ PYTHON3 = python3
 # Path to Verilator kit (from $VERILATOR_ROOT)
 VERILATOR_ROOT = /usr/share/verilator
 # SystemC include directory with systemc.h (from $SYSTEMC_INCLUDE)
-SYSTEMC_INCLUDE ?= 
+SYSTEMC_INCLUDE ?=
 # SystemC library directory with libsystemc.a (from $SYSTEMC_LIBDIR)
-SYSTEMC_LIBDIR ?= 
+SYSTEMC_LIBDIR ?=
 
 ### Switches...
 # C++ code coverage  0/1 (from --prof-c)
@@ -37,7 +37,7 @@ VM_PREFIX = VTB_gpnae
 VM_MODPREFIX = VTB_gpnae
 # User CFLAGS (from -CFLAGS on Verilator command line)
 VM_USER_CFLAGS = \
-	-DVL_TIME_CONTEXT \
+  -DVL_TIME_CONTEXT \
 
 # User LDLIBS (from -LDFLAGS on Verilator command line)
 VM_USER_LDLIBS = \
@@ -47,8 +47,7 @@ VM_USER_CLASSES = \
 
 # User .cpp directories (from .cpp's on Verilator command line)
 VM_USER_DIR = \
-	.. \
-
+  .. \
 
 ### Default rules...
 # Include list of all generated classes
@@ -63,6 +62,5 @@ VPATH += $(VM_USER_DIR)
 ### Link rules... (from --exe)
 TB_gpnae_sim: $(VK_USER_OBJS) $(VK_GLOBAL_OBJS) $(VM_PREFIX)__ALL.a $(VM_HIER_LIBS)
 	$(LINK) $(LDFLAGS) $^ $(LOADLIBES) $(LDLIBS) $(LIBS) $(SC_LIBS) -o $@
-
 
 # Verilated -*- Makefile -*-

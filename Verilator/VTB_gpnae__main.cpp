@@ -17,7 +17,7 @@ int main(int argc, char** argv, char**) {
     const std::unique_ptr<VTB_gpnae> topp{new VTB_gpnae{contextp.get(), ""}};
 
     // Simulate until $finish
-    while (!contextp->gotFinish()) {
+    while (VL_LIKELY(!contextp->gotFinish())) {
         // Evaluate model
         topp->eval();
         // Advance time
@@ -25,7 +25,7 @@ int main(int argc, char** argv, char**) {
         contextp->time(topp->nextTimeSlot());
     }
 
-    if (!contextp->gotFinish()) {
+    if (VL_LIKELY(!contextp->gotFinish())) {
         VL_DEBUG_IF(VL_PRINTF("+ Exiting without $finish; no events left\n"););
     }
 

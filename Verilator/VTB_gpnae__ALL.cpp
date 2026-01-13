@@ -12,6 +12,7 @@
 #include "VTB_gpnae___024root__DepSet_h73ffe91b__0__Slow.cpp"
 #include "VTB_gpnae___024root__DepSet_hd45dcbed__0__Slow.cpp"
 #include "VTB_gpnae_multiply_32__Slow.cpp"
+#include "VTB_gpnae_multiply_32__DepSet_h9c539aec__0__Slow.cpp"
 #include "VTB_gpnae_multiply_32__DepSet_h2af1d838__0__Slow.cpp"
 #include "VTB_gpnae__Syms.cpp"
 #include "VTB_gpnae__Trace__0__Slow.cpp"
