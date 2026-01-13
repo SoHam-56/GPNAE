@@ -285,8 +285,8 @@ module TB_gpnae;
     num_sig = 30;
 
     perform_test(2'b01, "SELU", 14);
-    // perform_test(2'b10, "Sigmoid", 15);
-    // perform_test(2'b11, "Tanh", 30);
+    perform_test(2'b10, "Sigmoid", 15);
+    perform_test(2'b11, "Tanh", 30);
 
     // Display test summary
     $display("\nTest Summary:");
