@@ -101,7 +101,7 @@ def run_make() -> tuple:
     return r.stdout + r.stderr, time.time() - t0
 
 
-def parse_log(raw: str) -> dict:
+def parse_log(raw: str, expect_total: int = 0, expect_acts: int = 3) -> dict:
     """Pull the per-activation RESULT/CYCLES lines and the overall verdict."""
     per_act = {}
     for m in re.finditer(
@@ -125,8 +125,23 @@ def parse_log(raw: str) -> dict:
     if not per_act and ("%Error" in raw or "Error" in raw):
         return dict(status="BUILD-ERROR", per_act={}, failed=1)
     total_failed = sum(a["failed"] + a["missing"] for a in per_act.values())
+
+    # "Zero failures" only means something once the expected checks actually ran. A build that
+    # does not launch, or a testbench that silently checks a handful of elements, otherwise
+    # reads as a clean pass -- which has happened more than once in this repo.
+    short = []
+    if len(per_act) != expect_acts:
+        short.append(f"{len(per_act)} of {expect_acts} activations reported")
+    if expect_total:
+        for act, a in sorted(per_act.items()):
+            if a["total"] != expect_total:
+                short.append(f"{act} checked {a['total']} of {expect_total}")
+
+    if short:
+        return dict(status="NO-RESULTS", per_act=per_act, failed=max(1, total_failed),
+                    short=short)
     return dict(status="PASS" if (passed and total_failed == 0) else "FAIL",
-                per_act=per_act, failed=total_failed)
+                per_act=per_act, failed=total_failed, short=[])
 
 
 def print_activation(act: str, r: dict) -> None:
@@ -278,7 +293,7 @@ def main() -> None:
         with open(os.path.join(RESULTS_DIR, f"{t['name']}.log"), "w") as f:
             f.write(raw)
 
-        parsed = parse_log(raw)
+        parsed = parse_log(raw, expect_total=args.batches * args.per_batch)
         parsed["name"] = t["name"]
         parsed["wall"] = wall
         results.append(parsed)
@@ -288,6 +303,13 @@ def main() -> None:
             for line in raw.splitlines():
                 if "%Error" in line:
                     print(f"      {_D}{line.strip()}{_X}")
+            sys.exit(1)
+
+        if parsed["status"] == "NO-RESULTS":
+            print(err("      NO RESULTS — the run did not check what it should have"))
+            for line in parsed["short"]:
+                print(f"      {_D}{line}{_X}")
+            print(err("      Treating as failure. Check the simulator actually ran."))
             sys.exit(1)
 
         for act, a in parsed["per_act"].items():
