@@ -32,14 +32,11 @@ module InputFIFO #(
         if (~rstn_i)
             status <= 'b0;
         else begin
-            if (wr_en_i) begin
-                if(~status[wr_ptr])
-                    status[wr_ptr] <= ~status[wr_ptr];
-            end
-            else if (rd_en_i) begin
-                if (status[rd_ptr])
-                    status[rd_ptr] <= ~status[rd_ptr];
-            end
+            // Independent set/clear: wr_ptr and rd_ptr never alias, and "else if" dropped a pop coinciding with a push.
+            if (wr_en_i && ~status[wr_ptr])
+                status[wr_ptr] <= 1'b1;
+            if (rd_en_i && status[rd_ptr])
+                status[rd_ptr] <= 1'b0;
         end
     end
     
@@ -50,7 +47,7 @@ module InputFIFO #(
     assign idle_o = ~(wr_en_i | rd_en_i);
 
     // regceb held high so data_o tracks rd_ptr; gating it on rd_en_i made the first pop re-present the same word.
-         
+
     // PORT A --> Write
     // PORT B --> Read
     dual_port_ram #(
