@@ -181,11 +181,17 @@ module fp32_up_down (
         end else if (|TempMan1[22:0]) begin
           Mantissa1 <= TempMan1[22:0] << zerocount1;
           Exponent1 <= BigExp1 - {3'b0, zerocount1};
+        end else if (TempMan1 == 24'b0) begin
+          // Exact cancellation -> zero; leaving the exponent at BigExp1 made 1.0-1.0 return -1.0.
+          Mantissa1 <= 23'b0;
+          Exponent1 <= 8'b0;
         end else begin
+          // TempMan1 == 24'h800000: already normalised, exponent stands.
           Mantissa1 <= TempMan1[22:0];
           Exponent1 <= BigExp1;
         end
-        Sign1 <= sign1;
+        // IEEE 754: exact cancellation yields +0, not the operand sign.
+        Sign1 <= (!carry1 && TempMan1 == 24'b0) ? 1'b0 : sign1;
 
         if (carry2) begin
           Mantissa2 <= TempMan2[23:1];
@@ -193,11 +199,17 @@ module fp32_up_down (
         end else if (|TempMan2[22:0]) begin
           Mantissa2 <= TempMan2[22:0] << zerocount2;
           Exponent2 <= BigExp2 - {3'b0, zerocount2};
+        end else if (TempMan2 == 24'b0) begin
+          // Exact cancellation -> zero; leaving the exponent at BigExp2 made 1.0-1.0 return -1.0.
+          Mantissa2 <= 23'b0;
+          Exponent2 <= 8'b0;
         end else begin
+          // TempMan2 == 24'h800000: already normalised, exponent stands.
           Mantissa2 <= TempMan2[22:0];
           Exponent2 <= BigExp2;
         end
-        Sign2 <= sign2;
+        // IEEE 754: exact cancellation yields +0, not the operand sign.
+        Sign2 <= (!carry2 && TempMan2 == 24'b0) ? 1'b0 : sign2;
       end
     end
   end

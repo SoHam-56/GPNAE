@@ -153,11 +153,17 @@ module fp32_down (
         end else if (|TempMan[22:0]) begin
           Mantissa <= TempMan[22:0] << zerocount;
           Exponent <= BigExp - {3'b0, zerocount};
+        end else if (TempMan == 24'b0) begin
+          // Exact cancellation -> zero. See fp32_up_down.sv.
+          Mantissa <= 23'b0;
+          Exponent <= 8'b0;
         end else begin
+          // TempMan == 24'h800000: already normalised.
           Mantissa <= TempMan[22:0];
           Exponent <= BigExp;
         end
-        Sign <= sign;
+        // IEEE 754: exact cancellation yields +0, not the operand sign.
+        Sign <= (!carry && TempMan == 24'b0) ? 1'b0 : sign;
       end
     end
   end
