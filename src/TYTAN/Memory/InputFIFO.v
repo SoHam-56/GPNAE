@@ -48,6 +48,8 @@ module InputFIFO #(
     assign empty_o = (status == 'b0);
     
     assign idle_o = ~(wr_en_i | rd_en_i);
+
+    // regceb held high so data_o tracks rd_ptr; gating it on rd_en_i made the first pop re-present the same word.
          
     // PORT A --> Write
     // PORT B --> Read
@@ -66,7 +68,7 @@ module InputFIFO #(
         .enb(status[rd_ptr]),       // Port B RAM Enable, for additional power savings, disable port when not in use
 
         .rstnb(rstn_i),             // Port B output reset (does not affect memory contents)
-        .regceb(rd_en_i),             // Port B output register enable
+        .regceb(1'b1),              // Port B output register enable (see above)
 
         .doutb(data_o)              // Port B RAM output data, width determined from DATA_WIDTH
     );

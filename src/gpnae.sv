@@ -30,7 +30,6 @@ module gpnae #(
   assign mac_credit_clk = clk_i;
 
   logic [DATA_WIDTH-1:0] fifo_data_o;
-  logic [DATA_WIDTH-1:0] fifo_data_registered;
   logic [DATA_WIDTH-1:0] mac_result;
   logic [DATA_WIDTH-1:0] selu_result;
   logic [DATA_WIDTH-1:0] sigtan_result;
@@ -38,15 +37,17 @@ module gpnae #(
   // SeLu Constants/Mux Signals
   logic [DATA_WIDTH-1:0] selu_input, selu_const;
   localparam logic [DATA_WIDTH-1:0] LAMDA = 32'h3F867D5F;
-  localparam logic [DATA_WIDTH-1:0] LAMDA_ALPHA = 32'h3FD62D7D;
+  localparam logic [DATA_WIDTH-1:0] LAMDA_ALPHA = 32'h3FE10966;  // lambda*alpha
 
   logic rd_en_signal;
-  logic is_positive_selu;
   logic selu_valid, mac_valid;
   logic [1:0] select_sigtan;
   logic mac_rd_en;
   logic done_selu, done_mac, done_sigtan;
   logic update_result;
+
+  logic current_is_positive;
+  assign current_is_positive = ~fifo_data_o[DATA_WIDTH-1] || (fifo_data_o[DATA_WIDTH-2:0] == 'b0);
 
   gpnae_control_unit #(
       .CONTROL_WIDTH(CONTROL_WIDTH)
@@ -58,7 +59,8 @@ module gpnae #(
       .last_i        (last_i),
       .control_word_i(control_word_i),
 
-      .is_positive_selu_i(is_positive_selu),
+      .is_positive_selu_i(captured_is_positive),
+      .current_is_positive_i(current_is_positive),
       .mac_rd_en_i       (mac_rd_en),
       .done_selu_i       (done_selu),
       .done_mac_i        (done_mac),
@@ -73,25 +75,28 @@ module gpnae #(
       .select_sigtan_o(select_sigtan),
       .fifo_rd_en_o   (rd_en_signal),
       .update_result_o(update_result),
+      .capture_data_o (capture_data),
       .done_o         (done_o)
   );
 
+  logic [DATA_WIDTH-1:0] captured_signal;
+  logic captured_is_positive;
+  logic capture_data;
+
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (~rstn_i) begin
-      fifo_data_registered <= '0;
-      is_positive_selu <= 1'b0;
-    end else begin
-      if (rd_en_signal) begin
-        fifo_data_registered <= fifo_data_o;
-        is_positive_selu <= ~fifo_data_o[DATA_WIDTH-1] || (fifo_data_o[DATA_WIDTH-2:0] == 'b0);
-      end
+      captured_signal <= '0;
+      captured_is_positive <= 1'b0;
+    end else if (capture_data) begin
+      captured_signal <= fifo_data_o;
+      captured_is_positive <= ~fifo_data_o[DATA_WIDTH-1] || (fifo_data_o[DATA_WIDTH-2:0] == 'b0);
     end
   end
 
   // SeLu Input Muxing
   always_comb begin
-    if (is_positive_selu) begin
-      selu_input = fifo_data_registered;
+    if (captured_is_positive) begin
+      selu_input = captured_signal;
       selu_const = LAMDA;
     end else begin
       selu_input = mac_result;
@@ -127,12 +132,29 @@ module gpnae #(
       .clk_i(selu_clk),
       .rstn_i(rstn_i),
       .valid_i(selu_valid),
-      .is_positive_selu(is_positive_selu),
+      .is_positive_selu(captured_is_positive),
       .A(selu_input),
       .selu_const(selu_const),
       .Result(selu_result),
       .done_o(done_selu)
   );
+
+  // MAC reads the per-element snapshot: fifo_data_o moves on any pop, mid-recursion.
+  logic [DATA_WIDTH-1:0] mac_input;
+  always_comb begin
+    if (control_word_i == 2'b11) begin
+      // TANH requires input to be doubled (2x)
+      if (captured_signal[30:23] == 8'h00) begin
+        mac_input = {captured_signal[31], 31'b0};
+      end else if (captured_signal[30:23] == 8'hFF) begin
+        mac_input = captured_signal;
+      end else begin
+        mac_input = {captured_signal[31], captured_signal[30:23] + 8'd1, captured_signal[22:0]};
+      end
+    end else begin
+      mac_input = captured_signal;
+    end
+  end
 
   mac #(
       .DATA_WIDTH(DATA_WIDTH),
@@ -141,7 +163,7 @@ module gpnae #(
       .clk_i(mac_clk),
       .mac_credit_clk_i(mac_credit_clk),
       .rstn_i(rstn_i),
-      .signal_i(fifo_data_o),
+      .signal_i(mac_input),
       .fifo_wr_i(wr_en_i),
       .rd_signal_o(mac_rd_en),
       .start_i(mac_valid),
@@ -161,6 +183,7 @@ module gpnae #(
       .done_o(done_sigtan)
   );
 
+
 endmodule
 
 module gpnae_control_unit #(
@@ -174,6 +197,7 @@ module gpnae_control_unit #(
     input logic [CONTROL_WIDTH-1:0] control_word_i,
 
     input logic is_positive_selu_i,
+    input logic current_is_positive_i,
     input logic mac_rd_en_i,
     input logic done_selu_i,
     input logic done_mac_i,
@@ -188,6 +212,7 @@ module gpnae_control_unit #(
     output logic [1:0] select_sigtan_o,
     output logic       fifo_rd_en_o,
     output logic       update_result_o,
+    output logic       capture_data_o,
     output logic       done_o
 );
 
@@ -206,7 +231,7 @@ module gpnae_control_unit #(
 
   logic selu_enable, mac_enable, sigtan_enable;
   logic fsm_rd_en;
-  logic [2:0] done_delay;
+  logic [3:0] done_delay;
 
   assign selu_clk_o   = clk_i & selu_enable;
   assign mac_clk_o    = clk_i & mac_enable;
@@ -217,6 +242,7 @@ module gpnae_control_unit #(
     fsm_rd_en       = 1'b0;
     selu_valid_o    = 1'b0;
     mac_valid_o     = 1'b0;
+    capture_data_o  = 1'b0;
     select_sigtan_o = 2'b11;
     next_state      = IDLE;
 
@@ -231,11 +257,20 @@ module gpnae_control_unit #(
       end
 
       OP: begin
-        mac_valid_o = 1'b1;
+        capture_data_o = 1'b1;
         case (control_word_i)
-          2'b01:   next_state = SELU_CHECK;
-          2'b10:   next_state = SIGMOID;
-          2'b11:   next_state = TANH;
+          2'b01: begin
+            if (!current_is_positive_i) mac_valid_o = 1'b1;
+            next_state = SELU_CHECK;
+          end
+          2'b10: begin
+            mac_valid_o = 1'b1;
+            next_state = SIGMOID;
+          end
+          2'b11: begin
+            mac_valid_o = 1'b1;
+            next_state = TANH;
+          end
           default: next_state = IDLE;
         endcase
       end
@@ -249,29 +284,35 @@ module gpnae_control_unit #(
         end
       end
 
+      // Each terminal state pops once, on its own done pulse; done_delay covers the FIFO read latency.
       SELU_POS: begin
         if (done_selu_i) fsm_rd_en = 1'b1;
 
-        if (done_delay[2]) next_state = OP;
+        if (done_delay[3]) next_state = OP;
         else next_state = SELU_POS;
       end
 
       SELU_NEG: begin
         if (done_mac_i) selu_valid_o = 1'b1;
+        if (done_selu_i) fsm_rd_en = 1'b1;
 
-        if (done_delay[2]) next_state = OP;
+        if (done_delay[3]) next_state = OP;
         else next_state = SELU_NEG;
       end
 
       SIGMOID: begin
         select_sigtan_o = 2'b00;
-        if (done_delay[2]) next_state = OP;
+        if (done_sigtan_i) fsm_rd_en = 1'b1;
+
+        if (done_delay[3]) next_state = OP;
         else next_state = SIGMOID;
       end
 
       TANH: begin
         select_sigtan_o = 2'b01;
-        if (done_delay[2]) next_state = OP;
+        if (done_sigtan_i) fsm_rd_en = 1'b1;
+
+        if (done_delay[3]) next_state = OP;
         else next_state = TANH;
       end
 
@@ -286,7 +327,7 @@ module gpnae_control_unit #(
       selu_enable     <= 1'b0;
       mac_enable      <= 1'b0;
       sigtan_enable   <= 1'b0;
-      done_delay      <= 3'b000;
+      done_delay      <= 4'b0000;
       done_o          <= 1'b0;
       update_result_o <= 1'b0;
     end else begin
@@ -297,7 +338,7 @@ module gpnae_control_unit #(
 
       case (current_state)
         IDLE: begin
-          done_delay    <= 3'b000;
+          done_delay    <= 4'b0000;
           done_o        <= 1'b0;
           selu_enable   <= 1'b0;
           mac_enable    <= 1'b0;
@@ -313,30 +354,28 @@ module gpnae_control_unit #(
         end
 
         SELU_CHECK: begin
-          if (is_positive_selu_i) begin
-            mac_enable <= 1'b0;  // Disable MAC if not needed
-          end
+          // MAC is no longer started for positive inputs, so no need to disable it.
         end
 
         SELU_POS, SELU_NEG: begin
           if (done_selu_i) begin
             update_result_o <= 1'b1;
-            done_delay      <= 3'b001;
+            done_delay      <= 4'b0001;
           end
         end
 
         SIGMOID, TANH: begin
           if (done_sigtan_i) begin
             update_result_o <= 1'b1;
-            done_delay      <= 3'b001;
+            done_delay      <= 4'b0001;
           end
         end
       endcase
 
       if (|done_delay) begin
-        done_delay <= {done_delay[1:0], 1'b0};
+        done_delay <= {done_delay[2:0], 1'b0};
       end
-      done_o <= done_delay[2];
+      done_o <= done_delay[3];
     end
   end
 
@@ -345,8 +384,8 @@ module gpnae_control_unit #(
     if (~rstn_i) begin
       fifo_rd_en_o <= 1'b0;
     end else begin
-      // If in SELU_POS, FSM controls read. Otherwise, MAC controls read.
-      fifo_rd_en_o <= ((current_state == SELU_POS) && is_positive_selu_i) ? fsm_rd_en : mac_rd_en_i;
+      // Single owner of the read pointer; the MAC popped too, so elements were popped twice.
+      fifo_rd_en_o <= fsm_rd_en;
     end
   end
 

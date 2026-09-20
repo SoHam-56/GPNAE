@@ -56,30 +56,8 @@ module controller #(
   logic done_comb;
   logic [4:0] done_shift_reg;
 
-  // ---------------------------------------------------------
-  // NEW: Credit Counter Logic
-  // ---------------------------------------------------------
-  // Width is ADDR_LINES + 1 to prevent overflow if FIFO is fully packed
-  logic [ADDR_LINES:0] item_credit_count;
-
-  always_ff @(posedge mac_credit_clk_i or negedge rstn_i) begin
-    if (!rstn_i) begin
-      item_credit_count <= '0;
-    end else begin
-      // Decrement logic: Happens exactly when we decide to read from FIFO
-      logic dec_en;
-      dec_en = (current_state == LOAD_SIGNAL);
-
-      case ({
-        fifo_wr_i, dec_en
-      })
-        2'b10:   item_credit_count <= item_credit_count + 1'b1;
-        2'b01:   item_credit_count <= item_credit_count - 1'b1;
-        default: item_credit_count <= item_credit_count;
-      endcase
-    end
-  end
-  // ---------------------------------------------------------
+  // Credit counter removed: it let the MAC free-run out of step with the GPNAE FSM.
+  // mac_credit_clk_i, fifo_wr_i and empty_i stay on the port list for interface stability.
 
   // State register
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -123,9 +101,8 @@ module controller #(
         term_count_next = '0;
         reload_o = 1'b1;
 
-        // Only start if we have credits (data waiting) AND not stopped by start_i
-        // (Assuming start_i is acting as a "Last" or "Stop" signal based on previous context)
-        if (item_credit_count > 0 && !start_i) begin
+        // start_i is the FSM's per-element request (mac_valid_o): one pulse, one computation.
+        if (start_i) begin
           next_state = RESET_DATAPATH;
         end
       end
@@ -178,24 +155,8 @@ module controller #(
 
       STORE_RESULT: begin
         load_result_o = 1'b1;
-
-        // If 'start_i' (last_i) is high, we force stop.
-        if (start_i) begin
-          next_state = IDLE;
-          done_comb  = 1'b1;
-
-          // REPLACED !empty_i WITH item_credit_count CHECK
-        end else if (item_credit_count > 0) begin
-          reload_o = 1'b1;
-          term_count_next = '0;
-          done_comb = 1'b1;
-          next_state = RESET_DATAPATH;
-
-        end else begin
-          // No credits left, go to IDLE
-          next_state = IDLE;
-          done_comb  = 1'b1;
-        end
+        done_comb = 1'b1;
+        next_state = IDLE;
       end
 
       default: begin
@@ -203,6 +164,7 @@ module controller #(
       end
     endcase
   end
+
 
 endmodule
 
