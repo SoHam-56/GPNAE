@@ -28,7 +28,8 @@ DESIGN_FILES = \
 	SeLu.sv \
 	sigtan.sv \
 	TYTAN/barrel_mac.sv \
-	gpnae.sv
+	gpnae.sv \
+	gpnae_poly.sv
 
 TESTBENCH = TB_gpnae.sv
 TOP_MODULE = TB_gpnae

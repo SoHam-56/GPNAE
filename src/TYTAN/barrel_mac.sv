@@ -16,7 +16,8 @@
 module barrel_mac #(
     parameter int DATA_WIDTH = 32,
     parameter int ADDR_LINES = 5,
-    parameter int K          = 16
+    parameter int K          = 16,
+    parameter     INIT_FILE  = "taylor_coeffs.mem"
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -26,7 +27,8 @@ module barrel_mac #(
     input logic [DATA_WIDTH-1:0] ld_data_i,
     input logic                  start_i,
 
-    input logic [ADDR_LINES-1:0] terms_i,  // polynomial degree; NCOEF = terms_i + 1
+    input logic [ADDR_LINES-1:0] terms_i,       // polynomial degree; NCOEF = terms_i + 1
+    input logic [ADDR_LINES-1:0] coeff_base_i,  // where this lane's coefficient set starts
 
     // Result phase: one per cycle, in load order.
     output logic                  res_valid_o,
@@ -74,13 +76,13 @@ module barrel_mac #(
 
   // ROM address comes from stage 7 so coeff_data is valid at stage 8, where the add issues.
   logic [ADDR_LINES:0] coeff_addr_full;
-  assign coeff_addr_full = ncoef - 1 - rnd_dly[MUL_LAT-2];
+  assign coeff_addr_full = {1'b0, coeff_base_i} + ncoef - 1 - rnd_dly[MUL_LAT-2];
   assign coeff_addr      = coeff_addr_full[ADDR_LINES-1:0];
 
   CoeffROM #(
       .DATA_WIDTH(DATA_WIDTH),
       .ADDR_LINES(ADDR_LINES),
-      .INIT_FILE ("taylor_coeffs.mem")
+      .INIT_FILE (INIT_FILE)
   ) coeff_rom_inst (
       .clk_i       (clk_i),
       .rd_en_i     (1'b1),
