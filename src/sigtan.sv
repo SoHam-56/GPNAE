@@ -13,7 +13,6 @@ module sigtan (
   wire [31:0] add_result, sub_result;
   wire done_fp32_add_sub;
   wire [31:0] mux_output;
-  reg [31:0] mux_output_reg;
 
   // Instantiate FP32 Add/Sub module
   fp32_up_down u_fp32_add_sub (
@@ -26,9 +25,9 @@ module sigtan (
       .done_o(done_fp32_add_sub)
   );
 
-  // Mux to switch between sub_result and mac_result
-  assign mux_output = (select_sub == 2'b00) ? mac_result : 'bz;  // SIGMOID case
-  assign mux_output = (select_sub == 2'b01) ? sub_result : 'bz;  // TANH case
+  // Numerator select: sigmoid uses e^x, tanh uses e^2x - 1.
+  // Was two continuous assigns resolving through 'bz, which drove X into the divider for any other select.
+  assign mux_output = (select_sub == 2'b01) ? sub_result : mac_result;
 
   fp32Divider u_fp32Divider (
       .clk_i  (clk_i),
