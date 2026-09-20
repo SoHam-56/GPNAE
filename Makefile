@@ -15,10 +15,7 @@ DESIGN_FILES = \
 	TYTAN/Memory/PE5B.v \
 	TYTAN/Memory/RAM.v \
 	TYTAN/Memory/ROM.v \
-	TYTAN/controller.sv \
-	TYTAN/datapath.v \
 	TYTAN/LZC.v \
-	TYTAN/mac.sv \
 	../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
 	../ArithmeticLibrary/Adders/FP32/src/LZC.sv \
 	../ArithmeticLibrary/Multipliers/Radix4Booth/src/R4Booth.sv \
@@ -30,6 +27,7 @@ DESIGN_FILES = \
 	fp32_up_down.sv \
 	SeLu.sv \
 	sigtan.sv \
+	TYTAN/barrel_mac.sv \
 	gpnae.sv
 
 TESTBENCH = TB_gpnae.sv
