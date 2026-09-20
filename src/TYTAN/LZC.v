@@ -1,23 +1,4 @@
-module cntlz8 (
-    input  wire [7:0] in,
-    output reg  [3:0] o
-);
-
-  always @(in) begin
-    casez (in)
-      8'b1???????: o = 0;
-      8'b01??????: o = 1;
-      8'b001?????: o = 2;
-      8'b0001????: o = 3;
-      8'b00001???: o = 4;
-      8'b000001??: o = 5;
-      8'b0000001?: o = 6;
-      8'b00000001: o = 7;
-      default: o = 8;
-    endcase
-  end
-
-endmodule
+// cntlz8 comes from ArithmeticLibrary/Adders/FP32/src/LZC.sv; the copy here was a duplicate definition.
 
 module cntlz24 (
     input  [23:0] i,
