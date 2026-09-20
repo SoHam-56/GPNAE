@@ -1,2 +1,8 @@
 Verilator/
 VIVADO/
+
+# Python and simulation artifacts
+__pycache__/
+*.pyc
+*.vcd
+*.log
