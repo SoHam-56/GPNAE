@@ -11,7 +11,8 @@ module InputFIFO #(
     input wire [DATA_WIDTH-1:0] data_i,
     
     output wire full_o, empty_o, idle_o,
-    
+    output wire [ADDR_LINES:0] count_o,
+
     output wire [DATA_WIDTH-1:0] data_o
 );
 
@@ -45,6 +46,16 @@ module InputFIFO #(
     assign empty_o = (status == 'b0);
     
     assign idle_o = ~(wr_en_i | rd_en_i);
+
+    // Occupancy, so a consumer can pop a known number of words back to back. empty_o lags a pop
+    // by a cycle, so a streaming reader cannot use it to decide when to stop without over-popping.
+    reg [ADDR_LINES:0] occ;
+    integer si;
+    always @(*) begin
+        occ = 0;
+        for (si = 0; si < (1 << ADDR_LINES); si = si + 1) occ = occ + status[si];
+    end
+    assign count_o = occ;
 
     // regceb held high so data_o tracks rd_ptr; gating it on rd_en_i made the first pop re-present the same word.
 

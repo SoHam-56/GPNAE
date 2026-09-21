@@ -56,6 +56,7 @@ module gpnae #(
       .idle_o (idle_o),
       .wr_en_i(wr_en_i),
       .rd_en_i(fifo_rd_en),
+      .count_o(),  // occupancy is only used by the streaming reader in gpnae_poly
       .data_i (signal_i),
       .data_o (fifo_data_o)
   );
