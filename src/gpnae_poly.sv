@@ -16,6 +16,10 @@
 //   tanh             x * P_tanh(x^2)    P approximates tanh(sqrt u)/sqrt u
 //
 // Elements run in groups of K so the MAC's pipelined units stay busy; see barrel_mac.sv.
+// The squaring and the post stage stream one element per cycle for the same reason: both
+// units accept a new operand every cycle, so waiting out their latency per element wasted
+// most of the lane's time. Elements are captured from the FIFO first, then streamed from
+// registers, which keeps the FIFO's read-pointer timing untouched.
 module gpnae_poly #(
     parameter int DATA_WIDTH    = 32,
     parameter int ADDR_LINES    = 5,
@@ -42,12 +46,14 @@ module gpnae_poly #(
 
   localparam int SW = $clog2(K);
   localparam int FIFO_RD_LAT = 3;  // data_o trails a pop: rd_ptr, ram_data_b, doutb_reg
+  localparam int MUL_LAT = 8;  // fp32Multiplier: valid_i at t, done_o at t+8
+  localparam int DN_LAT = 6;  // fp32_down: assign done_o = valid_stage6
 
   localparam logic [DATA_WIDTH-1:0] LAMDA = 32'h3F867D5F;
 
   // Coefficient sets packed into one ROM. Keep in step with poly_coeffs.mem.
-  localparam logic [ADDR_LINES-1:0] BASE_SELU = 5'd0,  DEG_SELU = 5'd8;
-  localparam logic [ADDR_LINES-1:0] BASE_SIG  = 5'd9,  DEG_SIG  = 5'd6;
+  localparam logic [ADDR_LINES-1:0] BASE_SELU = 5'd0, DEG_SELU = 5'd8;
+  localparam logic [ADDR_LINES-1:0] BASE_SIG = 5'd9, DEG_SIG = 5'd6;
   localparam logic [ADDR_LINES-1:0] BASE_TANH = 5'd16, DEG_TANH = 5'd8;
 
   logic [DATA_WIDTH-1:0] fifo_data_o;
@@ -69,25 +75,46 @@ module gpnae_poly #(
   );
 
   logic [ADDR_LINES-1:0] poly_base, poly_deg;
+  logic is_tanh, is_sig, is_selu;
+  assign is_selu = (control_word_i == 2'b01);
+  assign is_sig  = (control_word_i == 2'b10);
+  assign is_tanh = ~is_selu & ~is_sig;
+
   always_comb begin
     case (control_word_i)
-      2'b01:   begin poly_base = BASE_SELU; poly_deg = DEG_SELU; end
-      2'b10:   begin poly_base = BASE_SIG;  poly_deg = DEG_SIG;  end
-      default: begin poly_base = BASE_TANH; poly_deg = DEG_TANH; end
+      2'b01: begin
+        poly_base = BASE_SELU;
+        poly_deg  = DEG_SELU;
+      end
+      2'b10: begin
+        poly_base = BASE_SIG;
+        poly_deg  = DEG_SIG;
+      end
+      default: begin
+        poly_base = BASE_TANH;
+        poly_deg  = DEG_TANH;
+      end
     endcase
   end
 
-  // Polynomial variable: |x| for sigmoid, x*x for tanh, x as it stands for SELU.
-  logic [DATA_WIDTH-1:0] sq_a, sq_res, mac_in;
+  logic [DATA_WIDTH-1:0] sq_a, sq_res;
   logic                  sq_valid, sq_done;
 
   fp32Multiplier SQ (
-      .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(sq_valid),
-      .A(sq_a), .B(sq_a), .result_o(sq_res), .done_o(sq_done),
-      .overflow_o(), .underflow_o(), .invalid_o()
+      .clk_i(clk_i),
+      .rstn_i(rstn_i),
+      .valid_i(sq_valid),
+      .A(sq_a),
+      .B(sq_a),
+      .result_o(sq_res),
+      .done_o(sq_done),
+      .overflow_o(),
+      .underflow_o(),
+      .invalid_o()
   );
 
   logic                  ld_valid, mac_start;
+  logic [DATA_WIDTH-1:0] mac_in;
   logic                  mac_res_valid, mac_busy, mac_done;
   logic [DATA_WIDTH-1:0] mac_res;
 
@@ -110,11 +137,15 @@ module gpnae_poly #(
       .done_o      (mac_done)
   );
 
-  logic [DATA_WIDTH-1:0] sig_buf [K];
-  logic                  pos_buf [K];
-  logic [DATA_WIDTH-1:0] pol_buf [K];
-  logic [SW:0]           n_elems, ld_idx, rx_idx, post_idx;
-  logic [1:0]            wait_cnt;
+  logic [DATA_WIDTH-1:0] sig_buf[K];
+  logic [        K-1:0]  pos_buf;
+  logic [DATA_WIDTH-1:0] pol_buf[K];
+  logic [DATA_WIDTH-1:0] res_buf[K];
+  logic [        K-1:0]  res_rdy;
+
+  logic [SW:0] n_elems, ld_idx, rx_idx, iss_idx, emit_idx;
+  logic [1:0]  wait_cnt;
+  logic [3:0]  drain_cnt;
 
   logic sig_is_pos;
   assign sig_is_pos = ~fifo_data_o[DATA_WIDTH-1] || (fifo_data_o[DATA_WIDTH-2:0] == '0);
@@ -124,30 +155,56 @@ module gpnae_poly #(
   logic                  mul_valid, mul_done, dn_valid, dn_done;
 
   fp32Multiplier POST (
-      .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid),
-      .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
-      .overflow_o(), .underflow_o(), .invalid_o()
+      .clk_i(clk_i),
+      .rstn_i(rstn_i),
+      .valid_i(mul_valid),
+      .A(mul_a),
+      .B(mul_b),
+      .result_o(mul_res),
+      .done_o(mul_done),
+      .overflow_o(),
+      .underflow_o(),
+      .invalid_o()
   );
 
   fp32_down POSTD (
-      .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(dn_valid),
-      .A(dn_a), .Result(dn_res), .done_o(dn_done)
+      .clk_i (clk_i),
+      .rstn_i(rstn_i),
+      .valid_i(dn_valid),
+      .A     (dn_a),
+      .Result(dn_res),
+      .done_o(dn_done)
   );
 
-  logic cur_pos;
-  logic [DATA_WIDTH-1:0] cur_x, cur_p;
-  assign cur_pos = pos_buf[post_idx[SW-1:0]];
-  assign cur_x   = sig_buf[post_idx[SW-1:0]];
-  assign cur_p   = pol_buf[post_idx[SW-1:0]];
-
-  // sigmoid on a non-negative input needs no post-processing at all.
-  logic post_passthru;
-  assign post_passthru = (control_word_i == 2'b10) && cur_pos;
-
   typedef enum logic [3:0] {
-    G_IDLE, G_CAP, G_WAIT, G_SQ, G_SQW, G_RUN, G_RECV, G_POST, G_POSTW, G_NEXT
+    G_IDLE,
+    G_CAP,
+    G_WAIT,
+    G_LOAD,
+    G_LDRAIN,
+    G_RUN,
+    G_RECV,
+    G_POST,
+    G_EMIT,
+    G_NEXT
   } gstate_t;
   gstate_t gstate;
+
+  // Squaring pipeline: index of the element whose square is in flight. Bit 0 lines up with
+  // the cycle valid_i is high, so the result lands at bit MUL_LAT, not MUL_LAT-1.
+  logic [MUL_LAT:0] sq_v;
+  logic [SW-1:0] sq_p[MUL_LAT+1];
+
+  // Post pipelines: the multiply and fp32_down paths have different latencies, so each
+  // carries its own element index and results are parked in res_buf until emitted in order.
+  logic [MUL_LAT:0] pm_v;
+  logic [SW-1:0] pm_p[MUL_LAT+1];
+  logic [DN_LAT:0] pd_v;
+  logic [SW-1:0] pd_p[DN_LAT+1];
+
+  logic post_pass, post_down;
+  assign post_pass = is_sig && pos_buf[iss_idx[SW-1:0]];
+  assign post_down = is_sig && !pos_buf[iss_idx[SW-1:0]];
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -155,8 +212,10 @@ module gpnae_poly #(
       n_elems        <= '0;
       ld_idx         <= '0;
       rx_idx         <= '0;
-      post_idx       <= '0;
+      iss_idx        <= '0;
+      emit_idx       <= '0;
       wait_cnt       <= '0;
+      drain_cnt      <= '0;
       ld_valid       <= 1'b0;
       mac_start      <= 1'b0;
       fifo_rd_en     <= 1'b0;
@@ -165,6 +224,16 @@ module gpnae_poly #(
       dn_valid       <= 1'b0;
       done_o         <= 1'b0;
       final_result_o <= '0;
+      sq_v           <= '0;
+      pm_v           <= '0;
+      pd_v           <= '0;
+      res_rdy        <= '0;
+      pos_buf        <= '0;
+      for (int i = 0; i <= MUL_LAT; i++) begin
+        sq_p[i] <= '0;
+        pm_p[i] <= '0;
+      end
+      for (int i = 0; i <= DN_LAT; i++) pd_p[i] <= '0;
     end else begin
       ld_valid   <= 1'b0;
       mac_start  <= 1'b0;
@@ -174,55 +243,95 @@ module gpnae_poly #(
       dn_valid   <= 1'b0;
       done_o     <= 1'b0;
 
+      // Shift the three result pipelines every cycle; their tails write back below.
+      sq_v <= {sq_v[MUL_LAT-1:0], 1'b0};
+      pm_v <= {pm_v[MUL_LAT-1:0], 1'b0};
+      pd_v <= {pd_v[DN_LAT-1:0], 1'b0};
+      for (int i = 1; i <= MUL_LAT; i++) begin
+        sq_p[i] <= sq_p[i-1];
+        pm_p[i] <= pm_p[i-1];
+      end
+      for (int i = 1; i <= DN_LAT; i++) pd_p[i] <= pd_p[i-1];
+
+      // A finished square is the MAC operand for its element, in load order.
+      if (sq_v[MUL_LAT]) begin
+        mac_in   <= sq_res;
+        ld_valid <= 1'b1;
+      end
+
+      if (pm_v[MUL_LAT]) begin
+        res_buf[pm_p[MUL_LAT]] <= mul_res;
+        res_rdy[pm_p[MUL_LAT]] <= 1'b1;
+      end
+      if (pd_v[DN_LAT]) begin
+        res_buf[pd_p[DN_LAT]] <= {~dn_res[DATA_WIDTH-1], dn_res[DATA_WIDTH-2:0]};
+        res_rdy[pd_p[DN_LAT]] <= 1'b1;
+      end
+
       case (gstate)
         G_IDLE: begin
           ld_idx <= '0;
           if (last_i) gstate <= G_CAP;
         end
 
+        // Capture only: the FIFO keeps its one-element-at-a-time read timing.
         G_CAP: begin
           if (!empty_o && (ld_idx < K[SW:0])) begin
             sig_buf[ld_idx[SW-1:0]] <= fifo_data_o;
             pos_buf[ld_idx[SW-1:0]] <= sig_is_pos;
             fifo_rd_en              <= 1'b1;
-            if (control_word_i == 2'b11) begin
-              sq_a     <= fifo_data_o;  // tanh works in x^2
-              sq_valid <= 1'b1;
-              gstate   <= G_SQ;
-            end else begin
-              mac_in   <= (control_word_i == 2'b10)
-                          ? {1'b0, fifo_data_o[DATA_WIDTH-2:0]}  // sigmoid uses |x|
-                          : fifo_data_o;
+            ld_idx                  <= ld_idx + 1;
+            wait_cnt                <= '0;
+            gstate                  <= G_WAIT;
+            // Only tanh needs a second pass; the others can feed the MAC as they arrive.
+            if (!is_tanh) begin
+              mac_in   <= is_sig ? {1'b0, fifo_data_o[DATA_WIDTH-2:0]} : fifo_data_o;
               ld_valid <= 1'b1;
-              ld_idx   <= ld_idx + 1;
-              wait_cnt <= '0;
-              gstate   <= G_WAIT;
             end
           end else if (ld_idx != '0) begin
             n_elems   <= ld_idx;
-            mac_start <= 1'b1;
-            rx_idx    <= '0;
-            gstate    <= G_RUN;
+            iss_idx   <= '0;
+            drain_cnt <= '0;
+            gstate    <= is_tanh ? G_LOAD : G_LDRAIN;
           end else begin
             gstate <= G_IDLE;
-          end
-        end
-
-        G_SQ: gstate <= G_SQW;
-
-        G_SQW: begin
-          if (sq_done) begin
-            mac_in   <= sq_res;
-            ld_valid <= 1'b1;
-            ld_idx   <= ld_idx + 1;
-            wait_cnt <= '0;
-            gstate   <= G_WAIT;
           end
         end
 
         G_WAIT: begin
           if (wait_cnt == FIFO_RD_LAT[1:0]) gstate <= G_CAP;
           else wait_cnt <= wait_cnt + 1;
+        end
+
+        // Feed the MAC one element per cycle, squaring on the way for tanh.
+        G_LOAD: begin
+          if (is_tanh) begin
+            sq_a              <= sig_buf[iss_idx[SW-1:0]];
+            sq_valid          <= 1'b1;
+            sq_v[0]           <= 1'b1;
+            sq_p[0]           <= iss_idx[SW-1:0];
+          end else begin
+            mac_in   <= is_sig ? {1'b0, sig_buf[iss_idx[SW-1:0]][DATA_WIDTH-2:0]}
+                               : sig_buf[iss_idx[SW-1:0]];
+            ld_valid <= 1'b1;
+          end
+          if (iss_idx + 1 == n_elems) begin
+            drain_cnt <= '0;
+            gstate    <= G_LDRAIN;
+          end else begin
+            iss_idx <= iss_idx + 1;
+          end
+        end
+
+        G_LDRAIN: begin
+          // tanh still has squares in flight; start one cycle clear of the last load.
+          if (!is_tanh || (drain_cnt == MUL_LAT[3:0] + 2)) begin
+            mac_start <= 1'b1;
+            rx_idx    <= '0;
+            gstate    <= G_RUN;
+          end else begin
+            drain_cnt <= drain_cnt + 1;
+          end
         end
 
         G_RUN: begin
@@ -239,39 +348,42 @@ module gpnae_poly #(
             rx_idx                  <= rx_idx + 1;
           end
           if (mac_done) begin
-            post_idx <= '0;
+            iss_idx  <= '0;
+            emit_idx <= '0;
+            res_rdy  <= '0;
             gstate   <= G_POST;
           end
         end
 
+        // Issue one post operation per cycle; results land in res_buf out of order.
         G_POST: begin
-          if (post_passthru) begin
-            gstate <= G_POSTW;  // the polynomial is already the answer
-          end else if (control_word_i == 2'b10) begin
-            dn_a     <= cur_p;  // sigmoid, x < 0: 1 - P computed as -(P - 1)
+          if (post_pass) begin
+            res_buf[iss_idx[SW-1:0]] <= pol_buf[iss_idx[SW-1:0]];
+            res_rdy[iss_idx[SW-1:0]] <= 1'b1;
+          end else if (post_down) begin
+            dn_a     <= pol_buf[iss_idx[SW-1:0]];
             dn_valid <= 1'b1;
-            gstate   <= G_POSTW;
+            pd_v[0]  <= 1'b1;
+            pd_p[0]  <= iss_idx[SW-1:0];
           end else begin
-            mul_a     <= cur_x;  // SELU x<0 and tanh: x * P; SELU x>=0: lambda * x
-            mul_b     <= (control_word_i == 2'b01 && cur_pos) ? LAMDA : cur_p;
+            mul_a     <= sig_buf[iss_idx[SW-1:0]];
+            mul_b     <= (is_selu && pos_buf[iss_idx[SW-1:0]]) ? LAMDA
+                                                              : pol_buf[iss_idx[SW-1:0]];
             mul_valid <= 1'b1;
-            gstate    <= G_POSTW;
+            pm_v[0]   <= 1'b1;
+            pm_p[0]   <= iss_idx[SW-1:0];
           end
+          if (iss_idx + 1 == n_elems) gstate <= G_EMIT;
+          else iss_idx <= iss_idx + 1;
         end
 
-        G_POSTW: begin
-          if (post_passthru || mul_done || dn_done) begin
-            if (post_passthru) final_result_o <= cur_p;
-            else if (control_word_i == 2'b10)
-              final_result_o <= {~dn_res[DATA_WIDTH-1], dn_res[DATA_WIDTH-2:0]};
-            else final_result_o <= mul_res;
-            done_o <= 1'b1;
-            if (post_idx + 1 == n_elems) begin
-              gstate <= G_NEXT;
-            end else begin
-              post_idx <= post_idx + 1;
-              gstate   <= G_POST;
-            end
+        // Retire in index order, so done_o still pulses once per element in sequence.
+        G_EMIT: begin
+          if (res_rdy[emit_idx[SW-1:0]]) begin
+            final_result_o <= res_buf[emit_idx[SW-1:0]];
+            done_o         <= 1'b1;
+            if (emit_idx + 1 == n_elems) gstate <= G_NEXT;
+            else emit_idx <= emit_idx + 1;
           end
         end
 
