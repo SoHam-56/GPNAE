@@ -29,6 +29,29 @@ module fp32_down (
   reg [7:0] A_Exp, C_Exp;
   reg [22:0] A_Man, C_Man;
 
+  // Stage 2 produces these but stages 4, 5 and 6 consume them, so they have to travel with
+  // their operation. Without these copies a new input every cycle overwrites them under the
+  // one still in flight, which is why this block only ever worked one operation at a time.
+  reg [7:0] BigExp_d1, BigExp_d2, BigExp_d3;
+  reg sign_d1, sign_d2, sign_d3;
+  reg check_d1, check_d2;
+  reg [23:0] BigMan_d1, BigMan_d2;
+  reg [23:0] SmallMan_d1;
+
+  always @(posedge clk_i) begin
+    BigExp_d1 <= BigExp;
+    BigExp_d2 <= BigExp_d1;
+    BigExp_d3 <= BigExp_d2;
+    sign_d1 <= sign;
+    sign_d2 <= sign_d1;
+    sign_d3 <= sign_d2;
+    check_d1 <= check;
+    check_d2 <= check_d1;
+    BigMan_d1 <= BigMan;
+    BigMan_d2 <= BigMan_d1;
+    SmallMan_d1 <= SmallMan;
+  end
+
   // Control path - Stage 1 valid signal
   always @(posedge clk_i or negedge rstn_i) begin
     if (~rstn_i) begin
@@ -112,7 +135,7 @@ module fp32_down (
   // Data path - Stage 4
   always @(posedge clk_i) begin
     if (valid_stage3) begin
-      Temp_SmallMan <= SmallMan >> DifferenceExp;
+      Temp_SmallMan <= SmallMan_d1 >> DifferenceExp;
     end
   end
 
@@ -128,7 +151,7 @@ module fp32_down (
   // Data path - Stage 5
   always @(posedge clk_i) begin
     if (valid_stage4) begin
-      {carry, TempMan} <= check ? (BigMan - Temp_SmallMan) : (BigMan + Temp_SmallMan);
+      {carry, TempMan} <= check_d2 ? (BigMan_d2 - Temp_SmallMan) : (BigMan_d2 + Temp_SmallMan);
     end
   end
 
@@ -149,10 +172,10 @@ module fp32_down (
       if (valid_stage5) begin
         if (carry) begin
           Mantissa <= TempMan[23:1];
-          Exponent <= BigExp + 1;
+          Exponent <= BigExp_d3 + 1;
         end else if (|TempMan[22:0]) begin
           Mantissa <= TempMan[22:0] << zerocount;
-          Exponent <= BigExp - {3'b0, zerocount};
+          Exponent <= BigExp_d3 - {3'b0, zerocount};
         end else if (TempMan == 24'b0) begin
           // Exact cancellation -> zero. See fp32_up_down.sv.
           Mantissa <= 23'b0;
@@ -160,10 +183,10 @@ module fp32_down (
         end else begin
           // TempMan == 24'h800000: already normalised.
           Mantissa <= TempMan[22:0];
-          Exponent <= BigExp;
+          Exponent <= BigExp_d3;
         end
         // IEEE 754: exact cancellation yields +0, not the operand sign.
-        Sign <= (!carry && TempMan == 24'b0) ? 1'b0 : sign;
+        Sign <= (!carry && TempMan == 24'b0) ? 1'b0 : sign_d3;
       end
     end
   end
