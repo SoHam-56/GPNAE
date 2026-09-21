@@ -46,6 +46,9 @@ module gpnae_poly #(
 
   localparam int SW = $clog2(K);
   localparam int FIFO_RD_LAT = 3;  // data_o trails a pop: rd_ptr, ram_data_b, doutb_reg
+  // Pop issued at cycle c -> rd_en at c+1 -> status clear visible c+2 -> data_o(t+2)=mem[rd_ptr(t)],
+  // so the word for that pop appears at c+3 and one per cycle after.
+  localparam int CAP_LAG = 3;
   localparam int MUL_LAT = 8;  // fp32Multiplier: valid_i at t, done_o at t+8
   localparam int DN_LAT = 6;  // fp32_down: assign done_o = valid_stage6
 
@@ -58,6 +61,7 @@ module gpnae_poly #(
 
   logic [DATA_WIDTH-1:0] fifo_data_o;
   logic                  fifo_rd_en;
+  logic [ADDR_LINES:0]   fifo_count;
 
   InputFIFO #(
       .DATA_WIDTH(DATA_WIDTH),
@@ -70,6 +74,7 @@ module gpnae_poly #(
       .idle_o (idle_o),
       .wr_en_i(wr_en_i),
       .rd_en_i(fifo_rd_en),
+      .count_o(fifo_count),
       .data_i (signal_i),
       .data_o (fifo_data_o)
   );
@@ -144,7 +149,8 @@ module gpnae_poly #(
   logic [        K-1:0]  res_rdy;
 
   logic [SW:0] n_elems, ld_idx, rx_idx, iss_idx, emit_idx;
-  logic [1:0]  wait_cnt;
+  logic [SW:0] pop_idx, grp_n;
+  logic [CAP_LAG-1:0] cap_v;
   logic [3:0]  drain_cnt;
 
   logic sig_is_pos;
@@ -179,7 +185,6 @@ module gpnae_poly #(
   typedef enum logic [3:0] {
     G_IDLE,
     G_CAP,
-    G_WAIT,
     G_LOAD,
     G_LDRAIN,
     G_RUN,
@@ -214,7 +219,9 @@ module gpnae_poly #(
       rx_idx         <= '0;
       iss_idx        <= '0;
       emit_idx       <= '0;
-      wait_cnt       <= '0;
+      pop_idx        <= '0;
+      grp_n          <= '0;
+      cap_v          <= '0;
       drain_cnt      <= '0;
       ld_valid       <= 1'b0;
       mac_start      <= 1'b0;
@@ -271,36 +278,41 @@ module gpnae_poly #(
       case (gstate)
         G_IDLE: begin
           ld_idx <= '0;
-          if (last_i) gstate <= G_CAP;
+          pop_idx <= '0;
+          if (last_i) begin
+            // The FIFO reports its own occupancy, so the whole group can be popped back to back
+            // instead of one element every FIFO_RD_LAT+1 cycles. empty_o lags a pop by a cycle
+            // and cannot be used to stop a streaming read without discarding a word.
+            grp_n  <= (fifo_count > K[ADDR_LINES:0]) ? K[SW:0] : fifo_count[SW:0];
+            gstate <= (fifo_count == '0) ? G_IDLE : G_CAP;
+          end
         end
 
-        // Capture only: the FIFO keeps its one-element-at-a-time read timing.
+        // One pop per cycle; captures trail by CAP_LAG and reuse the same counter space.
         G_CAP: begin
-          if (!empty_o && (ld_idx < K[SW:0])) begin
+          if (pop_idx < grp_n) begin
+            fifo_rd_en <= 1'b1;
+            pop_idx    <= pop_idx + 1;
+          end
+
+          cap_v <= {cap_v[CAP_LAG-2:0], (pop_idx < grp_n)};
+
+          if (cap_v[CAP_LAG-1]) begin
             sig_buf[ld_idx[SW-1:0]] <= fifo_data_o;
             pos_buf[ld_idx[SW-1:0]] <= sig_is_pos;
-            fifo_rd_en              <= 1'b1;
             ld_idx                  <= ld_idx + 1;
-            wait_cnt                <= '0;
-            gstate                  <= G_WAIT;
             // Only tanh needs a second pass; the others can feed the MAC as they arrive.
             if (!is_tanh) begin
               mac_in   <= is_sig ? {1'b0, fifo_data_o[DATA_WIDTH-2:0]} : fifo_data_o;
               ld_valid <= 1'b1;
             end
-          end else if (ld_idx != '0) begin
-            n_elems   <= ld_idx;
-            iss_idx   <= '0;
-            drain_cnt <= '0;
-            gstate    <= is_tanh ? G_LOAD : G_LDRAIN;
-          end else begin
-            gstate <= G_IDLE;
+            if (ld_idx + 1 == grp_n) begin
+              n_elems   <= grp_n;
+              iss_idx   <= '0;
+              drain_cnt <= '0;
+              gstate    <= is_tanh ? G_LOAD : G_LDRAIN;
+            end
           end
-        end
-
-        G_WAIT: begin
-          if (wait_cnt == FIFO_RD_LAT[1:0]) gstate <= G_CAP;
-          else wait_cnt <= wait_cnt + 1;
         end
 
         // Feed the MAC one element per cycle, squaring on the way for tanh.
@@ -388,8 +400,11 @@ module gpnae_poly #(
         end
 
         G_NEXT: begin
-          ld_idx <= '0;
-          gstate <= empty_o ? G_IDLE : G_CAP;
+          ld_idx  <= '0;
+          pop_idx <= '0;
+          cap_v   <= '0;
+          grp_n   <= (fifo_count > K[ADDR_LINES:0]) ? K[SW:0] : fifo_count[SW:0];
+          gstate  <= (fifo_count == '0) ? G_IDLE : G_CAP;
         end
 
         default: gstate <= G_IDLE;
