@@ -91,10 +91,12 @@ def generate_vectors(test_name: str, fmt, batches: int, per_batch: int, model: s
 # Run and parse
 # --------------------------------------------------------------------------
 
-def run_make() -> tuple:
+def run_make(lane: str = "gpnae") -> tuple:
     """Build and run via the project Makefile."""
     t0 = time.time()
     cmd = ["make", "verilator"]
+    if lane == "poly":
+        cmd += ["TESTBENCH=TB_gpnae_poly.sv", "TOP_MODULE=TB_gpnae_poly"]
     if os.environ.get("GPNAE_PIN", "0") == "1" and shutil.which("taskset"):
         cmd = ["taskset", "-c", "0"] + cmd
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
@@ -254,6 +256,8 @@ def main() -> None:
                    help="absolute bound, used in parallel with --rel-tol")
     p.add_argument("--timeout", type=int, default=200000)
     p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--lane", default="gpnae", choices=["gpnae", "poly"],
+                   help="gpnae: the published Taylor lane; poly: the lane sienna_top uses")
     p.add_argument("--write-coeffs", action="store_true",
                    help="also emit a coefficient ROM for --format")
     args = p.parse_args()
@@ -273,7 +277,7 @@ def main() -> None:
     print(f"  Volume      : {args.batches} batches x {args.per_batch} = {per_act} per activation, "
           f"{per_act*3} per pattern")
     print(f"  Patterns    : {len(tests)}  ->  {len(tests)*per_act*3} element checks")
-    print(f"  Reference   : {args.model}    seed {args.seed}")
+    print(f"  Reference   : {args.model}    seed {args.seed}    lane {args.lane}")
     print(f"  Tolerance   : rel <= {rel_tol*100:.4f}%  abs <= {args.abs_tol}")
     print(hdr(f"{'='*78}"))
 
@@ -295,7 +299,7 @@ def main() -> None:
         print(f"\n  [{idx+1}/{len(tests)}] {_O}{t['name']}{_X}  —  {t['description']}")
         ranges = generate_vectors(t["name"], fmt, args.batches, args.per_batch,
                                   args.model, args.seed, args.range)
-        raw, wall = run_make()
+        raw, wall = run_make(args.lane)
 
         os.makedirs(RESULTS_DIR, exist_ok=True)
         with open(os.path.join(RESULTS_DIR, f"{t['name']}.log"), "w") as f:
