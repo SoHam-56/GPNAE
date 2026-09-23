@@ -32,6 +32,12 @@ DESIGN_FILES = \
 	gpnae_tail.sv \
 	gpnae_poly.sv
 
+# ccache 3.7 here served corrupted objects that segfaulted at start-up; USE_CCACHE=1 opts back in.
+USE_CCACHE ?= 0
+ifeq ($(USE_CCACHE),0)
+export CCACHE_DISABLE := 1
+endif
+
 TESTBENCH = TB_gpnae.sv
 TOP_MODULE = TB_gpnae
 
