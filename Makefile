@@ -29,6 +29,7 @@ DESIGN_FILES = \
 	sigtan.sv \
 	TYTAN/barrel_mac.sv \
 	gpnae.sv \
+	gpnae_tail.sv \
 	gpnae_poly.sv
 
 TESTBENCH = TB_gpnae.sv
