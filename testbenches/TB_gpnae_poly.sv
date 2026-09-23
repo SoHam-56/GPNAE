@@ -268,24 +268,23 @@ module TB_gpnae_poly;
 
   // ── Protocol assertions ───────────────────────────────────────────────
   property module_full_write;
-    @(posedge clk) full_o |-> !wr_en_i;
+    @(posedge clk) disable iff (!rstn_i) full_o |-> !wr_en_i;
   endproperty
   assert property (module_full_write)
   else $error("Writing when module is full!");
 
   property module_idle_write;
-    @(posedge clk) wr_en_i |-> !idle_o;
+    @(posedge clk) disable iff (!rstn_i) wr_en_i |-> !idle_o;
   endproperty
   assert property (module_idle_write)
   else $error("Writing when module not idle!");
 
+  // Result and done_o share an edge, so the result may change only on a done cycle.
   property valid_done_signal;
-    @(posedge clk) done_o |-> $stable(
-        final_result_o
-    );
+    @(posedge clk) disable iff (!rstn_i) !$stable(final_result_o) |-> done_o;  // reset clears it silently
   endproperty
   assert property (valid_done_signal)
-  else $error("Final result changed after done signal!");
+  else $error("Final result changed without a done pulse!");
 
   initial begin
     #500000000 $error("Testbench timeout!");

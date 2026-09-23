@@ -43,6 +43,7 @@ VERILATOR_FLAGS = \
 	--binary \
 	--trace \
 	--timing \
+	--assert \
 	--top-module $(TOP_MODULE) \
 	--threads $(shell nproc) \
 	--build-jobs $(shell nproc) \
@@ -53,7 +54,8 @@ VERILATOR_FLAGS = \
 	--Wno-WIDTHTRUNC \
 	--Wno-WIDTHEXPAND \
 	--Wno-CASEINCOMPLETE \
-	--Wno-MODDUP
+	--Wno-MODDUP \
+	--Wno-UNOPTTHREADS
 
 IVERILOG_FLAGS = \
 	-g2012 \
