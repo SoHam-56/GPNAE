@@ -169,6 +169,15 @@ module gpnae_poly #(
   logic [K-1:0] tail_buf;
   logic tail_start, tail_done, tail_busy, tail_wait;
   logic [DATA_WIDTH-1:0] tail_x, tail_res;
+  // Tail elements start as they are captured and run beside the polynomial; results park in tres_buf until emit.
+  logic [K-1:0] tail_pend, trdy;
+  logic [DATA_WIDTH-1:0] tres_buf[K];
+  logic [SW-1:0] tail_idx;
+  logic [SW-1:0] tail_next;
+  always_comb begin
+    tail_next = '0;
+    for (int i = K - 1; i >= 0; i--) if (tail_pend[i]) tail_next = SW'(i);
+  end
 
   gpnae_tail TAIL (
       .clk_i   (clk_i),
@@ -265,6 +274,9 @@ module gpnae_poly #(
       tail_start     <= 1'b0;
       tail_wait      <= 1'b0;
       tail_x         <= '0;
+      tail_pend      <= '0;
+      trdy           <= '0;
+      tail_idx       <= '0;
       for (int i = 0; i <= MUL_LAT; i++) begin
         sq_p[i] <= '0;
         pm_p[i] <= '0;
@@ -305,6 +317,21 @@ module gpnae_poly #(
         res_rdy[pd_p[DN_LAT]] <= 1'b1;
       end
 
+      // One tail element at a time, lowest index first; the group cannot move on until every one is back.
+      if (tail_wait) begin
+        if (tail_done) begin
+          tres_buf[tail_idx] <= tail_res;
+          trdy[tail_idx]     <= 1'b1;
+          tail_wait          <= 1'b0;
+        end
+      end else if (|tail_pend) begin
+        tail_x               <= sig_buf[tail_next];
+        tail_start           <= 1'b1;
+        tail_wait            <= 1'b1;
+        tail_idx             <= tail_next;
+        tail_pend[tail_next] <= 1'b0;
+      end
+
       case (gstate)
         G_IDLE: begin
           ld_idx <= '0;
@@ -331,6 +358,8 @@ module gpnae_poly #(
             sig_buf[ld_idx[SW-1:0]] <= fifo_data_o;
             pos_buf[ld_idx[SW-1:0]] <= sig_is_pos;
             tail_buf[ld_idx[SW-1:0]] <= sig_in_tail;
+            tail_pend[ld_idx[SW-1:0]] <= sig_in_tail;
+            trdy[ld_idx[SW-1:0]] <= 1'b0;
             ld_idx                  <= ld_idx + 1;
             // Only tanh needs a second pass; the others can feed the MAC as they arrive.
             if (!is_tanh) begin
@@ -423,15 +452,10 @@ module gpnae_poly #(
         // Retire in index order, so done_o still pulses once per element in sequence.
         G_EMIT: begin
           if (tail_buf[emit_idx[SW-1:0]]) begin
-            // A tail element waits for gpnae_tail; its polynomial result is discarded.
-            if (!tail_wait) begin
-              tail_x     <= sig_buf[emit_idx[SW-1:0]];
-              tail_start <= 1'b1;
-              tail_wait  <= 1'b1;
-            end else if (tail_done) begin
-              final_result_o <= tail_res;
+            // A tail element takes gpnae_tail's result; its polynomial result is discarded.
+            if (trdy[emit_idx[SW-1:0]]) begin
+              final_result_o <= tres_buf[emit_idx[SW-1:0]];
               done_o         <= 1'b1;
-              tail_wait      <= 1'b0;
               if (emit_idx + 1 == n_elems) gstate <= G_NEXT;
               else emit_idx <= emit_idx + 1;
             end
