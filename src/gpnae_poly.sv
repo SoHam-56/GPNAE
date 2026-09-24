@@ -24,7 +24,8 @@ module gpnae_poly #(
     parameter int DATA_WIDTH    = 32,
     parameter int ADDR_LINES    = 5,
     parameter int CONTROL_WIDTH = 2,
-    parameter int K             = 16
+    parameter int K             = 16,
+    parameter int TAIL_CONTEXTS = 4    // tail elements gpnae_tail works on at once
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -167,25 +168,34 @@ module gpnae_poly #(
   end
 
   logic [K-1:0] tail_buf;
-  logic tail_start, tail_done, tail_busy, tail_wait;
-  logic [DATA_WIDTH-1:0] tail_x, tail_res;
+  logic tail_start, tail_done, tail_busy, tail_ready;
+  logic [DATA_WIDTH-1:0] tail_res;
   // Tail elements start as they are captured and run beside the polynomial; results park in tres_buf until emit.
   logic [K-1:0] tail_pend, trdy;
   logic [DATA_WIDTH-1:0] tres_buf[K];
-  logic [SW-1:0] tail_idx;
+  logic [SW-1:0] tail_idx;  // element a finished tail result belongs to
   logic [SW-1:0] tail_next;
   always_comb begin
     tail_next = '0;
     for (int i = K - 1; i >= 0; i--) if (tail_pend[i]) tail_next = SW'(i);
   end
 
-  gpnae_tail TAIL (
+  // A pending element starts whenever a tail context is free, lowest index first.
+  assign tail_start = tail_ready && (|tail_pend);
+
+  gpnae_tail #(
+      .CONTEXTS(TAIL_CONTEXTS),
+      .IW      (SW)
+  ) TAIL (
       .clk_i   (clk_i),
       .rstn_i  (rstn_i),
       .start_i (tail_start),
-      .x_i     (tail_x),
+      .x_i     (sig_buf[tail_next]),
       .func_i  (control_word_i),
+      .idx_i   (tail_next),
+      .ready_o (tail_ready),
       .result_o(tail_res),
+      .idx_o   (tail_idx),
       .done_o  (tail_done),
       .busy_o  (tail_busy)
   );
@@ -271,12 +281,8 @@ module gpnae_poly #(
       res_rdy        <= '0;
       pos_buf        <= '0;
       tail_buf       <= '0;
-      tail_start     <= 1'b0;
-      tail_wait      <= 1'b0;
-      tail_x         <= '0;
       tail_pend      <= '0;
       trdy           <= '0;
-      tail_idx       <= '0;
       for (int i = 0; i <= MUL_LAT; i++) begin
         sq_p[i] <= '0;
         pm_p[i] <= '0;
@@ -290,7 +296,6 @@ module gpnae_poly #(
       mul_valid  <= 1'b0;
       dn_valid   <= 1'b0;
       done_o     <= 1'b0;
-      tail_start <= 1'b0;
 
       // Shift the three result pipelines every cycle; their tails write back below.
       sq_v <= {sq_v[MUL_LAT-1:0], 1'b0};
@@ -317,19 +322,11 @@ module gpnae_poly #(
         res_rdy[pd_p[DN_LAT]] <= 1'b1;
       end
 
-      // One tail element at a time, lowest index first; the group cannot move on until every one is back.
-      if (tail_wait) begin
-        if (tail_done) begin
-          tres_buf[tail_idx] <= tail_res;
-          trdy[tail_idx]     <= 1'b1;
-          tail_wait          <= 1'b0;
-        end
-      end else if (|tail_pend) begin
-        tail_x               <= sig_buf[tail_next];
-        tail_start           <= 1'b1;
-        tail_wait            <= 1'b1;
-        tail_idx             <= tail_next;
-        tail_pend[tail_next] <= 1'b0;
+      // Tail results come back tagged with their element; the group cannot move on until every one is back.
+      if (tail_start) tail_pend[tail_next] <= 1'b0;
+      if (tail_done) begin
+        tres_buf[tail_idx] <= tail_res;
+        trdy[tail_idx]     <= 1'b1;
       end
 
       case (gstate)

@@ -4,18 +4,29 @@
 // Computes e^a for a <= 0 without cancellation: halve to |z| <= 1, Taylor e^z - 1, then double back.
 // SELU x < -4: lambda*alpha*(e^x - 1).  sigmoid |x| > 3.5: E(1 - E(1 - E)), E = e^-|x|.
 // tanh |x| > 4: 1 - 2*E(1 - E(1 - E)), E = e^-2|x|, with the sign of x.
-module gpnae_tail (
+// CONTEXTS elements run at once, each with its own registers, sharing one multiplier and one adder.
+// Every element sees the same operations on the same operands as when they ran one at a time; only the timing differs.
+module gpnae_tail #(
+    parameter int CONTEXTS = 4,
+    parameter int IW       = 4   // width of the caller's element index
+) (
     input logic clk_i,
     input logic rstn_i,
 
-    input logic        start_i,
-    input logic [31:0] x_i,
-    input logic [ 1:0] func_i,  // 01 SELU, 10 sigmoid, 11 tanh
+    input  logic          start_i,  // taken on a cycle ready_o is high
+    input  logic [  31:0] x_i,
+    input  logic [   1:0] func_i,   // 01 SELU, 10 sigmoid, 11 tanh
+    input  logic [IW-1:0] idx_i,    // returned with the result
+    output logic          ready_o,  // a context is free
 
-    output logic [31:0] result_o,
-    output logic        done_o,
-    output logic        busy_o
+    output logic [  31:0] result_o,
+    output logic [IW-1:0] idx_o,
+    output logic          done_o,
+    output logic          busy_o
 );
+
+  localparam int C = CONTEXTS;
+  localparam int CW = (C > 1) ? $clog2(C) : 1;
 
   localparam logic [31:0] ONE = 32'h3F800000;
   localparam logic [31:0] TWO = 32'h40000000;
@@ -54,13 +65,72 @@ module gpnae_tail (
     T_TANH_OUT,  // 1 - 2 s
     T_DONE
   } tstate_t;
-  tstate_t st;
 
-  logic [31:0] x, z, acc, d, e, s, tmp;
-  logic [ 1:0] fn;
-  logic [ 3:0] k;
-  logic [ 3:0] m;
-  logic        issued;
+  tstate_t st[C];
+  logic [31:0] x[C], z[C], acc[C], d[C], e[C], s[C], tmp[C], res[C];
+  logic [1:0] fn[C];
+  logic [3:0] k[C], m[C];
+  logic issued[C];  // this context has an operation in a shared unit
+  logic [IW-1:0] id[C];
+
+  // Negate for subtraction.
+  function automatic logic [31:0] neg(input logic [31:0] v);
+    return {~v[31], v[30:0]};
+  endfunction
+
+  // What each context wants from the shared units this cycle, exactly the operands the one-context version issued.
+  logic mreq[C], areq[C];
+  logic [31:0] ma[C], mb[C], aa[C], ab[C];
+  always_comb begin
+    for (int c = 0; c < C; c++) begin
+      mreq[c] = 1'b0;
+      areq[c] = 1'b0;
+      ma[c] = '0;
+      mb[c] = '0;
+      aa[c] = '0;
+      ab[c] = '0;
+      if (!issued[c]) begin
+        case (st[c])
+          T_TAY_MUL:  begin mreq[c] = 1'b1; ma[c] = acc[c]; mb[c] = z[c]; end
+          T_TAY_ADD:  begin areq[c] = 1'b1; aa[c] = tmp[c]; ab[c] = cinv[k[c]]; end
+          T_TAY_FIN:  begin mreq[c] = 1'b1; ma[c] = z[c]; mb[c] = acc[c]; end
+          T_SELU_ADD: begin areq[c] = 1'b1; aa[c] = d[c]; ab[c] = TWO; end
+          T_SELU_MUL: begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = tmp[c]; end
+          T_SELU_OUT: begin mreq[c] = 1'b1; ma[c] = LA; mb[c] = d[c]; end
+          T_E1:       begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = d[c]; end
+          T_SQ:       if (!(e[c][30:23] < 8'd64)) begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = e[c]; end
+          T_U:        begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(e[c]); end
+          T_V:        begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = tmp[c]; end
+          T_W:        begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(tmp[c]); end
+          T_S:        begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = tmp[c]; end
+          T_SIG_OUT:  begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(s[c]); end
+          T_TANH_OUT: begin
+            areq[c] = 1'b1;
+            aa[c] = ONE;
+            ab[c] = (s[c][30:0] == '0) ? 32'h80000000 : {1'b1, s[c][30:23] + 8'd1, s[c][22:0]};  // 2s as an exponent increment
+          end
+          default: ;
+        endcase
+      end
+    end
+  end
+
+  // Lowest requesting context wins each unit; a context asks again only after its result is back, so none starves.
+  logic mgnt_v, agnt_v, free_v, out_v;
+  logic [CW-1:0] mgnt, agnt, free_c, out_c;
+  always_comb begin
+    mgnt_v = 1'b0; mgnt = '0;
+    agnt_v = 1'b0; agnt = '0;
+    free_v = 1'b0; free_c = '0;
+    out_v  = 1'b0; out_c = '0;
+    for (int c = C - 1; c >= 0; c--) begin
+      if (mreq[c]) begin mgnt_v = 1'b1; mgnt = CW'(c); end
+      if (areq[c]) begin agnt_v = 1'b1; agnt = CW'(c); end
+      if (st[c] == T_IDLE) begin free_v = 1'b1; free_c = CW'(c); end
+      if (st[c] == T_DONE) begin out_v = 1'b1; out_c = CW'(c); end
+    end
+  end
+  assign ready_o = free_v;
 
   logic [31:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
   logic mul_valid, mul_done, add_valid, add_done;
@@ -91,271 +161,204 @@ module gpnae_tail (
       .invalid_o  ()
   );
 
-  assign busy_o = (st != T_IDLE);
-
-  // Negate for subtraction.
-  function automatic logic [31:0] neg(input logic [31:0] v);
-    return {~v[31], v[30:0]};
-  endfunction
+  // In-order units: a FIFO of issuing contexts pairs each result with its owner, whatever the latency.
+  logic [CW-1:0] mq[C], aq[C];
+  logic [CW:0] mq_wr, mq_rd, aq_wr, aq_rd;
+  logic [CW-1:0] m_owner, a_owner;
+  assign m_owner = mq[mq_rd[CW-1:0] % C];
+  assign a_owner = aq[aq_rd[CW-1:0] % C];
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      st        <= T_IDLE;
-      issued    <= 1'b0;
       mul_valid <= 1'b0;
       add_valid <= 1'b0;
-      done_o    <= 1'b0;
-      result_o  <= '0;
-      {x, z, acc, d, e, s, tmp} <= '0;
-      fn <= '0;
-      k  <= '0;
-      m  <= '0;
+      mul_a <= '0; mul_b <= '0; add_a <= '0; add_b <= '0;
+      mq_wr <= '0; mq_rd <= '0; aq_wr <= '0; aq_rd <= '0;
+      for (int c = 0; c < C; c++) begin
+        mq[c] <= '0;
+        aq[c] <= '0;
+      end
     end else begin
-      mul_valid <= 1'b0;
-      add_valid <= 1'b0;
-      done_o    <= 1'b0;
-
-      case (st)
-        T_IDLE: begin
-          if (start_i) begin
-            automatic logic [31:0] a;
-            // a = x (SELU), -|x| (sigmoid), -2|x| (tanh)
-            case (func_i)
-              2'b01:   a = x_i;
-              2'b10:   a = {1'b1, x_i[30:0]};
-              default: a = (x_i[30:23] >= 8'd133) ? {1'b1, BIG + 31'd1} : {1'b1, x_i[30:23] + 8'd1, x_i[22:0]};
-            endcase
-            x  <= x_i;
-            fn <= func_i;
-            if (a[30:0] > BIG) begin
-              // e^a underflows: e^a - 1 = -1 and e^a = 0
-              d  <= {1'b1, ONE[30:0]};
-              e  <= '0;
-              st <= (func_i == 2'b01) ? T_SELU_OUT : T_U;
-            end else begin
-              if (a[30:23] < 8'd127) begin
-                z <= a;
-                m <= '0;
-              end else begin
-                z <= {a[31], 8'd126, a[22:0]};  // |z| in [0.5, 1)
-                m <= 4'(a[30:23] - 8'd126);
-              end
-              acc <= cinv[10];
-              k   <= 4'd9;
-              st  <= T_TAY_MUL;
-            end
-            issued <= 1'b0;
-          end
-        end
-
-        T_TAY_MUL: begin
-          if (!issued) begin
-            mul_a <= acc;
-            mul_b <= z;
-            mul_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (mul_done) begin
-            tmp <= mul_res;
-            issued <= 1'b0;
-            st <= T_TAY_ADD;
-          end
-        end
-
-        T_TAY_ADD: begin
-          if (!issued) begin
-            add_a <= tmp;
-            add_b <= cinv[k];
-            add_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (add_done) begin
-            acc <= add_res;
-            issued <= 1'b0;
-            if (k == 0) st <= T_TAY_FIN;
-            else begin
-              k  <= k - 1'b1;
-              st <= T_TAY_MUL;
-            end
-          end
-        end
-
-        T_TAY_FIN: begin
-          if (!issued) begin
-            mul_a <= z;
-            mul_b <= acc;
-            mul_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (mul_done) begin
-            d <= mul_res;
-            issued <= 1'b0;
-            if (fn == 2'b01) st <= (m == 0) ? T_SELU_OUT : T_SELU_ADD;
-            else st <= T_E1;
-          end
-        end
-
-        T_SELU_ADD: begin
-          if (!issued) begin
-            add_a <= d;
-            add_b <= TWO;
-            add_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (add_done) begin
-            tmp <= add_res;
-            issued <= 1'b0;
-            st <= T_SELU_MUL;
-          end
-        end
-
-        T_SELU_MUL: begin
-          if (!issued) begin
-            mul_a <= d;
-            mul_b <= tmp;
-            mul_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (mul_done) begin
-            d <= mul_res;
-            issued <= 1'b0;
-            m <= m - 1'b1;
-            st <= (m == 4'd1) ? T_SELU_OUT : T_SELU_ADD;
-          end
-        end
-
-        T_SELU_OUT: begin
-          if (!issued) begin
-            mul_a <= LA;
-            mul_b <= d;
-            mul_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (mul_done) begin
-            result_o <= mul_res;
-            issued <= 1'b0;
-            st <= T_DONE;
-          end
-        end
-
-        T_E1: begin
-          if (!issued) begin
-            add_a <= ONE;
-            add_b <= d;
-            add_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (add_done) begin
-            e <= add_res;
-            issued <= 1'b0;
-            st <= (m == 0) ? T_U : T_SQ;
-          end
-        end
-
-        T_SQ: begin
-          if (e[30:23] < 8'd64) begin
-            // E^2 would fall below the fp32 normal range, and the chain is exact at 0
-            e  <= '0;
-            m  <= '0;
-            st <= T_U;
-          end else if (!issued) begin
-            mul_a <= e;
-            mul_b <= e;
-            mul_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (mul_done) begin
-            e <= mul_res;
-            issued <= 1'b0;
-            m <= m - 1'b1;
-            st <= (m == 4'd1) ? T_U : T_SQ;
-          end
-        end
-
-        T_U: begin
-          if (!issued) begin
-            add_a <= ONE;
-            add_b <= neg(e);
-            add_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (add_done) begin
-            tmp <= add_res;
-            issued <= 1'b0;
-            st <= T_V;
-          end
-        end
-
-        T_V: begin
-          if (!issued) begin
-            mul_a <= e;
-            mul_b <= tmp;
-            mul_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (mul_done) begin
-            tmp <= mul_res;
-            issued <= 1'b0;
-            st <= T_W;
-          end
-        end
-
-        T_W: begin
-          if (!issued) begin
-            add_a <= ONE;
-            add_b <= neg(tmp);
-            add_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (add_done) begin
-            tmp <= add_res;
-            issued <= 1'b0;
-            st <= T_S;
-          end
-        end
-
-        T_S: begin
-          if (!issued) begin
-            mul_a <= e;
-            mul_b <= tmp;
-            mul_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (mul_done) begin
-            s <= mul_res;
-            issued <= 1'b0;
-            if (fn == 2'b10) begin
-              if (x[31]) begin
-                result_o <= mul_res;
-                st <= T_DONE;
-              end else st <= T_SIG_OUT;
-            end else st <= T_TANH_OUT;
-          end
-        end
-
-        T_SIG_OUT: begin
-          if (!issued) begin
-            add_a <= ONE;
-            add_b <= neg(s);
-            add_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (add_done) begin
-            result_o <= add_res;
-            issued <= 1'b0;
-            st <= T_DONE;
-          end
-        end
-
-        T_TANH_OUT: begin
-          if (!issued) begin
-            add_a <= ONE;
-            // 2s as an exponent increment
-            add_b <= (s[30:0] == '0) ? 32'h80000000 : {1'b1, s[30:23] + 8'd1, s[22:0]};
-            add_valid <= 1'b1;
-            issued <= 1'b1;
-          end else if (add_done) begin
-            result_o <= {x[31], add_res[30:0]};
-            issued <= 1'b0;
-            st <= T_DONE;
-          end
-        end
-
-        T_DONE: begin
-          done_o <= 1'b1;
-          st     <= T_IDLE;
-        end
-
-        default: st <= T_IDLE;
-      endcase
+      mul_valid <= mgnt_v;
+      add_valid <= agnt_v;
+      if (mgnt_v) begin
+        mul_a <= ma[mgnt];
+        mul_b <= mb[mgnt];
+        mq[mq_wr[CW-1:0] % C] <= mgnt;
+        mq_wr <= (mq_wr == (CW+1)'(C - 1)) ? '0 : mq_wr + 1'b1;
+      end
+      if (agnt_v) begin
+        add_a <= aa[agnt];
+        add_b <= ab[agnt];
+        aq[aq_wr[CW-1:0] % C] <= agnt;
+        aq_wr <= (aq_wr == (CW+1)'(C - 1)) ? '0 : aq_wr + 1'b1;
+      end
+      if (mul_done) mq_rd <= (mq_rd == (CW+1)'(C - 1)) ? '0 : mq_rd + 1'b1;
+      if (add_done) aq_rd <= (aq_rd == (CW+1)'(C - 1)) ? '0 : aq_rd + 1'b1;
     end
   end
+
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      done_o   <= 1'b0;
+      result_o <= '0;
+      idx_o    <= '0;
+      for (int c = 0; c < C; c++) begin
+        st[c] <= T_IDLE;
+        issued[c] <= 1'b0;
+        {x[c], z[c], acc[c], d[c], e[c], s[c], tmp[c], res[c]} <= '0;
+        fn[c] <= '0;
+        k[c]  <= '0;
+        m[c]  <= '0;
+        id[c] <= '0;
+      end
+    end else begin
+      done_o <= 1'b0;
+      if (out_v) begin
+        done_o   <= 1'b1;
+        result_o <= res[out_c];
+        idx_o    <= id[out_c];
+      end
+      for (int c = 0; c < C; c++) begin
+        automatic logic mres = mul_done && (m_owner == CW'(c));
+        automatic logic ares = add_done && (a_owner == CW'(c));
+        if ((mgnt_v && mgnt == CW'(c)) || (agnt_v && agnt == CW'(c))) issued[c] <= 1'b1;
+        case (st[c])
+          T_IDLE: begin
+            if (start_i && free_v && free_c == CW'(c)) begin
+              automatic logic [31:0] a;
+              // a = x (SELU), -|x| (sigmoid), -2|x| (tanh)
+              case (func_i)
+                2'b01:   a = x_i;
+                2'b10:   a = {1'b1, x_i[30:0]};
+                default: a = (x_i[30:23] >= 8'd133) ? {1'b1, BIG + 31'd1} : {1'b1, x_i[30:23] + 8'd1, x_i[22:0]};
+              endcase
+              x[c]  <= x_i;
+              fn[c] <= func_i;
+              id[c] <= idx_i;
+              if (a[30:0] > BIG) begin
+                // e^a underflows: e^a - 1 = -1 and e^a = 0
+                d[c]  <= {1'b1, ONE[30:0]};
+                e[c]  <= '0;
+                st[c] <= (func_i == 2'b01) ? T_SELU_OUT : T_U;
+              end else begin
+                if (a[30:23] < 8'd127) begin
+                  z[c] <= a;
+                  m[c] <= '0;
+                end else begin
+                  z[c] <= {a[31], 8'd126, a[22:0]};  // |z| in [0.5, 1)
+                  m[c] <= 4'(a[30:23] - 8'd126);
+                end
+                acc[c] <= cinv[10];
+                k[c]   <= 4'd9;
+                st[c]  <= T_TAY_MUL;
+              end
+              issued[c] <= 1'b0;
+            end
+          end
+
+          T_TAY_MUL: if (mres) begin
+            tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_TAY_ADD;
+          end
+
+          T_TAY_ADD: if (ares) begin
+            acc[c] <= add_res;
+            issued[c] <= 1'b0;
+            if (k[c] == 0) st[c] <= T_TAY_FIN;
+            else begin
+              k[c]  <= k[c] - 1'b1;
+              st[c] <= T_TAY_MUL;
+            end
+          end
+
+          T_TAY_FIN: if (mres) begin
+            d[c] <= mul_res;
+            issued[c] <= 1'b0;
+            if (fn[c] == 2'b01) st[c] <= (m[c] == 0) ? T_SELU_OUT : T_SELU_ADD;
+            else st[c] <= T_E1;
+          end
+
+          T_SELU_ADD: if (ares) begin
+            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_SELU_MUL;
+          end
+
+          T_SELU_MUL: if (mres) begin
+            d[c] <= mul_res;
+            issued[c] <= 1'b0;
+            m[c] <= m[c] - 1'b1;
+            st[c] <= (m[c] == 4'd1) ? T_SELU_OUT : T_SELU_ADD;
+          end
+
+          T_SELU_OUT: if (mres) begin
+            res[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_DONE;
+          end
+
+          T_E1: if (ares) begin
+            e[c] <= add_res; issued[c] <= 1'b0; st[c] <= (m[c] == 0) ? T_U : T_SQ;
+          end
+
+          T_SQ: begin
+            if (!issued[c] && e[c][30:23] < 8'd64) begin
+              // E^2 would fall below the fp32 normal range, and the chain is exact at 0
+              e[c]  <= '0;
+              m[c]  <= '0;
+              st[c] <= T_U;
+            end else if (mres) begin
+              e[c] <= mul_res;
+              issued[c] <= 1'b0;
+              m[c] <= m[c] - 1'b1;
+              st[c] <= (m[c] == 4'd1) ? T_U : T_SQ;
+            end
+          end
+
+          T_U: if (ares) begin
+            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_V;
+          end
+
+          T_V: if (mres) begin
+            tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_W;
+          end
+
+          T_W: if (ares) begin
+            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_S;
+          end
+
+          T_S: if (mres) begin
+            s[c] <= mul_res;
+            issued[c] <= 1'b0;
+            if (fn[c] == 2'b10) begin
+              if (x[c][31]) begin
+                res[c] <= mul_res;
+                st[c]  <= T_DONE;
+              end else st[c] <= T_SIG_OUT;
+            end else st[c] <= T_TANH_OUT;
+          end
+
+          T_SIG_OUT: if (ares) begin
+            res[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_DONE;
+          end
+
+          T_TANH_OUT: if (ares) begin
+            res[c] <= {x[c][31], add_res[30:0]}; issued[c] <= 1'b0; st[c] <= T_DONE;
+          end
+
+          // One result leaves per cycle, lowest context first.
+          T_DONE: if (out_v && out_c == CW'(c)) st[c] <= T_IDLE;
+
+          default: st[c] <= T_IDLE;
+        endcase
+      end
+    end
+  end
+
+  always_comb begin
+    busy_o = 1'b0;
+    for (int c = 0; c < C; c++) if (st[c] != T_IDLE) busy_o = 1'b1;
+  end
+
+`ifndef SYNTHESIS
+  a_start_free: assert property (@(posedge clk_i) disable iff (!rstn_i) start_i |-> ready_o)
+    else $error("gpnae_tail: start with no free context");
+`endif
 
 endmodule
