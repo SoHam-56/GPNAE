@@ -23,7 +23,7 @@
 module gpnae_poly #(
     parameter int DATA_WIDTH    = 32,
     parameter int ADDR_LINES    = 5,
-    parameter int CONTROL_WIDTH = 2,
+    parameter int CONTROL_WIDTH = 3,  // 001 SELU, 010 sigmoid, 011 tanh, 100 ReLU, 101 linear
     parameter int K             = 16,
     parameter int TAIL_CONTEXTS = 4    // tail elements gpnae_tail works on at once
 ) (
@@ -81,10 +81,13 @@ module gpnae_poly #(
   );
 
   logic [ADDR_LINES-1:0] poly_base, poly_deg;
-  logic is_tanh, is_sig, is_selu;
-  assign is_selu = (control_word_i == 2'b01);
-  assign is_sig  = (control_word_i == 2'b10);
-  assign is_tanh = ~is_selu & ~is_sig;
+  logic is_tanh, is_sig, is_selu, is_relu, is_byp;
+  assign is_selu = (control_word_i == 3'b001);
+  assign is_sig  = (control_word_i == 3'b010);
+  assign is_relu = (control_word_i == 3'b100);
+  // ReLU and linear skip the polynomial: each element is written straight to res_buf as it is captured.
+  assign is_byp  = is_relu || (control_word_i == 3'b101);
+  assign is_tanh = ~is_selu & ~is_sig & ~is_byp;
 
   always_comb begin
     case (control_word_i)
@@ -161,9 +164,10 @@ module gpnae_poly #(
   logic sig_in_tail;
   always_comb begin
     case (control_word_i)
-      2'b01:   sig_in_tail = fifo_data_o[31] && (fifo_data_o[30:0] > 31'h40800000);  // SELU x < -4
-      2'b10:   sig_in_tail = (fifo_data_o[30:0] > 31'h40600000);  // sigmoid |x| > 3.5
-      default: sig_in_tail = (fifo_data_o[30:0] > 31'h40800000);  // tanh |x| > 4
+      3'b001:         sig_in_tail = fifo_data_o[31] && (fifo_data_o[30:0] > 31'h40800000);  // SELU x < -4
+      3'b010:         sig_in_tail = (fifo_data_o[30:0] > 31'h40600000);  // sigmoid |x| > 3.5
+      3'b100, 3'b101: sig_in_tail = 1'b0;  // ReLU and linear are exact
+      default:        sig_in_tail = (fifo_data_o[30:0] > 31'h40800000);  // tanh |x| > 4
     endcase
   end
 
@@ -191,7 +195,7 @@ module gpnae_poly #(
       .rstn_i  (rstn_i),
       .start_i (tail_start),
       .x_i     (sig_buf[tail_next]),
-      .func_i  (control_word_i),
+      .func_i  (control_word_i[1:0]),
       .idx_i   (tail_next),
       .ready_o (tail_ready),
       .result_o(tail_res),
@@ -358,8 +362,12 @@ module gpnae_poly #(
             tail_pend[ld_idx[SW-1:0]] <= sig_in_tail;
             trdy[ld_idx[SW-1:0]] <= 1'b0;
             ld_idx                  <= ld_idx + 1;
+            if (is_byp) begin
+              res_buf[ld_idx[SW-1:0]] <= (is_relu && fifo_data_o[DATA_WIDTH-1]) ? '0 : fifo_data_o;
+              res_rdy[ld_idx[SW-1:0]] <= 1'b1;
+            end
             // Only tanh needs a second pass; the others can feed the MAC as they arrive.
-            if (!is_tanh) begin
+            else if (!is_tanh) begin
               mac_in   <= is_sig ? {1'b0, fifo_data_o[DATA_WIDTH-2:0]} : fifo_data_o;
               ld_valid <= 1'b1;
             end
@@ -367,7 +375,8 @@ module gpnae_poly #(
               n_elems   <= grp_n;
               iss_idx   <= '0;
               drain_cnt <= '0;
-              gstate    <= is_tanh ? G_LOAD : G_LDRAIN;
+              emit_idx  <= '0;
+              gstate    <= is_byp ? G_EMIT : (is_tanh ? G_LOAD : G_LDRAIN);
             end
           end
         end
