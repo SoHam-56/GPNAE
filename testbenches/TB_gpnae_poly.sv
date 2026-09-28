@@ -36,6 +36,8 @@ module TB_gpnae_poly;
   real worst_rel_overall;
 
   gpnae_poly #(
+      .EXP_W(EXP_BITS),
+      .MAN_W(MAN_BITS),
       .DATA_WIDTH(DATA_WIDTH),
       .ADDR_LINES(ADDR_LINES),
       .CONTROL_WIDTH(CONTROL_WIDTH)
@@ -107,8 +109,8 @@ module TB_gpnae_poly;
     #1;
     $readmemb(COEFF_FILE, want);
     for (int i = 0; i < 32; i++)
-      if (dut.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
-        $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i], COEFF_FILE, want[i]);
+      if (dut.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
+        $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i], COEFF_FILE, want[i]);
   end
 
   task automatic reset_sequence();
