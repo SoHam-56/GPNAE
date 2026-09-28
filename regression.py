@@ -37,7 +37,8 @@ hdr = lambda s: f"{_O}{_B}{s}{_X}"
 # --------------------------------------------------------------------------
 
 def write_config(fmt, batches: int, per_batch: int, rel_tol: float, abs_tol: float,
-                 model: str, timeout_cycles: int, seed: int) -> None:
+                 model: str, timeout_cycles: int, seed: int, exact: bool = False,
+                 coeff_file: str = "poly_coeffs.mem") -> None:
     """Emit the include file the testbench pulls in."""
     path = os.path.join(TB_DIR, "gpnae_test_config.svh")
     with open(path, "w") as f:
@@ -58,6 +59,8 @@ def write_config(fmt, batches: int, per_batch: int, rel_tol: float, abs_tol: flo
         f.write(f"  localparam int SEED             = {seed};\n")
         f.write(f'  localparam string REF_MODEL     = "{model}";\n')
         f.write('  localparam string STIM_DIR      = "testbenches/stimulus/";\n')
+        f.write(f"  localparam bit EXACT_MATCH      = {1 if exact else 0};\n")
+        f.write(f'  localparam string COEFF_FILE    = "{coeff_file}";\n')
 
 
 def generate_vectors(test_name: str, fmt, batches: int, per_batch: int, model: str,
@@ -249,7 +252,7 @@ def main() -> None:
     p.add_argument("--per-batch", type=int, default=30,
                    help=f"signals per batch (<= {MAX_SIGNALS}, the FIFO depth)")
     p.add_argument("--range", type=float, default=None, help="override stimulus bound")
-    p.add_argument("--model", default="exact", choices=["exact", "series"])
+    p.add_argument("--model", default="exact", choices=["exact", "series", "hw"])
     p.add_argument("--rel-tol", type=float, default=None,
                    help="default scales with the format's precision")
     p.add_argument("--abs-tol", type=float, default=1e-6,
@@ -268,6 +271,13 @@ def main() -> None:
 
     fmt = get_format(args.format)
     rel_tol = args.rel_tol if args.rel_tol is not None else suggested_rel_tol(fmt)
+    exact = args.model == "hw"  # bit-exact model of gpnae_poly: every output must match bit for bit
+    if exact:
+        if args.lane != "poly":
+            print(err("[ERROR] --model hw models gpnae_poly only; use --lane poly"))
+            sys.exit(1)
+        rel_tol, args.abs_tol = 0.0, 0.0
+    coeff = "poly_coeffs.mem" if fmt.name == "fp32" else f"poly_coeffs_{fmt.name}.mem"
     tests = TESTS if args.test is None else [get_test(args.test)]
     per_act = args.batches * args.per_batch
 
@@ -292,7 +302,7 @@ def main() -> None:
         print(f"  Coefficients: {rom}")
 
     write_config(fmt, args.batches, args.per_batch, rel_tol, args.abs_tol,
-                 args.model, args.timeout, args.seed)
+                 args.model, args.timeout, args.seed, exact, coeff)
 
     results, ranges = [], {}
     for idx, t in enumerate(tests):

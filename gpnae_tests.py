@@ -89,6 +89,9 @@ def activate(x: float, act: str, model: str = "exact", terms: int = None, fmt=No
 
 def golden(stim, act: str, model: str, fmt):
     """Golden vector, each value representable in the target format."""
+    if model == "hw":
+        import gpnae_model
+        return gpnae_model.golden(stim, ACTIVATIONS[act]["code"], fmt)
     work = fmt.with_rounding("trunc") if model == "series" else fmt
     return [fmt.quantize(activate(float(x), act, model, None, work)) for x in stim]
 
@@ -151,6 +154,19 @@ def gen_act_edge(act, n, rng, fmt, rs):
     return _q(vals[:n], fmt)
 
 
+def gen_act_threshold(act, n, rng, fmt, rs):
+    """The lane's range thresholds (+/-3.5, +/-4) exactly and their two neighbours each way, in the format."""
+    vals = []
+    for t in (3.5, 4.0):
+        b = fmt.encode(t)
+        for d in (-2, -1, 0, 1, 2):
+            v = fmt.decode(b + d)
+            vals += [v, -v]
+    while len(vals) < n:
+        vals.append(float(rs.uniform(-rng, rng)))
+    return vals[:n]
+
+
 def gen_act_mixed_stress(act, n, rng, fmt, rs):
     """Adversarial mix: a quarter each of normal, log-uniform, near-zero and"""
     k = max(1, n // 4)
@@ -171,6 +187,7 @@ TESTS = [
     dict(name="act_positive",     description="Positive only (SELU linear branch)",       gen_fn=gen_act_positive),
     dict(name="act_near_zero",    description="Hard against zero, includes exact +/-0",   gen_fn=gen_act_near_zero),
     dict(name="act_edge",         description="Representable-boundary values",            gen_fn=gen_act_edge),
+    dict(name="act_threshold",    description="Range thresholds and their neighbours",    gen_fn=gen_act_threshold),
     dict(name="act_mixed_stress", description="Adversarial shuffled mix (hard default)",  gen_fn=gen_act_mixed_stress),
 ]
 
