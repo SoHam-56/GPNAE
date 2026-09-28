@@ -3,9 +3,9 @@
 // Barrel TYTAN MAC: K elements share one datapath, round-robin, in lockstep on the term
 // index. Same idea as a barrel processor -- rotate through contexts to fill pipeline latency.
 //
-// fp32Multiplier and fp32Adder accept a new operation every cycle (II=1) but the original
+// The format's multiplier and adder accept a new operation every cycle (II=1) but the original
 // controller issues one every 15, so the multiplier runs at ~6%. Horner carries a 13-cycle
-// loop dependency WITHIN an element (8 multiply + 5 add), but elements are independent, so K
+// loop dependency WITHIN an element (MUL_LAT + ADD_LAT: 13 in fp32, 8 in bf16), but elements are independent, so K
 // of them can share the units in lockstep on the term index.
 //
 // Per round every slot issues one multiply and one add, so a round costs K cycles instead of
@@ -14,7 +14,9 @@
 //
 // K must be >= 14 or a slot's accumulator would not be back before it is needed again.
 module barrel_mac #(
-    parameter int DATA_WIDTH = 32,
+    parameter int EXP_W      = 8,
+    parameter int MAN_W      = 23,
+    parameter int DATA_WIDTH = 1 + EXP_W + MAN_W,
     parameter int ADDR_LINES = 5,
     parameter int K          = 16,
     parameter     INIT_FILE  = "taylor_coeffs.mem"
@@ -37,9 +39,9 @@ module barrel_mac #(
     output logic                  done_o
 );
 
-  localparam int MUL_LAT = 8;   // measured, valid_i -> done_o
-  localparam int ADD_LAT = 5;   // measured
-  localparam int LOOP    = MUL_LAT + ADD_LAT;      // 13, the Horner recurrence
+  localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(EXP_W, MAN_W);  // valid_i -> done_o of the format's multiplier
+  localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // and adder
+  localparam int LOOP    = MUL_LAT + ADD_LAT;      // the Horner recurrence: 13 in fp32, 8 in bf16
   localparam int MIN_PER = LOOP + 1;               // write-back lands a cycle after that
   localparam int SW      = $clog2(K);
 
@@ -90,17 +92,31 @@ module barrel_mac #(
       .data_o      (coeff_data)
   );
 
-  fp32Multiplier MUL (
-      .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid),
-      .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
-      .overflow_o(), .underflow_o(), .invalid_o()
-  );
-
-  fp32Adder ADD (
-      .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid),
-      .A(add_a), .B(add_b), .result_o(add_res), .done_o(add_done),
-      .overflow_o(), .underflow_o(), .invalid_o()
-  );
+  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
+    $fatal(1, "barrel_mac: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
+  end else if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
+    fp32Multiplier MUL (
+        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid),
+        .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
+        .overflow_o(), .underflow_o(), .invalid_o()
+    );
+    fp32Adder ADD (
+        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid),
+        .A(add_a), .B(add_b), .result_o(add_res), .done_o(add_done),
+        .overflow_o(), .underflow_o(), .invalid_o()
+    );
+  end else begin : G_FP
+    fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) MUL (
+        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid),
+        .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
+        .overflow_o(), .underflow_o(), .invalid_o()
+    );
+    fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) ADD (
+        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid),
+        .A(add_a), .B(add_b), .result_o(add_res), .done_o(add_done),
+        .overflow_o(), .underflow_o(), .invalid_o()
+    );
+  end
 
   // Issue: multiply x[slot] by acc[slot] every cycle while running.
   assign mul_valid = (state == RUN) && (slot < n_elems);
