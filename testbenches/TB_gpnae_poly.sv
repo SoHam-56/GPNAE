@@ -84,6 +84,10 @@ module TB_gpnae_poly;
                                     input logic [DATA_WIDTH-1:0] act_bits,
                                     output real rel_err);
     real e, a, d;
+    if (EXACT_MATCH) begin  // bit-exact model: only identical bits pass
+      rel_err = (exp_bits === act_bits) ? 0.0 : 1.0;
+      return exp_bits === act_bits;
+    end
     e = fp_to_real(exp_bits);
     a = fp_to_real(act_bits);
     d = absr(e - a);
@@ -96,6 +100,16 @@ module TB_gpnae_poly;
     // shows a large relative error -- e.g. x = -4.68e-06, |error| = 1.6e-07, rel 1.27%.
     return (rel_err <= REL_TOL) || (d <= ABS_TOL);
   endfunction
+
+  // The lane must have loaded this format's coefficient table.
+  initial begin
+    logic [DATA_WIDTH-1:0] want[32];
+    #1;
+    $readmemb(COEFF_FILE, want);
+    for (int i = 0; i < 32; i++)
+      if (dut.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
+        $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i], COEFF_FILE, want[i]);
+  end
 
   task automatic reset_sequence();
     begin
@@ -179,7 +193,7 @@ module TB_gpnae_poly;
         for (int i = 0; i < SIGNALS_PER_BATCH; i++) begin
           if (i >= n_captured) begin
             miss_n++;
-            if (shown < 12) begin
+            if (shown < (EXACT_MATCH ? 200 : 12)) begin
               $display("  b%0d i%0d  %0h  expected %0h  MISSING", b, i, stim[base+i],
                        gold[base+i]);
               shown++;
@@ -192,7 +206,7 @@ module TB_gpnae_poly;
             else if (ok) tol_n++;
             else begin
               fail_n++;
-              if (shown < 12) begin
+              if (shown < (EXACT_MATCH ? 200 : 12)) begin
                 $display("  b%0d i%0d  in %0h  expected %0h  got %0h  rel %.5f%%  FAIL", b, i,
                          stim[base+i], gold[base+i], got[i], rel * 100.0);
                 shown++;
