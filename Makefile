@@ -140,7 +140,7 @@ clean:
 
 # Elaboration of one block in one format, e.g. make lint_fmt TOP=barrel_mac FMT="-GEXP_W=8 -GMAN_W=7".
 lint_fmt:
-	$(VERILATOR) --lint-only -Wno-fatal -DSYNTHESIS --top-module $(TOP) $(FMT) -I$(SRC_DIR) -I$(SRC_DIR)/TYTAN/Memory \
+	$(VERILATOR) --lint-only -Wno-fatal -Werror-USERFATAL -DSYNTHESIS --top-module $(TOP) $(FMT) -I$(SRC_DIR) -I$(SRC_DIR)/TYTAN/Memory \
 		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES))
 
 .PHONY: default help verilator iverilog vcs view clean lint_fmt
