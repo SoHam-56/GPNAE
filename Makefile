@@ -10,6 +10,7 @@ VVP = vvp
 WAVE = gtkwave
 
 DESIGN_FILES = \
+	../ArithmeticLibrary/Common/src/sienna_fmt_pkg.sv \
 	TYTAN/Memory/CoeffROM.v \
 	TYTAN/Memory/InputFIFO.v \
 	TYTAN/Memory/PE5B.v \
@@ -21,6 +22,8 @@ DESIGN_FILES = \
 	../ArithmeticLibrary/Multipliers/Radix4Booth/src/R4Booth.sv \
 	../ArithmeticLibrary/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
 	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
+	../ArithmeticLibrary/Multipliers/FP/src/fpMultiplier.sv \
+	../ArithmeticLibrary/Adders/FP/src/fpAdder.sv \
 	../ArithmeticLibrary/Divider/FP32/src/fp32Divider.sv \
 	../ArithmeticLibrary/Divider/FP32/src/divu.sv \
 	fp32_down.sv \
@@ -63,6 +66,9 @@ VERILATOR_FLAGS = \
 	--Wno-MODDUP \
 	--Wno-UNOPTTHREADS
 
+# Hooks as in SIENNA: one-off defines (EXTRA_FLAGS) and simulator arguments (SIM_ARGS).
+VERILATOR_FLAGS += $(EXTRA_FLAGS)
+
 IVERILOG_FLAGS = \
 	-g2012 \
 	-Wall \
@@ -99,7 +105,7 @@ verilator:
 	@echo "-- Compiling Verilator simulation"
 	make -C $(VERILATOR_DIR) -f V$(TOP_MODULE).mk
 	@echo "-- Running Verilator simulation"
-	$(VERILATOR_DIR)/./$(TOP_MODULE)_sim
+	$(VERILATOR_DIR)/./$(TOP_MODULE)_sim $(SIM_ARGS)
 
 iverilog:
 	@echo "-- Icarus Verilog simulation for GPNAE"
@@ -132,4 +138,9 @@ clean:
 	-rm -rf $(VERILATOR_DIR) $(IVERILOG_DIR) $(VCS_DIR)
 	-rm -f *.vpd *.vcd
 
-.PHONY: default help verilator iverilog vcs view clean
+# Elaboration of one block in one format, e.g. make lint_fmt TOP=barrel_mac FMT="-GEXP_W=8 -GMAN_W=7".
+lint_fmt:
+	$(VERILATOR) --lint-only -Wno-fatal -DSYNTHESIS --top-module $(TOP) $(FMT) -I$(SRC_DIR) -I$(SRC_DIR)/TYTAN/Memory \
+		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES))
+
+.PHONY: default help verilator iverilog vcs view clean lint_fmt
