@@ -14,7 +14,7 @@ module TB_gpnae_poly;
   localparam int TOTAL = NUM_BATCHES * SIGNALS_PER_BATCH;
 
   reg clk;
-  reg rstn_i;
+  reg rstn_i = 1'b0;  // reset held from power-up, as the hardware sees it
   reg [DATA_WIDTH-1:0] signal_i;
   reg wr_en_i;
   reg last_i, start_i;
@@ -123,8 +123,7 @@ module TB_gpnae_poly;
       control_word_i = 2'b00;
       terms_i = '0;
       cap_clear = 1;          // the capture block owns n_captured; pulse a clear
-      @(posedge clk);
-      @(posedge clk);
+      repeat (8) @(posedge clk);  // fp32Adder's unreset valid stages need 4+ cycles of reset to flush (D-7)
       cap_clear = 0;
       rstn_i = 1;
       @(posedge clk);
