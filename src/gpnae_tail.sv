@@ -7,45 +7,56 @@
 // CONTEXTS elements run at once, each with its own registers, sharing one multiplier and one adder.
 // Every element sees the same operations on the same operands as when they ran one at a time; only the timing differs.
 module gpnae_tail #(
+    parameter int EXP_W    = 8,   // the build's number format: fp32 8/23, bf16 8/7
+    parameter int MAN_W    = 23,
     parameter int CONTEXTS = 4,
     parameter int IW       = 4   // width of the caller's element index
 ) (
     input logic clk_i,
     input logic rstn_i,
 
-    input  logic          start_i,  // taken on a cycle ready_o is high
-    input  logic [  31:0] x_i,
-    input  logic [   1:0] func_i,   // 01 SELU, 10 sigmoid, 11 tanh
-    input  logic [IW-1:0] idx_i,    // returned with the result
-    output logic          ready_o,  // a context is free
+    input  logic                 start_i,  // taken on a cycle ready_o is high
+    input  logic [EXP_W+MAN_W:0] x_i,
+    input  logic [          1:0] func_i,   // 01 SELU, 10 sigmoid, 11 tanh
+    input  logic [       IW-1:0] idx_i,    // returned with the result
+    output logic                 ready_o,  // a context is free
 
-    output logic [  31:0] result_o,
-    output logic [IW-1:0] idx_o,
-    output logic          done_o,
-    output logic          busy_o
+    output logic [EXP_W+MAN_W:0] result_o,
+    output logic [       IW-1:0] idx_o,
+    output logic                 done_o,
+    output logic                 busy_o
 );
 
+  localparam int W = 1 + EXP_W + MAN_W;
+  localparam int BIAS = (1 << (EXP_W - 1)) - 1;
   localparam int C = CONTEXTS;
   localparam int CW = (C > 1) ? $clog2(C) : 1;
 
-  localparam logic [31:0] ONE = 32'h3F800000;
-  localparam logic [31:0] TWO = 32'h40000000;
-  localparam logic [31:0] LA = 32'h3FE10966;  // lambda * alpha
-  localparam logic [30:0] BIG = 31'h42D00000;  // |a| > 104: e^a is below every fp32 value
+  // An fp32 constant in this format.
+  function automatic logic [W-1:0] K_(input logic [31:0] fp32);
+    return W'(sienna_fmt_pkg::from_fp32(fp32, MAN_W));
+  endfunction
+
+  localparam logic [W-1:0] ONE = K_(32'h3F800000);
+  localparam logic [W-1:0] TWO = K_(32'h40000000);
+  localparam logic [W-1:0] LA = K_(32'h3FE10966);  // lambda * alpha
+  localparam logic [W-1:0] BIG_W = K_(32'h42D00000);
+  localparam logic [W-2:0] BIG = BIG_W[W-2:0];  // |a| > 104: e^a is below every normal value
+  localparam logic [W-1:0] SIGN = {1'b1, {(W - 1) {1'b0}}};
 
   // 1/(k+1)! for k = 0..10
-  logic [31:0] cinv[11];
-  assign cinv[0]  = 32'h3F800000;
-  assign cinv[1]  = 32'h3F000000;
-  assign cinv[2]  = 32'h3E2AAAAB;
-  assign cinv[3]  = 32'h3D2AAAAB;
-  assign cinv[4]  = 32'h3C088889;
-  assign cinv[5]  = 32'h3AB60B61;
-  assign cinv[6]  = 32'h39500D01;
-  assign cinv[7]  = 32'h37D00D01;
-  assign cinv[8]  = 32'h3638EF1D;
-  assign cinv[9]  = 32'h3493F27E;
-  assign cinv[10] = 32'h32D7322B;
+  logic [W-1:0] cinv[11];
+  assign cinv[0]  = K_(32'h3F800000);
+  assign cinv[1]  = K_(32'h3F000000);
+  assign cinv[2]  = K_(32'h3E2AAAAB);
+  assign cinv[3]  = K_(32'h3D2AAAAB);
+  assign cinv[4]  = K_(32'h3C088889);
+  assign cinv[5]  = K_(32'h3AB60B61);
+  assign cinv[6]  = K_(32'h39500D01);
+  assign cinv[7]  = K_(32'h37D00D01);
+  assign cinv[8]  = K_(32'h3638EF1D);
+  assign cinv[9]  = K_(32'h3493F27E);
+  assign cinv[10] = K_(32'h32D7322B);
 
   typedef enum logic [4:0] {
     T_IDLE,
@@ -67,20 +78,20 @@ module gpnae_tail #(
   } tstate_t;
 
   tstate_t st[C];
-  logic [31:0] x[C], z[C], acc[C], d[C], e[C], s[C], tmp[C], res[C];
+  logic [W-1:0] x[C], z[C], acc[C], d[C], e[C], s[C], tmp[C], res[C];
   logic [1:0] fn[C];
   logic [3:0] k[C], m[C];
   logic issued[C];  // this context has an operation in a shared unit
   logic [IW-1:0] id[C];
 
   // Negate for subtraction.
-  function automatic logic [31:0] neg(input logic [31:0] v);
-    return {~v[31], v[30:0]};
+  function automatic logic [W-1:0] neg(input logic [W-1:0] v);
+    return {~v[W-1], v[W-2:0]};
   endfunction
 
   // What each context wants from the shared units this cycle, exactly the operands the one-context version issued.
   logic mreq[C], areq[C];
-  logic [31:0] ma[C], mb[C], aa[C], ab[C];
+  logic [W-1:0] ma[C], mb[C], aa[C], ab[C];
   always_comb begin
     for (int c = 0; c < C; c++) begin
       mreq[c] = 1'b0;
@@ -98,7 +109,7 @@ module gpnae_tail #(
           T_SELU_MUL: begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = tmp[c]; end
           T_SELU_OUT: begin mreq[c] = 1'b1; ma[c] = LA; mb[c] = d[c]; end
           T_E1:       begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = d[c]; end
-          T_SQ:       if (!(e[c][30:23] < 8'd64)) begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = e[c]; end
+          T_SQ:       if (!(e[c][W-2:MAN_W] < EXP_W'((BIAS + 1) / 2))) begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = e[c]; end
           T_U:        begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(e[c]); end
           T_V:        begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = tmp[c]; end
           T_W:        begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(tmp[c]); end
@@ -107,7 +118,7 @@ module gpnae_tail #(
           T_TANH_OUT: begin
             areq[c] = 1'b1;
             aa[c] = ONE;
-            ab[c] = (s[c][30:0] == '0) ? 32'h80000000 : {1'b1, s[c][30:23] + 8'd1, s[c][22:0]};  // 2s as an exponent increment
+            ab[c] = (s[c][W-2:0] == '0) ? SIGN : {1'b1, s[c][W-2:MAN_W] + EXP_W'(1), s[c][MAN_W-1:0]};  // 2s as an exponent increment
           end
           default: ;
         endcase
@@ -132,34 +143,22 @@ module gpnae_tail #(
   end
   assign ready_o = free_v;
 
-  logic [31:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
+  logic [W-1:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
   logic mul_valid, mul_done, add_valid, add_done;
 
-  fp32Multiplier TMUL (
-      .clk_i      (clk_i),
-      .rstn_i     (rstn_i),
-      .valid_i    (mul_valid),
-      .A          (mul_a),
-      .B          (mul_b),
-      .result_o   (mul_res),
-      .done_o     (mul_done),
-      .overflow_o (),
-      .underflow_o(),
-      .invalid_o  ()
-  );
-
-  fp32Adder TADD (
-      .clk_i      (clk_i),
-      .rstn_i     (rstn_i),
-      .valid_i    (add_valid),
-      .A          (add_a),
-      .B          (add_b),
-      .result_o   (add_res),
-      .done_o     (add_done),
-      .overflow_o (),
-      .underflow_o(),
-      .invalid_o  ()
-  );
+  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
+    $fatal(1, "gpnae_tail: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
+  end else if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
+    fp32Multiplier TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res),
+                         .done_o(mul_done), .overflow_o(), .underflow_o(), .invalid_o());
+    fp32Adder TADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid), .A(add_a), .B(add_b), .result_o(add_res),
+                    .done_o(add_done), .overflow_o(), .underflow_o(), .invalid_o());
+  end else begin : G_FP
+    fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a),
+        .B(mul_b), .result_o(mul_res), .done_o(mul_done), .overflow_o(), .underflow_o(), .invalid_o());
+    fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) TADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid), .A(add_a),
+        .B(add_b), .result_o(add_res), .done_o(add_done), .overflow_o(), .underflow_o(), .invalid_o());
+  end
 
   // In-order units: a FIFO of issuing contexts pairs each result with its owner, whatever the latency.
   logic [CW-1:0] mq[C], aq[C];
@@ -226,28 +225,28 @@ module gpnae_tail #(
         case (st[c])
           T_IDLE: begin
             if (start_i && free_v && free_c == CW'(c)) begin
-              automatic logic [31:0] a;
+              automatic logic [W-1:0] a;
               // a = x (SELU), -|x| (sigmoid), -2|x| (tanh)
               case (func_i)
                 2'b01:   a = x_i;
-                2'b10:   a = {1'b1, x_i[30:0]};
-                default: a = (x_i[30:23] >= 8'd133) ? {1'b1, BIG + 31'd1} : {1'b1, x_i[30:23] + 8'd1, x_i[22:0]};
+                2'b10:   a = {1'b1, x_i[W-2:0]};
+                default: a = (x_i[W-2:MAN_W] >= EXP_W'(BIAS + 6)) ? {1'b1, BIG + (W-1)'(1)} : {1'b1, x_i[W-2:MAN_W] + EXP_W'(1), x_i[MAN_W-1:0]};
               endcase
               x[c]  <= x_i;
               fn[c] <= func_i;
               id[c] <= idx_i;
-              if (a[30:0] > BIG) begin
+              if (a[W-2:0] > BIG) begin
                 // e^a underflows: e^a - 1 = -1 and e^a = 0
-                d[c]  <= {1'b1, ONE[30:0]};
+                d[c]  <= {1'b1, ONE[W-2:0]};
                 e[c]  <= '0;
                 st[c] <= (func_i == 2'b01) ? T_SELU_OUT : T_U;
               end else begin
-                if (a[30:23] < 8'd127) begin
+                if (a[W-2:MAN_W] < EXP_W'(BIAS)) begin
                   z[c] <= a;
                   m[c] <= '0;
                 end else begin
-                  z[c] <= {a[31], 8'd126, a[22:0]};  // |z| in [0.5, 1)
-                  m[c] <= 4'(a[30:23] - 8'd126);
+                  z[c] <= {a[W-1], EXP_W'(BIAS - 1), a[MAN_W-1:0]};  // |z| in [0.5, 1)
+                  m[c] <= 4'(a[W-2:MAN_W] - EXP_W'(BIAS - 1));
                 end
                 acc[c] <= cinv[10];
                 k[c]   <= 4'd9;
@@ -298,8 +297,8 @@ module gpnae_tail #(
           end
 
           T_SQ: begin
-            if (!issued[c] && e[c][30:23] < 8'd64) begin
-              // E^2 would fall below the fp32 normal range, and the chain is exact at 0
+            if (!issued[c] && e[c][W-2:MAN_W] < EXP_W'((BIAS + 1) / 2)) begin
+              // E^2 would fall below the normal range, and the chain is exact at 0
               e[c]  <= '0;
               m[c]  <= '0;
               st[c] <= T_U;
@@ -327,7 +326,7 @@ module gpnae_tail #(
             s[c] <= mul_res;
             issued[c] <= 1'b0;
             if (fn[c] == 2'b10) begin
-              if (x[c][31]) begin
+              if (x[c][W-1]) begin
                 res[c] <= mul_res;
                 st[c]  <= T_DONE;
               end else st[c] <= T_SIG_OUT;
@@ -339,7 +338,7 @@ module gpnae_tail #(
           end
 
           T_TANH_OUT: if (ares) begin
-            res[c] <= {x[c][31], add_res[30:0]}; issued[c] <= 1'b0; st[c] <= T_DONE;
+            res[c] <= {x[c][W-1], add_res[W-2:0]}; issued[c] <= 1'b0; st[c] <= T_DONE;
           end
 
           // One result leaves per cycle, lowest context first.
