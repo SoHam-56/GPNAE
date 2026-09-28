@@ -21,11 +21,13 @@
 // most of the lane's time. Elements are captured from the FIFO first, then streamed from
 // registers, which keeps the FIFO's read-pointer timing untouched.
 module gpnae_poly #(
-    parameter int DATA_WIDTH    = 32,
-    parameter int ADDR_LINES    = 5,
-    parameter int CONTROL_WIDTH = 3,  // 001 SELU, 010 sigmoid, 011 tanh, 100 ReLU, 101 linear
-    parameter int K             = 16,
-    parameter int TAIL_CONTEXTS = 4    // tail elements gpnae_tail works on at once
+    parameter int    EXP_W         = 8,   // the build's number format: fp32 8/23, bf16 8/7
+    parameter int    MAN_W         = 23,
+    parameter int    DATA_WIDTH    = 1 + EXP_W + MAN_W,
+    parameter int    ADDR_LINES    = 5,
+    parameter int    CONTROL_WIDTH = 3,  // 001 SELU, 010 sigmoid, 011 tanh, 100 ReLU, 101 linear
+    parameter int    K             = 16,
+    parameter int    TAIL_CONTEXTS = 4   // tail elements gpnae_tail works on at once
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -50,10 +52,20 @@ module gpnae_poly #(
   // Pop issued at cycle c -> rd_en at c+1 -> status clear visible c+2 -> data_o(t+2)=mem[rd_ptr(t)],
   // so the word for that pop appears at c+3 and one per cycle after.
   localparam int CAP_LAG = 3;
-  localparam int MUL_LAT = 8;  // fp32Multiplier: valid_i at t, done_o at t+8
-  localparam int DN_LAT = 6;  // fp32_down: assign done_o = valid_stage6
+  localparam bit FP32 = sienna_fmt_pkg::is_fp32(EXP_W, MAN_W);
+  localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(EXP_W, MAN_W);  // the format's multiplier, valid_i at t, done_o at t+MUL_LAT
+  localparam int DN_LAT = FP32 ? 6 : sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // fp32_down: done_o = valid_stage6; else fpAdder
 
-  localparam logic [DATA_WIDTH-1:0] LAMDA = 32'h3F867D5F;
+  localparam logic [DATA_WIDTH-1:0] LAMDA = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h3F867D5F, MAN_W));
+  localparam logic [DATA_WIDTH-1:0] NEG_ONE = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'hBF800000, MAN_W));
+  localparam logic [DATA_WIDTH-1:0] T4_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h40800000, MAN_W));  // 4.0
+  localparam logic [DATA_WIDTH-1:0] T35_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h40600000, MAN_W));  // 3.5
+  localparam logic [DATA_WIDTH-2:0] T4 = T4_W[DATA_WIDTH-2:0];
+  localparam logic [DATA_WIDTH-2:0] T35 = T35_W[DATA_WIDTH-2:0];
+
+  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
+    $fatal(1, "gpnae_poly: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
+  end
 
   // Coefficient sets packed into one ROM. Keep in step with poly_coeffs.mem.
   localparam logic [ADDR_LINES-1:0] BASE_SELU = 5'd0, DEG_SELU = 5'd8;
@@ -109,42 +121,56 @@ module gpnae_poly #(
   logic [DATA_WIDTH-1:0] sq_a, sq_res;
   logic                  sq_valid, sq_done;
 
-  fp32Multiplier SQ (
-      .clk_i(clk_i),
-      .rstn_i(rstn_i),
-      .valid_i(sq_valid),
-      .A(sq_a),
-      .B(sq_a),
-      .result_o(sq_res),
-      .done_o(sq_done),
-      .overflow_o(),
-      .underflow_o(),
-      .invalid_o()
-  );
-
   logic                  ld_valid, mac_start;
   logic [DATA_WIDTH-1:0] mac_in;
   logic                  mac_res_valid, mac_busy, mac_done;
   logic [DATA_WIDTH-1:0] mac_res;
 
-  barrel_mac #(
-      .DATA_WIDTH(DATA_WIDTH),
-      .ADDR_LINES(ADDR_LINES),
-      .K         (K),
-      .INIT_FILE ("poly_coeffs.mem")
-  ) barrel_mac_inst (
-      .clk_i       (clk_i),
-      .rstn_i      (rstn_i),
-      .ld_valid_i  (ld_valid),
-      .ld_data_i   (mac_in),
-      .start_i     (mac_start),
-      .terms_i     (poly_deg),
-      .coeff_base_i(poly_base),
-      .res_valid_o (mac_res_valid),
-      .res_data_o  (mac_res),
-      .busy_o      (mac_busy),
-      .done_o      (mac_done)
-  );
+  // The format's coefficient table, as a literal: a string parameter passed down to the ROM's $readmemb is not found.
+  localparam bit FP32_TABLE = sienna_fmt_pkg::is_fp32(EXP_W, MAN_W);
+  if (FP32_TABLE) begin : G_MAC
+    barrel_mac #(
+        .EXP_W     (EXP_W),
+        .MAN_W     (MAN_W),
+        .DATA_WIDTH(DATA_WIDTH),
+        .ADDR_LINES(ADDR_LINES),
+        .K         (K),
+        .INIT_FILE ("poly_coeffs.mem")
+    ) barrel_mac_inst (
+        .clk_i       (clk_i),
+        .rstn_i      (rstn_i),
+        .ld_valid_i  (ld_valid),
+        .ld_data_i   (mac_in),
+        .start_i     (mac_start),
+        .terms_i     (poly_deg),
+        .coeff_base_i(poly_base),
+        .res_valid_o (mac_res_valid),
+        .res_data_o  (mac_res),
+        .busy_o      (mac_busy),
+        .done_o      (mac_done)
+    );
+  end else begin : G_MAC
+    barrel_mac #(
+        .EXP_W     (EXP_W),
+        .MAN_W     (MAN_W),
+        .DATA_WIDTH(DATA_WIDTH),
+        .ADDR_LINES(ADDR_LINES),
+        .K         (K),
+        .INIT_FILE ("poly_coeffs_bf16.mem")
+    ) barrel_mac_inst (
+        .clk_i       (clk_i),
+        .rstn_i      (rstn_i),
+        .ld_valid_i  (ld_valid),
+        .ld_data_i   (mac_in),
+        .start_i     (mac_start),
+        .terms_i     (poly_deg),
+        .coeff_base_i(poly_base),
+        .res_valid_o (mac_res_valid),
+        .res_data_o  (mac_res),
+        .busy_o      (mac_busy),
+        .done_o      (mac_done)
+    );
+  end
 
   logic [DATA_WIDTH-1:0] sig_buf[K];
   logic [        K-1:0]  pos_buf;
@@ -164,10 +190,10 @@ module gpnae_poly #(
   logic sig_in_tail;
   always_comb begin
     case (control_word_i)
-      3'b001:         sig_in_tail = fifo_data_o[31] && (fifo_data_o[30:0] > 31'h40800000);  // SELU x < -4
-      3'b010:         sig_in_tail = (fifo_data_o[30:0] > 31'h40600000);  // sigmoid |x| > 3.5
+      3'b001:         sig_in_tail = fifo_data_o[DATA_WIDTH-1] && (fifo_data_o[DATA_WIDTH-2:0] > T4);  // SELU x < -4
+      3'b010:         sig_in_tail = (fifo_data_o[DATA_WIDTH-2:0] > T35);  // sigmoid |x| > 3.5
       3'b100, 3'b101: sig_in_tail = 1'b0;  // ReLU and linear are exact
-      default:        sig_in_tail = (fifo_data_o[30:0] > 31'h40800000);  // tanh |x| > 4
+      default:        sig_in_tail = (fifo_data_o[DATA_WIDTH-2:0] > T4);  // tanh |x| > 4
     endcase
   end
 
@@ -188,6 +214,8 @@ module gpnae_poly #(
   assign tail_start = tail_ready && (|tail_pend);
 
   gpnae_tail #(
+      .EXP_W   (EXP_W),
+      .MAN_W   (MAN_W),
       .CONTEXTS(TAIL_CONTEXTS),
       .IW      (SW)
   ) TAIL (
@@ -204,31 +232,26 @@ module gpnae_poly #(
       .busy_o  (tail_busy)
   );
 
-  // Post stage: one multiply, or fp32_down plus a sign flip. No divider.
+  // Post stage: one multiply, or P - 1 (fp32_down, or an adder with -1) plus a sign flip. No divider.
   logic [DATA_WIDTH-1:0] mul_a, mul_b, mul_res, dn_a, dn_res;
   logic                  mul_valid, mul_done, dn_valid, dn_done;
 
-  fp32Multiplier POST (
-      .clk_i(clk_i),
-      .rstn_i(rstn_i),
-      .valid_i(mul_valid),
-      .A(mul_a),
-      .B(mul_b),
-      .result_o(mul_res),
-      .done_o(mul_done),
-      .overflow_o(),
-      .underflow_o(),
-      .invalid_o()
-  );
-
-  fp32_down POSTD (
-      .clk_i (clk_i),
-      .rstn_i(rstn_i),
-      .valid_i(dn_valid),
-      .A     (dn_a),
-      .Result(dn_res),
-      .done_o(dn_done)
-  );
+  // The squaring unit and the post stage in the build's format.
+  if (FP32) begin : G_FP32
+    fp32Multiplier SQ (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(sq_valid), .A(sq_a), .B(sq_a), .result_o(sq_res),
+                       .done_o(sq_done), .overflow_o(), .underflow_o(), .invalid_o());
+    fp32Multiplier POST (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res),
+                         .done_o(mul_done), .overflow_o(), .underflow_o(), .invalid_o());
+    fp32_down POSTD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(dn_valid), .A(dn_a), .Result(dn_res), .done_o(dn_done));
+  end else begin : G_FP
+    fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) SQ (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(sq_valid), .A(sq_a), .B(sq_a),
+        .result_o(sq_res), .done_o(sq_done), .overflow_o(), .underflow_o(), .invalid_o());
+    fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) POST (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a),
+        .B(mul_b), .result_o(mul_res), .done_o(mul_done), .overflow_o(), .underflow_o(), .invalid_o());
+    // P - 1 for negative sigmoid inputs: an adder with the constant -1, as fp32_down is in fp32.
+    fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) POSTD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(dn_valid), .A(dn_a), .B(NEG_ONE),
+        .result_o(dn_res), .done_o(dn_done), .overflow_o(), .underflow_o(), .invalid_o());
+  end
 
   typedef enum logic [3:0] {
     G_IDLE,
