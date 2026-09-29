@@ -13,10 +13,11 @@
 // results are bit-identical to mac.sv.
 //
 // K must be >= 14 or a slot's accumulator would not be back before it is needed again.
+// int8 (EXP_W = 0): one fxMac, a Q4.11 multiply-add in 2 cycles, behind a register stage; the loop is 3 cycles, K >= 4.
 module barrel_mac #(
     parameter int EXP_W      = 8,
     parameter int MAN_W      = 23,
-    parameter int DATA_WIDTH = 1 + EXP_W + MAN_W,
+    parameter int DATA_WIDTH = sienna_fmt_pkg::is_int(EXP_W) ? 16 : 1 + EXP_W + MAN_W,  // int8 works in Q4.11
     parameter int ADDR_LINES = 5,
     parameter int K          = 16,
     parameter     INIT_FILE  = "taylor_coeffs.mem"
@@ -39,9 +40,11 @@ module barrel_mac #(
     output logic                  done_o
 );
 
+  localparam bit INT     = sienna_fmt_pkg::is_int(EXP_W);  // int8: Q4.11 on fxMac
+  localparam int FX_LAT  = sienna_fmt_pkg::fx_lat();  // fxMac valid_i -> done_o
   localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(EXP_W, MAN_W);  // valid_i -> done_o of the format's multiplier
   localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // and adder
-  localparam int LOOP    = MUL_LAT + ADD_LAT;      // the Horner recurrence: 13 in fp32, 8 in bf16
+  localparam int LOOP    = INT ? FX_LAT + 1 : MUL_LAT + ADD_LAT;  // the Horner recurrence: 13 in fp32, 8 in bf16, 3 in int8
   localparam int MIN_PER = LOOP + 1;               // write-back lands a cycle after that
   localparam int SW      = $clog2(K);
 
@@ -78,7 +81,12 @@ module barrel_mac #(
 
   // ROM address comes from stage 7 so coeff_data is valid at stage 8, where the add issues.
   logic [ADDR_LINES:0] coeff_addr_full;
-  assign coeff_addr_full = {1'b0, coeff_base_i} + ncoef - 1 - rnd_dly[MUL_LAT-2];
+  if (INT) begin : G_ADDR_INT
+    // int8: addressed at issue, so the coefficient lands with the registered operands a cycle later.
+    assign coeff_addr_full = {1'b0, coeff_base_i} + ncoef - 1 - round;
+  end else begin : G_ADDR_FP
+    assign coeff_addr_full = {1'b0, coeff_base_i} + ncoef - 1 - rnd_dly[MUL_LAT-2];
+  end
   assign coeff_addr      = coeff_addr_full[ADDR_LINES-1:0];
 
   CoeffROM #(
@@ -94,6 +102,22 @@ module barrel_mac #(
 
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "barrel_mac: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
+  end else if (INT) begin : G_INT
+    if (DATA_WIDTH != 16) begin : G_BAD_WIDTH
+      $fatal(1, "barrel_mac: int8 evaluates in Q4.11, DATA_WIDTH must be 16, not %0d", DATA_WIDTH);
+    end
+    // One Horner step, sat(((x * acc) >>> 11) + c), on the slot's operand and accumulator read at stage 0.
+    fxMac #(.W(DATA_WIDTH), .FRAC(11)) MAC (
+        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_dly[0]),
+        .A(xop[slot_dly[0][SW-1:0]]), .X(acc[slot_dly[0][SW-1:0]]), .C(coeff_data),
+        .result_o(add_res), .done_o(add_done)
+    );
+    assign mul_res  = '0;
+    assign mul_done = 1'b0;
+`ifndef SYNTHESIS
+    always @(posedge clk_i)
+      if (rstn_i && (add_done != v_dly[LOOP-1])) $fatal(1, "barrel_mac: fxMac latency is not %0d", FX_LAT);
+`endif
   end else if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
     fp32Multiplier MUL (
         .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid),
