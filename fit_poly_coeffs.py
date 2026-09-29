@@ -168,7 +168,7 @@ def measure_cases(lane, code):
                                  for c in gpnae_model.INT8_CASES[NAME_INT8[code]] if c.gated)
 
 
-DENSE_X = np.arange(-8192, 8193, dtype=np.int64)  # every Q4.11 input from -4 to 4, as the lane sees it after its rescale
+DENSE_X = np.arange(-32768, 32768, dtype=np.int64)  # every Q4.11 input, -16 to 16 - 2^-11, as the lane sees it after its rescale
 Cand = namedtuple("Cand", "d c dense grid nominal hsat rail")  # d, the effective degree; dense and grid, Acc; rail, the lane's
 
 
@@ -284,7 +284,7 @@ def main_int8(a):
     L.append("gpnae_poly int8: the float lanes' forms in Q4.11 (fxMac Horner, floor; integer post products), bit-exact model;")
     L.append("the float lane's ranges (SELU x >= -4, sigmoid |x| <= 3.5, tanh |x| <= 4), the saturated value beyond them.")
     L.append(f"GPNAE's tolerance ({tol}) on the DENSE sweep decides the choice and the verdict: every Q4.11 input x in")
-    L.append("[-8192, 8192] as the lane sees it after its rescale; tanh and sigmoid at their fixed output quantization, SELU at every")
+    L.append("[-32768, 32767] (the full Q4.11 range) as the lane sees it after its rescale; tanh and sigmoid at their fixed output quantization, SELU at every")
     L.append(f"gated case's (inputs: SELU {n_dense[1]}, sigmoid {n_dense[2]}, tanh {n_dense[3]}). GRID: the int8 inputs of every gated")
     L.append(f"case (Task 12's measure; SELU {n_grid[1]}, sigmoid {n_grid[2]}, tanh {n_grid[3]} inputs), kept alongside. Each degree is")
     L.append("fitted, refined by coordinate descent on the dense tolerance (kept only if it misses fewer), then stripped of zero leading")
@@ -340,7 +340,7 @@ def main_int8(a):
         table[base:base + d + 1] = chosen[code].c
     lane = gpnae_model.Lane(gpnae_model.INT8, [v & 0xFFFF for v in table], sets=lay)
     L.append("")
-    L.append(f"whole table, SETS_INT8 = {lay}, dense sweep (the verdict's figures): every Q4.11 input in [-8192, 8192]")
+    L.append(f"whole table, SETS_INT8 = {lay}, dense sweep (the verdict's figures): every Q4.11 input in [-32768, 32767]")
     L.append(f"{'activation':<10}{'inputs':>8}{'fail':>6}{'rel %':>8}{'LSB':>5}{'real':>8}{'differ':>7}{'hsat':>6}{'lane rail':>10}"
              f"{'exact rail':>11}")
     for code in (1, 2, 3):
