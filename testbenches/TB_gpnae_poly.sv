@@ -49,6 +49,12 @@ module TB_gpnae_poly;
       .last_i(start_i),
       .terms_i(terms_i),
       .control_word_i(control_word_i),
+      .gp_mx_i('0),
+      .gp_shx_i('0),
+      .gp_zin_i('0),
+      .gp_mout_i('0),
+      .gp_shout_i('0),
+      .gp_zout_i('0),
       .full_o(full_o),
       .empty_o(empty_o),
       .idle_o(idle_o),
@@ -109,8 +115,8 @@ module TB_gpnae_poly;
     #1;
     $readmemb(COEFF_FILE, want);
     for (int i = 0; i < 32; i++)
-      if (dut.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
-        $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i], COEFF_FILE, want[i]);
+      if (dut.G_FLOAT.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
+        $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.G_FLOAT.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i], COEFF_FILE, want[i]);
   end
 
   task automatic reset_sequence();
