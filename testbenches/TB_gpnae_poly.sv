@@ -9,8 +9,9 @@ module TB_gpnae_poly;
 
 `include "gpnae_test_config.svh"
 
+  localparam bit IS_INT = (EXP_BITS == 0);  // int8 build: exact int8 compare, lane parameters per batch
   localparam int ADDR_LINES = 5;
-  localparam int CONTROL_WIDTH = 2;
+  localparam int CONTROL_WIDTH = IS_INT ? 3 : 2;  // int8 also runs ReLU (100) and linear (101)
   localparam int TOTAL = NUM_BATCHES * SIGNALS_PER_BATCH;
 
   reg clk;
@@ -20,6 +21,10 @@ module TB_gpnae_poly;
   reg last_i, start_i;
   reg [ADDR_LINES-1:0] terms_i;
   reg [CONTROL_WIDTH-1:0] control_word_i;
+  reg [15:0] gp_mx = '0;  // int8 lane parameters, one set per batch from <act>_par.mem
+  reg [7:0] gp_shx = '0, gp_zin = '0, gp_shout = '0, gp_zout = '0;
+  reg [31:0] gp_mout = '0;
+  reg [79:0] par[0:NUM_BATCHES-1];
 
   wire full_o, empty_o, idle_o, done_o;
   wire [DATA_WIDTH-1:0] final_result_o;
@@ -49,12 +54,12 @@ module TB_gpnae_poly;
       .last_i(start_i),
       .terms_i(terms_i),
       .control_word_i(control_word_i),
-      .gp_mx_i('0),
-      .gp_shx_i('0),
-      .gp_zin_i('0),
-      .gp_mout_i('0),
-      .gp_shout_i('0),
-      .gp_zout_i('0),
+      .gp_mx_i(gp_mx),
+      .gp_shx_i(gp_shx[4:0]),
+      .gp_zin_i(gp_zin),
+      .gp_mout_i(gp_mout),
+      .gp_shout_i(gp_shout),
+      .gp_zout_i(gp_zout),
       .full_o(full_o),
       .empty_o(empty_o),
       .idle_o(idle_o),
@@ -68,15 +73,16 @@ module TB_gpnae_poly;
 
   // Format-generic float decode. $bitstoshortreal is unusable: Verilator maps it to 64-bit
   // $bitstoreal, so every value decodes to a denormal near zero and every comparison passes.
-  localparam int BIAS = (1 << (EXP_BITS - 1)) - 1;
-  localparam int EXP_MAX = (1 << EXP_BITS) - 1;
+  localparam int EW = (EXP_BITS > 0) ? EXP_BITS : 1;  // int8 has no exponent; fp_to_real is not called there
+  localparam int BIAS = (1 << (EW - 1)) - 1;
+  localparam int EXP_MAX = (1 << EW) - 1;
 
   function automatic real fp_to_real(input logic [DATA_WIDTH-1:0] b);
     logic sign;
     int exp;
     real man, v;
     sign = b[DATA_WIDTH-1];
-    exp  = int'(b[DATA_WIDTH-2-:EXP_BITS]);
+    exp  = int'(b[DATA_WIDTH-2-:EW]);
     man  = real'(longint'(b[MAN_BITS-1:0])) / real'(longint'(1) << MAN_BITS);
     if (exp == EXP_MAX) v = 1.0e38;                 // Inf / NaN, clamped
     else if (exp == 0) v = 0.0;                      // zero / flushed subnormal
@@ -109,14 +115,30 @@ module TB_gpnae_poly;
     return (rel_err <= REL_TOL) || (d <= ABS_TOL);
   endfunction
 
-  // The lane must have loaded this format's coefficient table.
-  initial begin
-    logic [DATA_WIDTH-1:0] want[32];
-    #1;
-    $readmemb(COEFF_FILE, want);
-    for (int i = 0; i < 32; i++)
-      if (dut.G_FLOAT.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
-        $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.G_FLOAT.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i], COEFF_FILE, want[i]);
+  // The lane must have loaded this format's coefficient table; int8's is 16-bit Q4.11.
+  if (IS_INT) begin : G_ROM_INT
+    initial begin
+      logic [15:0] want[32];
+      #1;
+      $readmemb(COEFF_FILE, want);
+      for (int i = 0; i < 32; i++)
+        if (dut.G_INT8.lane_inst.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
+          $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.G_INT8.lane_inst.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i],
+                 COEFF_FILE, want[i]);
+    end
+    // The requantizer in the RTL and the model's must round alike (the variant pinned at G0).
+    initial if (sienna_fmt_pkg::REQ_ROUNDING != REQ_ROUNDING)
+      $fatal(1, "RTL requantize rounds %s, the model %s", sienna_fmt_pkg::REQ_ROUNDING, REQ_ROUNDING);
+  end else begin : G_ROM_FP
+    initial begin
+      logic [DATA_WIDTH-1:0] want[32];
+      #1;
+      $readmemb(COEFF_FILE, want);
+      for (int i = 0; i < 32; i++)
+        if (dut.G_FLOAT.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i] !== want[i])
+          $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.G_FLOAT.G_MAC.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i],
+                 COEFF_FILE, want[i]);
+    end
   end
 
   task automatic reset_sequence();
@@ -126,7 +148,7 @@ module TB_gpnae_poly;
       last_i = 0;
       start_i = 0;
       signal_i = '0;
-      control_word_i = 2'b00;
+      control_word_i = '0;
       terms_i = '0;
       cap_clear = 1;          // the capture block owns n_captured; pulse a clear
       repeat (8) @(posedge clk);  // fp32Adder's unreset valid stages need 4+ cycles of reset to flush (D-7)
@@ -136,18 +158,23 @@ module TB_gpnae_poly;
     end
   endtask
 
+  // int8 drives 1 ns after each edge: a 32-signal batch fills the FIFO, and a zero-delay drive trips the full_o assertion.
   task automatic write_signal(input [DATA_WIDTH-1:0] sig_data, input last);
     begin
       wait (idle_o);
       @(posedge clk);
+      if (IS_INT) #1;
       signal_i = sig_data;
       wr_en_i  = 1;
       @(posedge clk);
+      if (IS_INT) #1;
       wr_en_i = 0;
       @(posedge clk);
+      if (IS_INT) #1;
       last_i  = last;
       start_i = last;
       @(posedge clk);
+      if (IS_INT) #1;
       last_i = 0;
     end
   endtask
@@ -162,9 +189,9 @@ module TB_gpnae_poly;
     end
   end
 
-  task automatic run_activation(input [1:0] ctrl, input string act_name,
+  task automatic run_activation(input [CONTROL_WIDTH-1:0] ctrl, input string act_name,
                                 input [ADDR_LINES-1:0] n_terms);
-    int exact_n, tol_n, fail_n, miss_n, guard, base, shown;
+    int exact_n, tol_n, fail_n, miss_n, guard, base, shown, bfail;
     time t0;
     real rel, worst, sum_rel;
     bit ok;
@@ -174,6 +201,7 @@ module TB_gpnae_poly;
 
       $readmemh({STIM_DIR, act_name, "_in.mem"}, stim);
       $readmemh({STIM_DIR, act_name, "_exp.mem"}, gold);
+      if (IS_INT) $readmemh({STIM_DIR, act_name, "_par.mem"}, par);
 
       $display("\n==============================================");
       $display(" %s  control=%02b  terms=%0d  %0d batches x %0d signals",
@@ -187,6 +215,7 @@ module TB_gpnae_poly;
         reset_sequence();
         control_word_i = ctrl;
         terms_i        = n_terms;
+        if (IS_INT) {gp_mx, gp_shx, gp_zin, gp_mout, gp_shout, gp_zout} = par[b];
 
         for (int i = 0; i < SIGNALS_PER_BATCH; i++)
           write_signal(stim[base+i], (i == SIGNALS_PER_BATCH - 1));
@@ -197,6 +226,7 @@ module TB_gpnae_poly;
           guard = guard + 1;
         end
 
+        bfail = fail_n + miss_n;
         for (int i = 0; i < SIGNALS_PER_BATCH; i++) begin
           if (i >= n_captured) begin
             miss_n++;
@@ -221,6 +251,8 @@ module TB_gpnae_poly;
             end
           end
         end
+        // int8: batches with a wrong or missing output, so regression.py can split the parameter sets.
+        if (IS_INT && fail_n + miss_n > bfail) $display("  BATCHFAIL %s b%0d : %0d", act_name, b, fail_n + miss_n - bfail);
       end
 
       if (worst > worst_rel_overall) worst_rel_overall = worst;
@@ -239,6 +271,191 @@ module TB_gpnae_poly;
       total_tol     += tol_n;
       total_failed  += fail_n;
       total_missing += miss_n;
+    end
+  endtask
+
+  // int8 protocol edges (stream_*.mem): groups streamed with no reset, outputs checked bit-exact, group starts checked.
+  localparam int S_SEG = 64, S_GRP = 1024, S_EL = 8192, S_BND = 2048;  // stream capacities
+  localparam logic [3:0] GS_IDLE = 4'd0, GS_CAP = 4'd1;  // gpnae_poly_int8's gstate_t encoding (G_NEXT is 8)
+  localparam int M_SAME = 1, M_BUSY = 2;  // mode 0: write, then last_i; 1: last_i with the last write; 2: write while busy
+  reg [31:0] s_cnt[0:3];  // segments, groups, elements, expected group starts
+  reg [95:0] s_seg[0:S_SEG-1];  // {control word, groups, lane parameters as in <act>_par.mem}
+  reg [31:0] s_grp[0:S_GRP-1];  // {mode, elements, group starts expected before this group}
+  reg [7:0] s_in[0:S_EL-1], s_exp[0:S_EL-1], s_got[0:S_EL-1];
+  reg [15:0] s_bnd[0:S_BND-1], s_obs[0:S_BND-1];  // {state the group started from, size} per group start
+  integer s_n, s_nobs;
+  reg s_on = 1'b0, s_clear = 1'b0, s_abort = 1'b0;
+  logic [3:0] lane_gs;  // the int8 lane's state, FIFO count and group size, from G_MON
+  logic [ADDR_LINES:0] lane_cnt;
+  logic [4:0] lane_grp;
+
+  // Sole writer of s_n and s_got[].
+  always @(posedge clk) begin
+    if (s_clear) s_n <= 0;
+    else if (s_on && done_o && s_n < S_EL) begin
+      s_got[s_n] <= final_result_o[7:0];
+      s_n        <= s_n + 1;
+    end
+  end
+
+  if (IS_INT) begin : G_MON
+    logic [3:0] gs_q;
+    assign lane_gs  = dut.G_INT8.lane_inst.gstate;
+    assign lane_cnt = dut.G_INT8.lane_inst.fifo_count;
+    assign lane_grp = dut.G_INT8.lane_inst.grp_n;
+    // Sole writer of s_nobs and s_obs[]: a group starts where the lane enters G_CAP, from G_IDLE or G_NEXT.
+    always @(posedge clk) begin
+      gs_q <= lane_gs;
+      if (s_clear) s_nobs <= 0;
+      else if (s_on && lane_gs == GS_CAP && gs_q != GS_CAP && s_nobs < S_BND) begin
+        s_obs[s_nobs] <= {4'd0, gs_q, 3'd0, lane_grp};
+        s_nobs        <= s_nobs + 1;
+      end
+    end
+  end
+
+  task automatic tick();
+    @(posedge clk);
+    #1;
+  endtask
+
+  // Every output written so far is back and the lane is in G_IDLE with an empty FIFO.
+  task automatic s_quiet(input int want);
+    int guard;
+    guard = 0;
+    while (!(s_n >= want && lane_gs == GS_IDLE && lane_cnt == 0) && guard < TIMEOUT_CYCLES) begin
+      tick();
+      guard++;
+    end
+    if (guard >= TIMEOUT_CYCLES) begin
+      s_abort = 1;
+      $display("  STREAM timeout: %0d of %0d outputs, lane state %0d, FIFO %0d", s_n, want, lane_gs, lane_cnt);
+    end
+  endtask
+
+  task automatic s_last();
+    last_i  = 1;
+    start_i = 1;
+    tick();
+    last_i  = 0;
+    start_i = 0;
+  endtask
+
+  task automatic run_stream();
+    int n_seg, n_grp, n_el, n_bnd, g, wr, mode, n, n_prev, guard, fails, missing, extra, wrong, edge_err, shown;
+    logic [7:0] ctrl, n_groups;
+    time t0;
+    begin
+      $readmemh({STIM_DIR, "stream_cnt.mem"}, s_cnt);
+      $readmemh({STIM_DIR, "stream_seg.mem"}, s_seg);
+      $readmemh({STIM_DIR, "stream_grp.mem"}, s_grp);
+      $readmemh({STIM_DIR, "stream_in.mem"}, s_in);
+      $readmemh({STIM_DIR, "stream_exp.mem"}, s_exp);
+      $readmemh({STIM_DIR, "stream_bnd.mem"}, s_bnd);
+      n_seg = s_cnt[0];
+      n_grp = s_cnt[1];
+      n_el  = s_cnt[2];
+      n_bnd = s_cnt[3];
+      $display("\n==============================================");
+      $display(" STREAM  %0d segments  %0d groups  %0d elements, no reset between groups", n_seg, n_grp, n_el);
+      $display("==============================================");
+      reset_sequence();
+      s_clear = 1;
+      s_on    = 1;
+      tick();
+      s_clear  = 0;
+      g        = 0;
+      wr       = 0;
+      edge_err = 0;
+      t0       = $time;
+      for (int s = 0; s < n_seg && !s_abort; s++) begin
+        s_quiet(wr);  // the lane parameters change only while the lane is idle
+        {ctrl, n_groups, gp_mx, gp_shx, gp_zin, gp_mout, gp_shout, gp_zout} = s_seg[s];
+        control_word_i = ctrl[CONTROL_WIDTH-1:0];
+        tick();
+        for (int k = 0; k < int'(n_groups) && !s_abort; k++) begin
+          mode   = int'(s_grp[g][31:24]);
+          n      = int'(s_grp[g][23:16]);
+          n_prev = int'(s_grp[g][15:0]);
+          g++;
+          if (mode == M_BUSY) begin
+            // The previous group has started and left G_CAP, so its words are out of the FIFO; the lane still works on it.
+            guard = 0;
+            while (!(s_nobs >= n_prev && lane_gs != GS_IDLE && lane_gs != GS_CAP && lane_cnt == 0) && guard < TIMEOUT_CYCLES) begin
+              tick();
+              guard++;
+            end
+            if (guard >= TIMEOUT_CYCLES) begin
+              s_abort = 1;
+              $display("  STREAM timeout before busy group %0d: lane state %0d, FIFO %0d", g - 1, lane_gs, lane_cnt);
+            end
+          end else s_quiet(wr);
+          if (s_abort) break;
+          for (int i = 0; i < n; i++) begin
+            signal_i = s_in[wr];
+            wr_en_i  = 1;
+            wr++;
+            if (mode == M_SAME && i == n - 1) begin
+              last_i  = 1;
+              start_i = 1;
+            end
+            tick();
+          end
+          wr_en_i = 0;
+          last_i  = 0;
+          start_i = 0;
+          if (mode != M_SAME) begin
+            if (mode == M_BUSY && lane_gs == GS_IDLE) begin
+              edge_err++;
+              $display("  STREAM group %0d: last_i did not arrive while the lane was busy", g - 1);
+            end
+            s_last();
+          end else if (n == 1) begin
+            // G_IDLE counts the FIFO before this write, so a lone element waits for the next last_i.
+            repeat (8) tick();
+            if (lane_gs != GS_IDLE || lane_cnt != 1) begin
+              edge_err++;
+              $display("  STREAM group %0d: expected the lone element to wait in the FIFO, lane state %0d, FIFO %0d", g - 1,
+                       lane_gs, lane_cnt);
+            end
+            s_last();
+          end
+        end
+      end
+      if (!s_abort) s_quiet(wr);
+      repeat (20) tick();  // a spurious done_o would show up in s_n
+      fails = 0;
+      shown = 0;
+      for (int i = 0; i < n_el && i < s_n; i++)
+        if (s_got[i] !== s_exp[i]) begin
+          fails++;
+          if (shown < 40) begin
+            $display("  STREAM e%0d  in %0h  expected %0h  got %0h  FAIL", i, s_in[i], s_exp[i], s_got[i]);
+            shown++;
+          end
+        end
+      missing = (s_n < n_el) ? n_el - s_n : 0;
+      extra   = (s_n > n_el) ? s_n - n_el : 0;
+      wrong   = 0;
+      for (int i = 0; (i < n_bnd || i < s_nobs) && i < S_BND; i++)
+        if (i >= n_bnd || i >= s_nobs || s_obs[i] !== s_bnd[i]) begin
+          wrong++;
+          if (shown < 80) begin
+            $display("  STREAM group start %0d: expected %0h, observed %0h (state << 8 | size)", i,
+                     (i < n_bnd) ? s_bnd[i] : 16'hFFFF, (i < s_nobs) ? s_obs[i] : 16'hFFFF);
+            shown++;
+          end
+        end
+      s_on = 0;
+      $display("  ----------------------------------------------");
+      $display("  STREAM : elements %0d  exact %0d  failed %0d  missing %0d  extra %0d", n_el, n_el - fails - missing, fails,
+               missing, extra);
+      $display("  STREAM boundaries : expected %0d  observed %0d  wrong %0d  edge errors %0d", n_bnd, s_nobs, wrong, edge_err);
+      $display("  STREAM cycles : %0d", ($time - t0) / clk_period);
+      total_checked += n_el;
+      total_exact   += n_el - fails - missing;
+      total_failed  += fails + extra + wrong + edge_err + (s_abort ? 1 : 0);
+      total_missing += missing;
     end
   endtask
 
@@ -269,6 +486,11 @@ module TB_gpnae_poly;
     run_activation(2'b01, "selu", SELU_TERMS);
     run_activation(2'b10, "sigmoid", SIGMOID_TERMS);
     run_activation(2'b11, "tanh", TANH_TERMS);
+    if (IS_INT) begin
+      run_activation(3'b100, "relu", TANH_TERMS);
+      run_activation(3'b101, "linear", TANH_TERMS);
+      run_stream();
+    end
 
     $display("\n==============================================");
     $display(" SUMMARY");
