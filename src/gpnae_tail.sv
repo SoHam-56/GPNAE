@@ -146,7 +146,7 @@ module gpnae_tail #(
   logic [W-1:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
   logic mul_valid, mul_done, add_valid, add_done;
 
-  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
+  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W) || sienna_fmt_pkg::is_int(EXP_W)) begin : G_BAD_FORMAT
     $fatal(1, "gpnae_tail: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
   end else if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
     fp32Multiplier TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res),
