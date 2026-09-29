@@ -36,6 +36,7 @@ DESIGN_FILES = \
 	TYTAN/barrel_mac.sv \
 	gpnae.sv \
 	gpnae_tail.sv \
+	gpnae_poly_int8.sv \
 	gpnae_poly.sv
 
 # ccache 3.7 here served corrupted objects that segfaulted at start-up; USE_CCACHE=1 opts back in.
