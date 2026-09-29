@@ -6,6 +6,7 @@ Writes poly_coeffs_<fmt>.mem in the GPNAE root and in src/TYTAN/Memory. Never wr
 import argparse
 import os
 import sys
+from collections import namedtuple
 
 import numpy as np
 
@@ -167,9 +168,72 @@ def measure_cases(lane, code):
                                  for c in gpnae_model.INT8_CASES[NAME_INT8[code]] if c.gated)
 
 
-def refine_int8(code, r, c, passes=10):
-    """Coordinate descent on the integer coefficients against the bit-exact model: absorbs rounding and floor bias."""
-    best = measure_cont(code, r, c)[0]
+DENSE_X = np.arange(-8192, 8193, dtype=np.int64)  # every Q4.11 input from -4 to 4, as the lane sees it after its rescale
+Cand = namedtuple("Cand", "d c dense grid nominal hsat rail")  # d, the effective degree; dense and grid, Acc; rail, the lane's
+
+
+def dense_cases(code):
+    """The dense sweep's output quantizations: tanh's and sigmoid's fixed one, SELU's of every gated case; s_in = 2^-11 rescales by 1."""
+    if code != 1:
+        return [gpnae_model.Case(1 / 2048, 0, 0.0, 0, True)]
+    return [gpnae_model.Case(1 / 2048, 0, c.s_out, c.z_out, True) for c in gpnae_model.INT8_CASES["selu"] if c.gated]
+
+
+def dense_run(lane, code, case):
+    """The lane's int8 outputs at every DENSE_X input, through run() with an identity rescale."""
+    p = gpnae_model.int8_params(case, code)
+    assert (gpnae_model.rescale(DENSE_X, 0, p.mx, p.shx) == DENSE_X).all(), "the dense sweep's rescale must be the identity"
+    return lane.run(DENSE_X, code, p)
+
+
+def measure_dense(lane, code):
+    """Every DENSE_X input against GPNAE's tolerance (gpnae_model.accuracy_int8), merged over dense_cases."""
+    return gpnae_model.merge_acc(gpnae_model.accuracy_int8(dense_run(lane, code, c), DENSE_X, code, c) for c in dense_cases(code))
+
+
+def uses_poly(code):
+    """The DENSE_X inputs whose output comes from P: SELU -4 <= x < 0, sigmoid |x| <= 3.5, tanh |x| <= 4."""
+    if code == 1:
+        return (DENSE_X < 0) & (DENSE_X >= gpnae_model.T_SELU)
+    return np.abs(DENSE_X) <= gpnae_model.THRESH[code]
+
+
+def horner_sat(code, coeffs):
+    """How many inputs whose output uses P have a Horner step whose sum leaves 16 bits, which fxMac saturates."""
+    t = gpnae_model.mac_operand(DENSE_X, code)
+    acc, sat = np.zeros_like(t), np.zeros(t.shape, dtype=bool)
+    for c in reversed(coeffs):  # highest first, as gpnae_model.horner
+        raw = ((t * acc) >> gpnae_model.Q) + c
+        sat |= (raw > 32767) | (raw < -32768)
+        acc = gpnae_model.ipu.fx_mac(t, acc, np.full_like(t, c), w=16, frac=gpnae_model.Q)
+    return int((sat & uses_poly(code)).sum())
+
+
+def rail(lane, code):
+    """The smallest |x| where the lane's output is -128 or 127, and where exact_int8's is, over dense_cases; inf if never."""
+    ax, lane_r, exact_r = np.abs(DENSE_X) / 2048.0, np.inf, np.inf
+    for c in dense_cases(code):
+        out, g = dense_run(lane, code, c), gpnae_model.exact_int8(DENSE_X, code, c)
+        lane_r = min(lane_r, float(ax[(out == -128) | (out == 127)].min(initial=np.inf)))
+        exact_r = min(exact_r, float(ax[(g == -128) | (g == 127)].min(initial=np.inf)))
+    return lane_r, exact_r
+
+
+def fmt_rail(v):
+    """A rail point for the log: none if the output never rails."""
+    return "none" if v == np.inf else f"{v:.4f}"
+
+
+def score_dense(code, coeffs):
+    """refine_int8's score: dense tolerance misses, then the worst dense |d| in LSB."""
+    a = measure_dense(lane_for(code, coeffs), code)
+    return a.fail, a.worst_lsb
+
+
+def refine_int8(code, c, passes=10):
+    """Coordinate descent on the integer coefficients by score_dense; the result is kept only if it misses fewer dense inputs."""
+    start = best = score_dense(code, c)
+    orig = c
     for _ in range(passes):
         improved = False
         for k in range(len(c)):
@@ -178,11 +242,19 @@ def refine_int8(code, r, c, passes=10):
                 trial[k] += d
                 if not -32768 <= trial[k] <= 32767:
                     continue
-                w = measure_cont(code, r, trial)[0]
+                w = score_dense(code, trial)
                 if w < best:
                     best, c, improved = w, trial, True
         if not improved:
             break
+    return c if best[0] < start[0] else orig
+
+
+def strip_int8(c):
+    """Zero leading (highest) coefficients removed: fx_mac(t, 0, 0) = 0, so the effective degree evaluates bit-identically."""
+    c = list(c)
+    while len(c) > 1 and c[-1] == 0:
+        c.pop()
     return c
 
 
@@ -207,27 +279,41 @@ def main_int8(a):
     assert out not in ("poly_coeffs.mem", "poly_coeffs_bf16.mem", "taylor_coeffs.mem")
     tol = f"rel <= {100 * gpnae_model.REL_TOL_INT8:.2f}% or abs <= {gpnae_model.ABS_TOL_LSB} LSB"
     L, cands, chosen = [], {}, {}
+    n_dense = {c: DENSE_X.size * len(dense_cases(c)) for c in (1, 2, 3)}
+    n_grid = {c: 256 * sum(k.gated for k in gpnae_model.INT8_CASES[NAME_INT8[c]]) for c in (1, 2, 3)}
     L.append("gpnae_poly int8: the float lanes' forms in Q4.11 (fxMac Horner, floor; integer post products), bit-exact model;")
     L.append("the float lane's ranges (SELU x >= -4, sigmoid |x| <= 3.5, tanh |x| <= 4), the saturated value beyond them.")
-    L.append(f"cases: every int8 input of every gated case against exact_int8 with GPNAE's tolerance ({tol}): fail, outputs")
-    L.append("outside it; rel, the worst relative error where |d| > 1 LSB; LSB, the worst |d|; real, the worst error against the")
-    L.append("unquantized function; differ, outputs not equal to exact_int8. range: max and mean error of the unsaturated path")
-    L.append("over every Q4.11 input of the range, in output LSB (SELU in LSB of the tightest gated case).")
-    L.append(f"{'activation':<10}{'range':>6}{'degree':>7}{'fail':>6}{'rel %':>8}{'LSB':>5}{'real':>7}{'differ':>7}"
-             f"{'range max':>10}{'mean':>7}{'max |c|':>9}")
+    L.append(f"GPNAE's tolerance ({tol}) on the DENSE sweep decides the choice and the verdict: every Q4.11 input x in")
+    L.append("[-8192, 8192] as the lane sees it after its rescale; tanh and sigmoid at their fixed output quantization, SELU at every")
+    L.append(f"gated case's (inputs: SELU {n_dense[1]}, sigmoid {n_dense[2]}, tanh {n_dense[3]}). GRID: the int8 inputs of every gated")
+    L.append(f"case (Task 12's measure; SELU {n_grid[1]}, sigmoid {n_grid[2]}, tanh {n_grid[3]} inputs), kept alongside. Each degree is")
+    L.append("fitted, refined by coordinate descent on the dense tolerance (kept only if it misses fewer), then stripped of zero leading")
+    L.append("coefficients: deg, the fitted degree; eff, the effective one, which evaluates bit-identically. fail, outputs outside the tolerance; rel, the worst relative")
+    L.append("error where |d| > 1 LSB; LSB, the worst |d| against exact_int8; real, the worst error against the unquantized function;")
+    L.append("hsat, inputs whose output uses P with a Horner step that saturates; rail, the smallest |x| with output -128 or 127.")
+    L.append("range max and mean: the unsaturated, unclamped path's error over the fitted range in output LSB.")
+    L.append("Dense real includes the int8 clamp: SELU's s_out covers only its case's inputs, so large x rails (exact_int8 rails too).")
+    L.append(f"{'activation':<10}{'deg':>4}{'eff':>4}{'dense fail':>11}{'rel %':>8}{'LSB':>5}{'real':>8}{'hsat':>6}{'rail':>7}"
+             f"{'grid fail':>10}{'rel %':>8}{'LSB':>5}{'range max':>10}{'mean':>9}{'max |c|':>8}")
     for code in (1, 2, 3):
         r, cands[code] = RANGE_INT8[code], []
         for d in DEGREES_INT8:
             c = fit_form(code, r, d)
             if c is None:
-                L.append(f"{NAME_INT8[code]:<10}{r:>6}{d:>7}  coefficients beyond Q4.11")
+                L.append(f"{NAME_INT8[code]:<10}{d:>4}  coefficients beyond Q4.11")
                 continue
-            c = refine_int8(code, r, c)
-            cw, cm = measure_cont(code, r, c)
-            acc = measure_cases(lane_for(code, c), code)
-            cands[code].append((d, c, acc))
-            L.append(f"{NAME_INT8[code]:<10}{r:>6}{d:>7}{acc.fail:>6}{100 * acc.worst_rel:>8.2f}{acc.worst_lsb:>5}"
-                     f"{acc.real_lsb:>7.2f}{acc.differ:>7}{cw:>10.2f}{cm:>7.2f}{max(abs(v) for v in c) / 2048:>9.3f}")
+            c = refine_int8(code, c)
+            s = strip_int8(c)
+            lane = lane_for(code, s)
+            dense, grid = measure_dense(lane, code), measure_cases(lane, code)
+            full = lane_for(code, c)
+            assert (dense, grid) == (measure_dense(full, code), measure_cases(full, code)), "stripping must not change any output"
+            k = Cand(len(s) - 1, s, dense, grid, d, horner_sat(code, s), rail(lane, code)[0])
+            cands[code].append(k)
+            cw, cm = measure_cont(code, r, s)
+            L.append(f"{NAME_INT8[code]:<10}{d:>4}{k.d:>4}{dense.fail:>11}{100 * dense.worst_rel:>8.2f}{dense.worst_lsb:>5}"
+                     f"{dense.real_lsb:>8.2f}{k.hsat:>6}{fmt_rail(k.rail):>7}{grid.fail:>10}{100 * grid.worst_rel:>8.2f}"
+                     f"{grid.worst_lsb:>5}{cw:>10.2f}{cm:>9.2f}{max(abs(v) for v in s) / 2048:>8.3f}")
         assert cands[code], f"{NAME_INT8[code]}: no degree from 2 to 12 has coefficients within Q4.11"
         chosen[code] = pick_int8(cands[code])
     while layout_int8({k: v[0] for k, v in chosen.items()}) is None:  # more than the ROM's 32 entries
@@ -236,21 +322,35 @@ def main_int8(a):
         assert lower, "degree 2 everywhere fits the ROM"
         L.append(f"{NAME_INT8[k]:<10} degree {chosen[k][0]} does not fit the 32-entry ROM beside the others: lowered")
         cands[k], chosen[k] = lower, pick_int8(lower)
-    missed = [NAME_INT8[c] for c in (1, 2, 3) if not chosen[c][2].ok]
+    missed = [NAME_INT8[c] for c in (1, 2, 3) if not chosen[c].dense.ok]
     for code in (1, 2, 3):
-        d, _, acc = chosen[code]
-        if acc.ok:
-            L.append(f"{NAME_INT8[code]:<10} chosen: degree {d}, the lowest within the tolerance: MEETS TOLERANCE")
+        k = chosen[code]
+        dn, gr = k.dense, k.grid
+        fig = (f"dense {dn.fail} of {n_dense[code]} outside, worst {100 * dn.worst_rel:.2f}% where |d| > 1 LSB, worst {dn.worst_lsb} LSB,"
+               f" {dn.real_lsb:.2f} LSB against the unquantized function; grid {gr.fail} of {n_grid[code]} outside, worst"
+               f" {100 * gr.worst_rel:.2f}%, worst {gr.worst_lsb} LSB")
+        if dn.ok:
+            L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the lowest within the tolerance: MEETS TOLERANCE ({fig})")
         else:
-            L.append(f"{NAME_INT8[code]:<10} chosen: degree {d}, the best measured: MISSES TOLERANCE ({acc.fail} outputs outside, "
-                     f"worst {100 * acc.worst_rel:.2f}% where |d| > 1 LSB, worst {acc.worst_lsb} LSB): open accuracy item")
+            L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the best by dense misses: MISSES TOLERANCE ({fig}):"
+                     " open accuracy item")
     lay = layout_int8({k: v[0] for k, v in chosen.items()})
     table = [0] * 32
     for code, (base, d) in lay.items():
-        table[base:base + d + 1] = chosen[code][1]
+        table[base:base + d + 1] = chosen[code].c
     lane = gpnae_model.Lane(gpnae_model.INT8, [v & 0xFFFF for v in table], sets=lay)
     L.append("")
-    L.append(f"whole table, SETS_INT8 = {lay}: every int8 input of every case against the tolerance (int8 LSB)")
+    L.append(f"whole table, SETS_INT8 = {lay}, dense sweep (the verdict's figures): every Q4.11 input in [-8192, 8192]")
+    L.append(f"{'activation':<10}{'inputs':>8}{'fail':>6}{'rel %':>8}{'LSB':>5}{'real':>8}{'differ':>7}{'hsat':>6}{'lane rail':>10}"
+             f"{'exact rail':>11}")
+    for code in (1, 2, 3):
+        dn = measure_dense(lane, code)
+        assert dn == chosen[code].dense, "the packed table must reproduce each activation's dense measurement"
+        lr, er = rail(lane, code)
+        L.append(f"{NAME_INT8[code]:<10}{n_dense[code]:>8}{dn.fail:>6}{100 * dn.worst_rel:>8.2f}{dn.worst_lsb:>5}{dn.real_lsb:>8.2f}"
+                 f"{dn.differ:>7}{horner_sat(code, chosen[code].c):>6}{fmt_rail(lr):>10}{fmt_rail(er):>11}")
+    L.append("")
+    L.append(f"whole table, SETS_INT8 = {lay}, grid: every int8 input of every case against the tolerance (int8 LSB)")
     L.append(f"{'activation':<10}{'s_in':>11}{'z_in':>6}{'s_out':>11}{'z_out':>6}{'fail':>6}{'rel %':>8}{'LSB':>5}"
              f"{'real':>7}{'differ':>7}{'gated':>7}")
     q = np.arange(-128, 128, dtype=np.int64)
@@ -263,9 +363,9 @@ def main_int8(a):
                      f"{'yes' if case.gated else 'no':>7}")
             if case.gated:
                 gated.append(acc)
-        assert gpnae_model.merge_acc(gated) == chosen[code][2], "the packed table must reproduce each activation's measurement"
-    L.append("VERDICT: TOLERANCE MET for every activation" if not missed else
-             f"VERDICT: TOLERANCE MISSED for {', '.join(missed)}: best degrees kept; open accuracy item for Soham, not a stop")
+        assert gpnae_model.merge_acc(gated) == chosen[code].grid, "the packed table must reproduce each activation's grid measurement"
+    L.append("VERDICT: TOLERANCE MET for every activation on the dense sweep" if not missed else
+             f"VERDICT: TOLERANCE MISSED for {', '.join(missed)} on the dense sweep: best degrees kept; open accuracy item for Soham, not a stop")
     if missed:
         L += OPTIONS_INT8
     for path in (os.path.join(ROOT, out), os.path.join(ROOT, "src", "TYTAN", "Memory", out)):
