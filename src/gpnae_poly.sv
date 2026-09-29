@@ -21,7 +21,7 @@
 // most of the lane's time. Elements are captured from the FIFO first, then streamed from
 // registers, which keeps the FIFO's read-pointer timing untouched.
 module gpnae_poly #(
-    parameter int    EXP_W         = 8,   // the build's number format: fp32 8/23, bf16 8/7
+    parameter int    EXP_W         = 8,   // the build's number format: fp32 8/23, bf16 8/7, int8 0/7
     parameter int    MAN_W         = 23,
     parameter int    DATA_WIDTH    = 1 + EXP_W + MAN_W,
     parameter int    ADDR_LINES    = 5,
@@ -38,6 +38,13 @@ module gpnae_poly #(
 
     input  logic [   ADDR_LINES-1:0] terms_i,         // unused: degree comes from the table
     input  logic [CONTROL_WIDTH-1:0] control_word_i,
+
+    input logic [15:0] gp_mx_i,     // int8 only (D-2): input rescale multiplier, below 2^15
+    input logic [ 4:0] gp_shx_i,    // int8: input rescale shift
+    input logic [ 7:0] gp_zin_i,    // int8: input zero point
+    input logic [31:0] gp_mout_i,   // int8: SELU output multiplier
+    input logic [ 7:0] gp_shout_i,  // int8: SELU output shift
+    input logic [ 7:0] gp_zout_i,   // int8: SELU output zero point
 
     output logic full_o,
     output logic empty_o,
@@ -66,6 +73,35 @@ module gpnae_poly #(
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "gpnae_poly: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
   end
+
+  // int8 builds use the fixed-point lane; the float lane below is unchanged, only wrapped in G_FLOAT.
+  if (sienna_fmt_pkg::is_int(EXP_W)) begin : G_INT8
+    gpnae_poly_int8 #(
+        .DATA_WIDTH   (DATA_WIDTH),
+        .ADDR_LINES   (ADDR_LINES),
+        .CONTROL_WIDTH(CONTROL_WIDTH),
+        .K            (K)
+    ) lane_inst (
+        .clk_i         (clk_i),
+        .rstn_i        (rstn_i),
+        .signal_i      (signal_i),
+        .wr_en_i       (wr_en_i),
+        .last_i        (last_i),
+        .terms_i       (terms_i),
+        .control_word_i(control_word_i),
+        .gp_mx_i       (gp_mx_i),
+        .gp_shx_i      (gp_shx_i),
+        .gp_zin_i      (gp_zin_i),
+        .gp_mout_i     (gp_mout_i),
+        .gp_shout_i    (gp_shout_i),
+        .gp_zout_i     (gp_zout_i),
+        .full_o        (full_o),
+        .empty_o       (empty_o),
+        .idle_o        (idle_o),
+        .final_result_o(final_result_o),
+        .done_o        (done_o)
+    );
+  end else begin : G_FLOAT
 
   // Coefficient sets packed into one ROM. Keep in step with poly_coeffs.mem.
   localparam logic [ADDR_LINES-1:0] BASE_SELU = 5'd0, DEG_SELU = 5'd8;
@@ -508,5 +544,7 @@ module gpnae_poly #(
       endcase
     end
   end
+
+  end  // G_FLOAT
 
 endmodule
