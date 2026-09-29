@@ -2,6 +2,7 @@
 """Bit-exact model of gpnae_poly and gpnae_tail, op for op and operand for operand, in the lane's format; built on AriL's fpu.py; the int8 lane (gpnae_poly_int8) on AriL's ipu.py.
 fp32's negative sigmoid goes through fp32_down, modelled as fpAdder(P, -1); Task 11 measures whether that holds."""
 import os
+import re
 import sys
 from collections import namedtuple
 
@@ -173,6 +174,22 @@ T_SELU, T_SIG, T_TANH = -8192, 7168, 8192  # the float lane's thresholds in Q4.1
 THRESH = {1: T_SELU, 2: T_SIG, 3: T_TANH}
 SELU_SAT, ONE_Q11, LAMBDA_Q14 = -3601, 2048, 17215  # -lambda*alpha and 1.0 in Q4.11, lambda in Q1.14
 LAMBDA_F, LA_F = 1.0507009873554805, 1.7580993408473766
+PKG_SV = os.path.join(ROOT, "ArithmeticLibrary", "Common", "src", "sienna_fmt_pkg.sv")
+
+
+def rtl_req_rounding(path=PKG_SV) -> str:
+    """REQ_ROUNDING as sienna_fmt_pkg.sv sets it for tfliteRequant, so the model rounds as the RTL does."""
+    try:
+        m = re.findall(r'^\s*localparam\s+string\s+REQ_ROUNDING\s*=\s*"([A-Z]+)"\s*;', open(path).read(), re.M)
+    except OSError as e:
+        raise RuntimeError(f"int8 lane: cannot read {path} for REQ_ROUNDING: {e}") from e
+    if len(m) != 1 or m[0] not in ipu.ROUNDINGS:
+        raise RuntimeError(f'int8 lane: {path} needs exactly one `localparam string REQ_ROUNDING = "SINGLE"|"DOUBLE";` line, found {m}')
+    return m[0]
+
+
+REQ_ROUNDING = rtl_req_rounding()  # the SELU requantize's rounding, from the RTL's own constant
+assert ipu.REQ_ROUNDING in (None, REQ_ROUNDING), f"ipu.REQ_ROUNDING {ipu.REQ_ROUNDING} (rounding.txt) disagrees with sienna_fmt_pkg's {REQ_ROUNDING}"
 Int8Params = namedtuple("Int8Params", "mx shx zin mout shout zout")
 Case = namedtuple("Case", "s_in z_in s_out z_out gated")
 
@@ -347,7 +364,7 @@ class LaneInt8(Lane):
         prod = ipu.int_mul(a, b, w=16)
         v = np.where(neg, prod << 3, prod)  # x * P and -lambda*alpha * 1.0 are in 2^-22, x * lambda in 2^-25
         full = lambda c: np.full_like(v, c)
-        return ipu.requant(v, full(par.mout), full(par.shout), full(par.zout), full(-128), full(127), ipu.REQ_ROUNDING)
+        return ipu.requant(v, full(par.mout), full(par.shout), full(par.zout), full(-128), full(127), REQ_ROUNDING)
 
     def element(self, q, code, par) -> int:
         return int(self.run(np.array([q]), code, par)[0])
