@@ -169,7 +169,7 @@ REL_TOL_INT8 = suggested_rel_tol(INT8)  # max(1%, 8 eps) = 6.25%, bf16's value (
 ABS_TOL_LSB = 1  # the int8 analog of --abs-tol: one output LSB
 
 Q = 11  # Q4.11
-SETS_INT8 = {1: (0, 3), 2: (9, 3), 3: (16, 11)}  # (ROM base, degree) per control word; Task 10's fit sets it
+SETS_INT8 = {1: (0, 2), 2: (9, 3), 3: (16, 3)}  # (ROM base, degree) per control word; Task 10's fit sets it
 T_SELU, T_SIG, T_TANH = -8192, 7168, 8192  # the float lane's thresholds in Q4.11: SELU x < -4, sigmoid |x| > 3.5, tanh |x| > 4
 THRESH = {1: T_SELU, 2: T_SIG, 3: T_TANH}
 SELU_SAT, ONE_Q11, LAMBDA_Q14 = -3601, 2048, 17215  # -lambda*alpha and 1.0 in Q4.11, lambda in Q1.14
