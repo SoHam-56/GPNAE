@@ -38,7 +38,7 @@ hdr = lambda s: f"{_O}{_B}{s}{_X}"
 
 def write_config(fmt, batches: int, per_batch: int, rel_tol: float, abs_tol: float,
                  model: str, timeout_cycles: int, seed: int, exact: bool = False,
-                 coeff_file: str = "poly_coeffs.mem") -> None:
+                 coeff_file: str = "poly_coeffs.mem", req_rounding: str = None) -> None:
     """Emit the include file the testbench pulls in."""
     path = os.path.join(TB_DIR, "gpnae_test_config.svh")
     with open(path, "w") as f:
@@ -61,6 +61,10 @@ def write_config(fmt, batches: int, per_batch: int, rel_tol: float, abs_tol: flo
         f.write('  localparam string STIM_DIR      = "testbenches/stimulus/";\n')
         f.write(f"  localparam bit EXACT_MATCH      = {1 if exact else 0};\n")
         f.write(f'  localparam string COEFF_FILE    = "{coeff_file}";\n')
+        if req_rounding is None:
+            import gpnae_model
+            req_rounding = gpnae_model.REQ_ROUNDING  # the rounding the model's SELU requantize uses, from sienna_fmt_pkg
+        f.write(f'  localparam string REQ_ROUNDING  = "{req_rounding}";\n')
 
 
 def generate_vectors(test_name: str, fmt, batches: int, per_batch: int, model: str,
@@ -240,12 +244,203 @@ def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol)
 # Main
 # --------------------------------------------------------------------------
 
+INT8_ACTS = (("selu", 1), ("sigmoid", 2), ("tanh", 3), ("relu", 4), ("linear", 5))  # TB_gpnae_poly's order in int8
+N_RAND_INT8, N_SAT_INT8 = 32, 8  # random lane parameter sets per activation, and how many saturate the rescale; bit-exact only
+STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2),
+               (0, 16), (2, 1))  # (mode, elements): 0 write then last_i, 1 last_i with the last write, 2 write while busy
+STREAM_BYP = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 8), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2), (0, 16),
+              (2, 1))  # ReLU and linear emit 16 cycles after capture, so a busy group is at most 8
+S_IDLE, S_NEXT, LANE_K = 0, 8, 16  # gpnae_poly_int8's G_IDLE and G_NEXT encodings, and its group size
+
+
+def rand_params_int8(rng, code, sat):
+    """A random lane parameter set; sat makes mx / 2^shx >= 256, so inputs with |q - z_in| >= 128 saturate Q4.11."""
+    import gpnae_model as gm
+    mx = int(rng.integers(1 << 14, 1 << 15)) if sat else int(rng.integers(0, 1 << 15))
+    shx = int(rng.integers(0, 7)) if sat else int(rng.integers(8, 21))  # shx >= 8 keeps 255 * mx / 2^shx below 2^15
+    zin = int(rng.integers(-128, 128))
+    if code == 1:
+        return gm.Int8Params(mx, shx, zin, int(rng.integers(1 << 30, 1 << 31)), int(rng.integers(-31, 6)),
+                             int(rng.integers(-128, 128)))
+    return gm.Int8Params(mx, shx, zin, 0, 0, 0)
+
+
+def rescale_saturates(p) -> bool:
+    """Whether some int8 input's rescale leaves Q4.11 before the clip."""
+    q = np.arange(-128, 128, dtype=np.int64)
+    raw = (q - p.zin) * p.mx
+    raw = raw if p.shx == 0 else (raw + (1 << (p.shx - 1))) >> p.shx
+    return bool(((raw > 32767) | (raw < -32768)).any())
+
+
+def stream_starts(mode, n):
+    """The group starts one stream group should produce, as (state it starts from, size)."""
+    if mode == 2:
+        first, via = min(LANE_K, n), S_NEXT  # queued while the lane works: G_NEXT takes it
+    elif mode == 1:
+        first, via = max(1, min(LANE_K, n - 1)), S_IDLE  # G_IDLE counts the FIFO before the last write; a lone one waits
+    else:
+        first, via = min(LANE_K, n), S_IDLE
+    out, left = [(via, first)], n - first
+    while left:
+        out.append((S_NEXT, min(LANE_K, left)))  # the rest is already queued: G_NEXT takes it, 16 at a time
+        left -= out[-1][1]
+    return out
+
+
+def write_stream_int8(lane, rng) -> dict:
+    """stream_*.mem for TB_gpnae_poly's protocol edges: every control word, a gated case and a saturating random set each."""
+    import gpnae_model as gm
+    segs = []
+    for act, code in INT8_ACTS:
+        segs.append((code, gm.int8_params(gm.INT8_CASES[act][0], code)))
+        if code <= 3:
+            segs.append((code, rand_params_int8(rng, code, True)))
+    segs += [(cw, gm.int8_params(gm.INT8_CASES["tanh"][1], 3)) for cw in (0, 6, 7)]  # every other control word runs tanh
+    seg_l, grp_l, bnd, q_all, y_all = [], [], [], [], []
+    for cw, p in segs:
+        script = STREAM_BYP if cw in (4, 5) else STREAM_POLY
+        n_el = sum(n for _, n in script)
+        q = np.concatenate([rng.permutation(256) for _ in range(-(-n_el // 256))]).astype(np.int64)[:n_el] - 128
+        q_all += [int(v) for v in q]
+        y_all += [int(v) for v in lane.run(q, cw, p)]
+        seg_l.append(f"{cw:02x}{len(script):02x}{p.mx:04x}{p.shx:02x}{p.zin & 0xFF:02x}{p.mout:08x}{p.shout & 0xFF:02x}"
+                     f"{p.zout & 0xFF:02x}\n")
+        for mode, n in script:
+            grp_l.append(f"{mode:02x}{n:02x}{len(bnd):04x}\n")
+            bnd += stream_starts(mode, n)
+    files = {"stream_seg.mem": seg_l, "stream_grp.mem": grp_l,
+             "stream_in.mem": [f"{v & 0xFF:02x}\n" for v in q_all], "stream_exp.mem": [f"{v & 0xFF:02x}\n" for v in y_all],
+             "stream_bnd.mem": [f"{v:02x}{s:02x}\n" for v, s in bnd],
+             "stream_cnt.mem": [f"{v:08x}\n" for v in (len(seg_l), len(grp_l), len(q_all), len(bnd))]}
+    for name, lines in files.items():
+        with open(os.path.join(STIM_DIR, name), "w") as fh:
+            fh.write("".join(lines))
+    return {"segments": len(seg_l), "groups": len(grp_l), "elements": len(q_all), "starts": len(bnd)}
+
+
+def run_int8(args) -> int:
+    """int8 lane: every int8 input at each gpnae_model.INT8_CASES case, bit-exact against the lane model, then accuracy."""
+    import json
+    import types
+
+    import gpnae_model as gm
+    if args.lane != "poly":
+        print(err("[ERROR] the int8 lane is gpnae_poly; use --lane poly"))
+        return 1
+    per = MAX_SIGNALS
+    n_cases = len(gm.INT8_CASES["tanh"])
+    assert all(len(gm.INT8_CASES[a]) == n_cases for a, _ in INT8_ACTS), "every activation needs the same number of cases"
+    case_batches = n_cases * 256 // per
+    batches = (n_cases + N_RAND_INT8) * 256 // per  # the cases first, then the random sets
+    fmt = types.SimpleNamespace(name="int8", width=8, exp_bits=0, man_bits=7)
+    coeff = gm.coeff_file(gm.INT8)
+    lane = gm.Lane(gm.INT8, gm.read_rom(os.path.join(ROOT, coeff)))
+    write_config(fmt, batches, per, 0.0, 0.0, "hw", args.timeout, args.seed, True, coeff)
+    rs = np.random.RandomState(args.seed)
+    rr = np.random.default_rng([args.seed, 12])  # the random parameter sets and their input order
+    os.makedirs(STIM_DIR, exist_ok=True)
+    rows, rand_sets = [], {}
+    for act, code in INT8_ACTS:
+        stim, gold, par = [], [], []
+        for case in gm.INT8_CASES[act]:
+            p = gm.int8_params(case, code)
+            q = rs.permutation(256).astype(np.int64) - 128  # every int8 input once, in a seeded order
+            y = lane.run(q, code, p)
+            stim += [int(v) for v in q]
+            gold += [int(v) for v in y]
+            par += [p] * (256 // per)
+            if code <= 3:
+                rows.append((act, case, p, gm.accuracy_int8(y, q, code, case)))
+        rand_sets[act] = [rand_params_int8(rr, code, k < N_SAT_INT8) for k in range(N_RAND_INT8)]
+        for p in rand_sets[act]:
+            q = rr.permutation(256).astype(np.int64) - 128
+            stim += [int(v) for v in q]
+            gold += [int(v) for v in lane.run(q, code, p)]
+            par += [p] * (256 // per)
+        with open(os.path.join(STIM_DIR, f"{act}_in.mem"), "w") as fh:
+            fh.write("".join(f"{v & 0xFF:02x}\n" for v in stim))
+        with open(os.path.join(STIM_DIR, f"{act}_exp.mem"), "w") as fh:
+            fh.write("".join(f"{v & 0xFF:02x}\n" for v in gold))
+        with open(os.path.join(STIM_DIR, f"{act}_par.mem"), "w") as fh:
+            fh.write("".join(f"{p.mx:04x}{p.shx:02x}{p.zin & 0xFF:02x}{p.mout:08x}{p.shout & 0xFF:02x}{p.zout & 0xFF:02x}\n"
+                             for p in par))
+    n_sat = {act: sum(rescale_saturates(p) for p in s) for act, s in rand_sets.items()}
+    stream = write_stream_int8(lane, np.random.default_rng([args.seed, 13]))
+    print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases and {N_RAND_INT8} random sets x 256 inputs per activation, "
+              f"a {stream['elements']}-element protocol stream, seed {args.seed}\n{'='*78}"))
+    raw, wall = run_make("poly")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    with open(os.path.join(RESULTS_DIR, "int8_exhaustive.log"), "w") as fh:
+        fh.write(raw)
+    parsed = parse_log(raw, expect_total=batches * per, expect_acts=len(INT8_ACTS))
+    for act, a in parsed["per_act"].items():
+        print_activation(act, a)
+    bad = {act: [0, 0] for act, _ in INT8_ACTS}  # wrong or missing outputs: cases, random sets
+    for m in re.finditer(r"BATCHFAIL (\w+) b(\d+) : (\d+)", raw):
+        if m.group(1) in bad:
+            bad[m.group(1)][int(m.group(2)) >= case_batches] += int(m.group(3))
+    se = re.search(r"STREAM : elements (\d+)\s+exact (\d+)\s+failed (\d+)\s+missing (\d+)\s+extra (\d+)", raw)
+    sb = re.search(r"STREAM boundaries : expected (\d+)\s+observed (\d+)\s+wrong (\d+)\s+edge errors (\d+)", raw)
+    stream_ok = bool(se and sb) and int(se.group(1)) == stream["elements"] and int(se.group(2)) == stream["elements"] \
+        and int(se.group(5)) == 0 and int(sb.group(1)) == stream["starts"] and int(sb.group(2)) == stream["starts"] \
+        and int(sb.group(3)) == 0 and int(sb.group(4)) == 0
+    exact_ok = parsed["status"] == "PASS" and stream_ok
+    tot = {act: gm.merge_acc(a for x, c, _, a in rows if x == act and c.gated) for act, _ in INT8_ACTS[:3]}
+    tol = f"rel <= {100 * gm.REL_TOL_INT8:.2f}% or abs <= {gm.ABS_TOL_LSB} LSB"
+    n_c, n_r = n_cases * 256, N_RAND_INT8 * 256
+    ran = lambda a: a in parsed["per_act"] and parsed["per_act"][a]["total"] == batches * per  # the TB checked all of it
+    part = lambda a, k, n: f"{a} {n - bad[a][k]}/{n}" if ran(a) else f"{a} no result"
+    L = [f"GPNAE int8 lane, seed {args.seed}: bit-exact against gpnae_model, then the lane against exact_int8 with GPNAE's tolerance",
+         f"BITEXACT: {'PASS' if exact_ok else (parsed['status'] if parsed['status'] != 'PASS' else 'FAIL')}  "
+         + "  ".join(f"{a} {v['exact']}/{v['total']}" for a, v in parsed["per_act"].items())
+         + (f"  stream {se.group(2)}/{se.group(1)}" if se else "  stream NO-RESULT"),
+         "  INT8_CASES, every int8 input: " + "  ".join(part(a, 0, n_c) for a, _ in INT8_ACTS),
+         f"  random sets ({N_RAND_INT8} per activation, bit-exact only): "
+         + "  ".join(f"{part(a, 1, n_r)} ({n_sat[a]} saturate the rescale)" for a, _ in INT8_ACTS),
+         f"  protocol stream ({stream['segments']} segments, {stream['groups']} groups, no reset between groups): "
+         + (f"exact {se.group(2)}/{se.group(1)}, failed {se.group(3)}, missing {se.group(4)}, extra {se.group(5)}; group starts "
+            f"{sb.group(2)} observed of {sb.group(1)} expected, {sb.group(3)} wrong, {sb.group(4)} edge errors"
+            if se and sb else "NO RESULT (the TB did not report the stream)"),
+         f"{'act':<8}{'s_in':>10}{'z_in':>6}{'mx':>7}{'shx':>4}{'s_out':>10}{'z_out':>6}{'mout':>12}{'shout':>6}"
+         f"{'fail':>6}{'rel %':>8}{'LSB':>5}{'real':>7}{'differ':>7}{'gated':>6}"]
+    for act, case, p, a in rows:
+        L.append(f"{act:<8}{case.s_in:>10.6f}{case.z_in:>6}{p.mx:>7}{p.shx:>4}{case.s_out:>10.6f}{case.z_out:>6}"
+                 f"{p.mout:>12}{p.shout:>6}{a.fail:>6}{100 * a.worst_rel:>8.2f}{a.worst_lsb:>5}{a.real_lsb:>7.2f}"
+                 f"{a.differ:>7}{'yes' if case.gated else 'no':>6}")
+    for act, a in tot.items():
+        L.append(f"{act:<8} {'within' if a.ok else 'OUTSIDE'} tolerance ({tol}): {a.fail} gated outputs outside, worst "
+                 f"{100 * a.worst_rel:.2f}% where |d| > 1 LSB, worst {a.worst_lsb} LSB, {a.real_lsb:.2f} LSB against the "
+                 f"unquantized function")
+    missed = [act for act, a in tot.items() if not a.ok]
+    L.append(f"ACCURACY: {'PASS' if not missed else 'MISSED'} ({tol} on every gated output"
+             + (f"; outside: {', '.join(missed)}, an open accuracy item" if missed else "") + "; reported, not gated)")
+    k_rand = len(L)
+    L.append("random sets (mx shx z_in mout shout z_out), in stimulus order after the cases:")
+    for act, s in rand_sets.items():
+        L.append(f"  {act}: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in s))
+    with open(os.path.join(RESULTS_DIR, "gpnae_int8_report.log"), "w") as fh:
+        fh.write("\n".join(L) + "\n")
+    fields = lambda a: {"pass": a.ok, "fail": a.fail, "worst_rel": a.worst_rel, "worst_lsb": a.worst_lsb,
+                        "real_lsb": a.real_lsb, "differ": a.differ}
+    summary = {act: {"rel_tol": gm.REL_TOL_INT8, "abs_tol_lsb": gm.ABS_TOL_LSB, **fields(a), "cases": []}
+               for act, a in tot.items()}  # per activation: the tolerance, the gated cases merged, and every case
+    for act, case, p, a in rows:
+        summary[act]["cases"].append({"s_in": float(case.s_in), "z_in": int(case.z_in), "s_out": float(case.s_out),
+                                      "z_out": int(case.z_out), "gated": bool(case.gated), **fields(a)})
+    with open(os.path.join(RESULTS_DIR, "gpnae_int8_accuracy.json"), "w") as fh:
+        json.dump({"seed": args.seed, "bitexact": exact_ok, "activations": summary}, fh, indent=1)
+    print("\n".join(L[1:k_rand]))
+    print(f"  {_D}{wall:.1f}s{_X}")
+    return 0 if exact_ok else 1
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="GPNAE activation regression",
         formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--test", default=None, help="one stimulus pattern (default: all)")
-    p.add_argument("--format", default="fp32", choices=sorted(FORMATS),
+    p.add_argument("--format", default="fp32", choices=sorted(FORMATS) + ["int8"],
                    help="number format the RTL is built for")
     p.add_argument("--batches", type=int, default=8,
                    help="batches per activation; volume comes from this")
@@ -268,6 +463,8 @@ def main() -> None:
     if args.per_batch > MAX_SIGNALS:
         print(err(f"[ERROR] --per-batch must be <= {MAX_SIGNALS} (input FIFO depth)"))
         sys.exit(1)
+    if args.format == "int8":
+        sys.exit(run_int8(args))
 
     fmt = get_format(args.format)
     rel_tol = args.rel_tol if args.rel_tol is not None else suggested_rel_tol(fmt)
