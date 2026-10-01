@@ -225,38 +225,31 @@ module gpnae_poly_int8 #(
   } gstate_t;
   gstate_t gstate;
 
+  // Control: FSM state, counters and valid bits, the only registers under reset (D-8).
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      gstate         <= G_IDLE;
-      n_elems        <= '0;
-      ld_idx         <= '0;
-      rx_idx         <= '0;
-      iss_idx        <= '0;
-      emit_idx       <= '0;
-      pop_idx        <= '0;
-      grp_n          <= '0;
-      cap_v          <= '0;
-      drain_cnt      <= '0;
-      ld_valid       <= 1'b0;
-      mac_start      <= 1'b0;
-      fifo_rd_en     <= 1'b0;
-      rm_valid       <= 1'b0;
-      sq_valid       <= 1'b0;
-      pm_valid       <= 1'b0;
-      done_o         <= 1'b0;
-      final_result_o <= '0;
-      rs_v           <= '0;
-      sq_v           <= '0;
-      pt_v           <= '0;
-      ps_v           <= '0;
-      res_rdy        <= '0;
-      neg_buf        <= '0;
-      sat_buf        <= '0;
-      for (int i = 0; i <= MUL_LAT; i++) begin
-        rs_p[i] <= '0;
-        pt_p[i] <= '0;
-      end
-      for (int i = 0; i <= PS_LAT; i++) ps_p[i] <= '0;
+      gstate     <= G_IDLE;
+      n_elems    <= '0;
+      ld_idx     <= '0;
+      rx_idx     <= '0;
+      iss_idx    <= '0;
+      emit_idx   <= '0;
+      pop_idx    <= '0;
+      grp_n      <= '0;
+      cap_v      <= '0;
+      drain_cnt  <= '0;
+      ld_valid   <= 1'b0;
+      mac_start  <= 1'b0;
+      fifo_rd_en <= 1'b0;
+      rm_valid   <= 1'b0;
+      sq_valid   <= 1'b0;
+      pm_valid   <= 1'b0;
+      done_o     <= 1'b0;
+      rs_v       <= '0;
+      sq_v       <= '0;
+      pt_v       <= '0;
+      ps_v       <= '0;
+      res_rdy    <= '0;
     end else begin
       ld_valid   <= 1'b0;
       mac_start  <= 1'b0;
@@ -270,40 +263,21 @@ module gpnae_poly_int8 #(
       sq_v <= {sq_v[FX_LAT-1:0], 1'b0};
       pt_v <= {pt_v[MUL_LAT-1:0], 1'b0};
       ps_v <= {ps_v[PS_LAT-1:0], 1'b0};
-      for (int i = 1; i <= MUL_LAT; i++) begin
-        rs_p[i] <= rs_p[i-1];
-        pt_p[i] <= pt_p[i-1];
-      end
-      for (int i = 1; i <= PS_LAT; i++) ps_p[i] <= ps_p[i-1];
 
-      // A rescaled input: kept for the post stage; its MAC operand is x (SELU), |x| (sigmoid) or x^2 (tanh, via SQ).
+      // A rescaled input goes to the MAC as x (SELU), |x| (sigmoid) or, via SQ, x^2 (tanh).
       if (rs_v[MUL_LAT]) begin
-        x_buf[rs_p[MUL_LAT]]   <= x_new;
-        neg_buf[rs_p[MUL_LAT]] <= x_new[W-1];
-        sat_buf[rs_p[MUL_LAT]] <= x_sat;
         if (is_tanh) begin
-          sq_a     <= x_new;
           sq_valid <= 1'b1;
           sq_v[0]  <= 1'b1;
         end else begin
-          mac_in   <= is_sig ? abs_sat(x_new) : x_new;
           ld_valid <= 1'b1;
         end
       end
-      if (sq_v[FX_LAT]) begin
-        mac_in   <= sq_res;
-        ld_valid <= 1'b1;
-      end
+      if (sq_v[FX_LAT]) ld_valid <= 1'b1;
 
       // Post results come back tagged with their element: tanh after the multiply, SELU after the requantizer.
-      if (pt_v[MUL_LAT]) begin
-        res_buf[pt_p[MUL_LAT]] <= quant_tanh(pm_res);
-        res_rdy[pt_p[MUL_LAT]] <= 1'b1;
-      end
-      if (ps_v[PS_LAT]) begin
-        res_buf[ps_p[PS_LAT]] <= rq_res;
-        res_rdy[ps_p[PS_LAT]] <= 1'b1;
-      end
+      if (pt_v[MUL_LAT]) res_rdy[pt_p[MUL_LAT]] <= 1'b1;
+      if (ps_v[PS_LAT]) res_rdy[ps_p[PS_LAT]] <= 1'b1;
 
       case (gstate)
         G_IDLE: begin
@@ -323,12 +297,8 @@ module gpnae_poly_int8 #(
           end
           cap_v <= {cap_v[CAP_LAG-2:0], (pop_idx < grp_n)};
           if (cap_v[CAP_LAG-1]) begin
-            q_buf[ld_idx[SW-1:0]] <= fifo_data_o;
-            ld_idx                <= ld_idx + 1;
-            if (is_byp) begin
-              res_buf[ld_idx[SW-1:0]] <= fifo_data_o;  // the requantize clamp already applied ReLU
-              res_rdy[ld_idx[SW-1:0]] <= 1'b1;
-            end
+            ld_idx <= ld_idx + 1;
+            if (is_byp) res_rdy[ld_idx[SW-1:0]] <= 1'b1;  // the requantize clamp already applied ReLU
             if (ld_idx + 1 == grp_n) begin
               n_elems   <= grp_n;
               iss_idx   <= '0;
@@ -341,11 +311,8 @@ module gpnae_poly_int8 #(
 
         // Rescale one element per cycle.
         G_LOAD: begin
-          rm_a     <= d_cur;
-          rm_b     <= gp_mx_i;
           rm_valid <= 1'b1;
           rs_v[0]  <= 1'b1;
-          rs_p[0]  <= iss_idx[SW-1:0];
           if (iss_idx + 1 == n_elems) begin
             drain_cnt <= '0;
             gstate    <= G_LDRAIN;
@@ -367,9 +334,8 @@ module gpnae_poly_int8 #(
 
         G_RUN: begin
           if (mac_res_valid) begin
-            pol_buf[rx_idx[SW-1:0]] <= mac_res;
-            rx_idx                  <= rx_idx + 1;
-            gstate                  <= G_RECV;
+            rx_idx <= rx_idx + 1;
+            gstate <= G_RECV;
           end
           // A one-element group: barrel_mac's only result and its done_o arrive together.
           if (mac_done) begin
@@ -381,10 +347,7 @@ module gpnae_poly_int8 #(
         end
 
         G_RECV: begin
-          if (mac_res_valid) begin
-            pol_buf[rx_idx[SW-1:0]] <= mac_res;
-            rx_idx                  <= rx_idx + 1;
-          end
+          if (mac_res_valid) rx_idx <= rx_idx + 1;
           if (mac_done) begin
             iss_idx  <= '0;
             emit_idx <= '0;
@@ -396,21 +359,11 @@ module gpnae_poly_int8 #(
         // sigmoid and saturated tanh quantize in place; tanh multiplies; SELU multiplies and requantizes.
         G_POST: begin
           if (is_sig || (is_tanh && sat_buf[iss_idx[SW-1:0]])) begin
-            res_buf[iss_idx[SW-1:0]] <= sat_buf[iss_idx[SW-1:0]] ? (neg_buf[iss_idx[SW-1:0]] ? 8'h80 : 8'h7F)
-                                                                 : quant_sig(y_s);
             res_rdy[iss_idx[SW-1:0]] <= 1'b1;
           end else begin
-            pm_a     <= (is_selu && sat_buf[iss_idx[SW-1:0]]) ? SELU_SAT : x_cur;
-            pm_b     <= (is_selu && !neg_buf[iss_idx[SW-1:0]]) ? LAMBDA_Q14
-                      : (is_selu && sat_buf[iss_idx[SW-1:0]]) ? ONE_Q11 : p_cur;
             pm_valid <= 1'b1;
-            if (is_selu) begin
-              ps_v[0] <= 1'b1;
-              ps_p[0] <= iss_idx[SW-1:0];
-            end else begin
-              pt_v[0] <= 1'b1;
-              pt_p[0] <= iss_idx[SW-1:0];
-            end
+            if (is_selu) ps_v[0] <= 1'b1;
+            else pt_v[0] <= 1'b1;
           end
           if (iss_idx + 1 == n_elems) gstate <= G_EMIT;
           else iss_idx <= iss_idx + 1;
@@ -419,8 +372,7 @@ module gpnae_poly_int8 #(
         // Retire in index order, one done_o per element.
         G_EMIT: begin
           if (res_rdy[emit_idx[SW-1:0]]) begin
-            final_result_o <= res_buf[emit_idx[SW-1:0]];
-            done_o         <= 1'b1;
+            done_o <= 1'b1;
             if (emit_idx + 1 == n_elems) gstate <= G_NEXT;
             else emit_idx <= emit_idx + 1;
           end
@@ -437,6 +389,60 @@ module gpnae_poly_int8 #(
         default: gstate <= G_IDLE;
       endcase
     end
+  end
+
+  // Data: buffers, unit operands, element tags and the output word, loaded beside the control above and never reset (D-8).
+  always_ff @(posedge clk_i) begin
+    for (int i = 1; i <= MUL_LAT; i++) begin
+      rs_p[i] <= rs_p[i-1];
+      pt_p[i] <= pt_p[i-1];
+    end
+    for (int i = 1; i <= PS_LAT; i++) ps_p[i] <= ps_p[i-1];
+
+    // A rescaled input: kept for the post stage, and the MAC's or SQ's operand.
+    if (rs_v[MUL_LAT]) begin
+      x_buf[rs_p[MUL_LAT]]   <= x_new;
+      neg_buf[rs_p[MUL_LAT]] <= x_new[W-1];
+      sat_buf[rs_p[MUL_LAT]] <= x_sat;
+      if (is_tanh) sq_a <= x_new;
+      else mac_in <= is_sig ? abs_sat(x_new) : x_new;
+    end
+    if (sq_v[FX_LAT]) mac_in <= sq_res;
+
+    if (pt_v[MUL_LAT]) res_buf[pt_p[MUL_LAT]] <= quant_tanh(pm_res);
+    if (ps_v[PS_LAT]) res_buf[ps_p[PS_LAT]] <= rq_res;
+
+    case (gstate)
+      G_CAP:
+        if (cap_v[CAP_LAG-1]) begin
+          q_buf[ld_idx[SW-1:0]] <= fifo_data_o;
+          if (is_byp) res_buf[ld_idx[SW-1:0]] <= fifo_data_o;
+        end
+
+      G_LOAD: begin
+        rm_a    <= d_cur;
+        rm_b    <= gp_mx_i;
+        rs_p[0] <= iss_idx[SW-1:0];
+      end
+
+      G_RUN, G_RECV: if (mac_res_valid) pol_buf[rx_idx[SW-1:0]] <= mac_res;
+
+      G_POST:
+        if (is_sig || (is_tanh && sat_buf[iss_idx[SW-1:0]])) begin
+          res_buf[iss_idx[SW-1:0]] <= sat_buf[iss_idx[SW-1:0]] ? (neg_buf[iss_idx[SW-1:0]] ? 8'h80 : 8'h7F)
+                                                               : quant_sig(y_s);
+        end else begin
+          pm_a <= (is_selu && sat_buf[iss_idx[SW-1:0]]) ? SELU_SAT : x_cur;
+          pm_b <= (is_selu && !neg_buf[iss_idx[SW-1:0]]) ? LAMBDA_Q14
+                : (is_selu && sat_buf[iss_idx[SW-1:0]]) ? ONE_Q11 : p_cur;
+          if (is_selu) ps_p[0] <= iss_idx[SW-1:0];
+          else pt_p[0] <= iss_idx[SW-1:0];
+        end
+
+      G_EMIT: if (res_rdy[emit_idx[SW-1:0]]) final_result_o <= res_buf[emit_idx[SW-1:0]];
+
+      default: ;
+    endcase
   end
 
 `ifndef SYNTHESIS
