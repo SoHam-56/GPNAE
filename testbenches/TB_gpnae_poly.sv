@@ -281,11 +281,12 @@ module TB_gpnae_poly;
   reg [31:0] s_cnt[0:3];  // segments, groups, elements, expected group starts
   reg [95:0] s_seg[0:S_SEG-1];  // {control word, groups, lane parameters as in <act>_par.mem}
   reg [31:0] s_grp[0:S_GRP-1];  // {mode, elements, group starts expected before this group}
-  reg [7:0] s_in[0:S_EL-1], s_exp[0:S_EL-1], s_got[0:S_EL-1];
+  reg [7:0] s_in[0:S_EL-1], s_exp[0:S_EL-1];
+  reg [DATA_WIDTH-1:0] s_got[0:S_EL-1];  // also the float lane's one-element groups
   reg [15:0] s_bnd[0:S_BND-1], s_obs[0:S_BND-1];  // {state the group started from, size} per group start
   integer s_n, s_nobs;
   reg s_on = 1'b0, s_clear = 1'b0, s_abort = 1'b0;
-  logic [3:0] lane_gs;  // the int8 lane's state, FIFO count and group size, from G_MON
+  logic [3:0] lane_gs;  // the lane's state, FIFO count and group size, from G_MON
   logic [ADDR_LINES:0] lane_cnt;
   logic [4:0] lane_grp;
 
@@ -293,24 +294,29 @@ module TB_gpnae_poly;
   always @(posedge clk) begin
     if (s_clear) s_n <= 0;
     else if (s_on && done_o && s_n < S_EL) begin
-      s_got[s_n] <= final_result_o[7:0];
+      s_got[s_n] <= final_result_o;
       s_n        <= s_n + 1;
     end
   end
 
   if (IS_INT) begin : G_MON
-    logic [3:0] gs_q;
     assign lane_gs  = dut.G_INT8.lane_inst.gstate;
     assign lane_cnt = dut.G_INT8.lane_inst.fifo_count;
     assign lane_grp = dut.G_INT8.lane_inst.grp_n;
-    // Sole writer of s_nobs and s_obs[]: a group starts where the lane enters G_CAP, from G_IDLE or G_NEXT.
-    always @(posedge clk) begin
-      gs_q <= lane_gs;
-      if (s_clear) s_nobs <= 0;
-      else if (s_on && lane_gs == GS_CAP && gs_q != GS_CAP && s_nobs < S_BND) begin
-        s_obs[s_nobs] <= {4'd0, gs_q, 3'd0, lane_grp};
-        s_nobs        <= s_nobs + 1;
-      end
+  end else begin : G_MON
+    assign lane_gs  = dut.G_FLOAT.gstate;  // same gstate_t encoding as the int8 lane
+    assign lane_cnt = dut.G_FLOAT.fifo_count;
+    assign lane_grp = dut.G_FLOAT.grp_n;
+  end
+
+  logic [3:0] gs_q;
+  // Sole writer of s_nobs and s_obs[]: a group starts where the lane enters G_CAP, from G_IDLE or G_NEXT.
+  always @(posedge clk) begin
+    gs_q <= lane_gs;
+    if (s_clear) s_nobs <= 0;
+    else if (s_on && lane_gs == GS_CAP && gs_q != GS_CAP && s_nobs < S_BND) begin
+      s_obs[s_nobs] <= {4'd0, gs_q, 3'd0, lane_grp};
+      s_nobs        <= s_nobs + 1;
     end
   end
 
@@ -459,6 +465,52 @@ module TB_gpnae_poly;
     end
   endtask
 
+  // Float lane: each element of the last batch alone as a one-element group, no reset; checked against gold and its batch result.
+  task automatic run_single(input string act_name);
+    logic [DATA_WIDTH-1:0] ref_b[SIGNALS_PER_BATCH];
+    int base, n_ref, fails, missing, extra, wrong, shown;
+    real rel;
+    begin
+      base  = (NUM_BATCHES - 1) * SIGNALS_PER_BATCH;
+      n_ref = n_captured;
+      for (int i = 0; i < SIGNALS_PER_BATCH; i++) ref_b[i] = got[i];
+      s_abort = 0;
+      s_clear = 1;
+      s_on    = 1;
+      tick();
+      s_clear = 0;
+      for (int i = 0; i < SIGNALS_PER_BATCH && !s_abort; i++) begin
+        s_quiet(i);  // the previous group is out and the lane is idle with an empty FIFO
+        if (s_abort) break;
+        write_signal(stim[base+i], 1'b1);
+      end
+      if (!s_abort) s_quiet(SIGNALS_PER_BATCH);
+      repeat (20) tick();  // a spurious done_o would show up in s_n
+      fails = 0;
+      shown = 0;
+      for (int i = 0; i < SIGNALS_PER_BATCH && i < s_n; i++)
+        if (!within_tol(gold[base+i], s_got[i], rel) || i >= n_ref || s_got[i] !== ref_b[i]) begin
+          fails++;
+          if (shown < 12) begin
+            $display("  SINGLE i%0d  in %0h  expected %0h  batch %0h  got %0h  FAIL", i, stim[base+i], gold[base+i], ref_b[i],
+                     s_got[i]);
+            shown++;
+          end
+        end
+      missing = (s_n < SIGNALS_PER_BATCH) ? SIGNALS_PER_BATCH - s_n : 0;
+      extra   = (s_n > SIGNALS_PER_BATCH) ? s_n - SIGNALS_PER_BATCH : 0;
+      wrong   = (s_nobs > s_n) ? s_nobs - s_n : s_n - s_nobs;  // one group start per output
+      for (int i = 0; i < s_nobs && i < S_BND; i++) if (s_obs[i][4:0] != 5'd1) wrong++;
+      s_on = 0;
+      $display("  SINGLE %s : groups of one %0d  passed %0d  failed %0d  missing %0d  extra %0d  wrong size %0d", act_name,
+               SIGNALS_PER_BATCH, SIGNALS_PER_BATCH - fails - missing, fails, missing, extra, wrong);
+      // Failures fail the run; the SUMMARY counts stay those of the batch runs.
+      total_failed  += fails + extra + wrong + (s_abort ? 1 : 0);
+      total_missing += missing;
+      @(posedge clk);  // back on a clock edge, so the next activation's CYCLES count is unchanged
+    end
+  endtask
+
   initial begin
     clk = 0;
     total_checked = 0; total_exact = 0; total_tol = 0;
@@ -484,8 +536,11 @@ module TB_gpnae_poly;
     clk_period = $time - clk_period;
 
     run_activation(2'b01, "selu", SELU_TERMS);
+    if (!IS_INT) run_single("selu");
     run_activation(2'b10, "sigmoid", SIGMOID_TERMS);
+    if (!IS_INT) run_single("sigmoid");
     run_activation(2'b11, "tanh", TANH_TERMS);
+    if (!IS_INT) run_single("tanh");
     if (IS_INT) begin
       run_activation(3'b100, "relu", TANH_TERMS);
       run_activation(3'b101, "linear", TANH_TERMS);
