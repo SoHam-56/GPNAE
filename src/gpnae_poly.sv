@@ -477,6 +477,13 @@ module gpnae_poly #(
             rx_idx                  <= rx_idx + 1;
             gstate                  <= G_RECV;
           end
+          // A one-element group: barrel_mac's only result and its done_o arrive together.
+          if (mac_done) begin
+            iss_idx  <= '0;
+            emit_idx <= '0;
+            res_rdy  <= '0;
+            gstate   <= G_POST;
+          end
         end
 
         G_RECV: begin
