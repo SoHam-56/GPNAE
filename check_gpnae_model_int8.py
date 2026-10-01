@@ -37,11 +37,17 @@ zero = gm.Lane(gm.INT8, [0] * 32)  # P = 0 everywhere, so only the non-polynomia
 p = gm.Int8Params(mx=26214, shx=8, zin=0, mout=0, shout=0, zout=0)  # s_in = 0.05: x = 102.4 q in Q4.11
 eq("tanh, zero table: x * 0 inside +/-4, saturated outside", zero.run(np.array([0, 80, 81, -80, -81]), 3, p), [0, 0, 127, 0, -128])
 eq("sigmoid, zero table: P = 0, 1 - P = 1 inside +/-3.5, saturated outside", zero.run(np.array([70, 71, -70, -71]), 2, p), [-128, 127, 127, -128])
-p2 = gm.Int8Params(mx=26214, shx=8, zin=0, mout=1 << 30, shout=-20, zout=3)  # output multiplier 2^-21
+p2 = gm.Int8Params(mx=26214, shx=8, zin=0, mout=1 << 30, shout=-17, zout=3)  # output multiplier 2^-18: 1/16 per LSB in 2^-22
 eq("SELU x >= 0: lambda x, requantized", zero.run(np.array([10, 0]), 1, p2), [11, 3])
 eq("SELU -4 <= x < 0: x * P = 0 with a zero table", zero.run(np.array([-5]), 1, p2), [3])
-p3 = gm.Int8Params(mx=26214, shx=7, zin=0, mout=1 << 30, shout=-20, zout=3)  # s_in = 0.1
+p3 = gm.Int8Params(mx=26214, shx=7, zin=0, mout=1 << 30, shout=-17, zout=3)  # s_in = 0.1
 eq("SELU x = -4 inside, x < -4: -lambda*alpha, requantized", zero.run(np.array([-40, -41, -71]), 1, p3), [3, -25, -25])
+eq("rescale_wide does not saturate", gm.rescale_wide(np.array([127, -128]), 0, 32767, 0), [4161409, -4194176])
+eq("SELU x >= 0 in 2^-22: lambda * x floored by 2^3, int32 from x = 997960", gm.selu_pos(np.array([1024, 997959, 997960])),
+   [2203520, 2147483023, (1 << 31) - 1])
+eq("SELU_POS_SAT is the first saturating x", (gm.SELU_POS_SAT,), (997960,))
+p4 = gm.Int8Params(mx=32767, shx=0, zin=0, mout=1 << 30, shout=-24, zout=0)  # x = 16 q, output multiplier 2^-25: 8 per LSB
+eq("SELU x = 160 and 480 exact past Q4.11, x = 496 saturates lambda * x to 2^31 - 1", zero.run(np.array([10, 30, 31]), 1, p4), [21, 63, 64])
 eq("lane rounding is sienna_fmt_pkg's REQ_ROUNDING", (gm.REQ_ROUNDING,), ("DOUBLE",))
 flat = gm.Lane(gm.INT8, [192] + [0] * 31, sets={1: (0, 0)})  # P = 192 everywhere: x = -2048 gives v = -3 * 2^20, a -1.5 LSB tie
 eq("SELU requantize rounds the -1.5 tie away from zero (DOUBLE; SINGLE gives 2)", flat.run(np.array([-20]), 1, p2), [1])

@@ -246,6 +246,7 @@ def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol)
 
 INT8_ACTS = (("selu", 1), ("sigmoid", 2), ("tanh", 3), ("relu", 4), ("linear", 5))  # TB_gpnae_poly's order in int8
 N_RAND_INT8, N_SAT_INT8 = 32, 8  # random lane parameter sets per activation, and how many saturate the rescale; bit-exact only
+N_POS_INT8 = 64  # positive SELU sets per activation, x from 0 past the int32 limit; the last two hit it exactly; bit-exact only
 STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2),
                (0, 16), (2, 1))  # (mode, elements): 0 write then last_i, 1 last_i with the last write, 2 write while busy
 STREAM_BYP = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 8), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2), (0, 16),
@@ -263,6 +264,29 @@ def rand_params_int8(rng, code, sat):
         return gm.Int8Params(mx, shx, zin, int(rng.integers(1 << 30, 1 << 31)), int(rng.integers(-31, 6)),
                              int(rng.integers(-128, 128)))
     return gm.Int8Params(mx, shx, zin, 0, 0, 0)
+
+
+def pos_params_int8(rng, k):
+    """Positive SELU set k: z_in = -128, so q - z_in runs 0..255, and x = round((q + 128) * mx / 2^shx) reaches 255 * mx / 2^shx."""
+    import gpnae_model as gm
+    if k < N_POS_INT8 - 2:
+        mx, shx = int(rng.integers(1 << 14, 1 << 15)), 3  # up to 255 * 32767 / 8, past SELU_POS_SAT; steps of 1 to 2 real
+    else:  # the last two: some input lands on x = SELU_POS_SAT - 1, then on SELU_POS_SAT itself
+        mx, shx = pos_hit(gm.SELU_POS_SAT - (N_POS_INT8 - 1 - k))
+    s_in = mx / 2.0 ** shx / 2048
+    s_out, z_out = gm.calib_out(0.0, gm.LAMBDA_F * 255 * s_in * (1.0 if k % 2 else float(rng.uniform(0.25, 1.0))))
+    mout, shout = gm.quantize_multiplier(2.0 ** -22 / s_out)  # odd sets: the exact range, even: finer, so the top end clamps
+    return gm.Int8Params(mx, shx, -128, mout, shout, z_out)
+
+
+def pos_hit(x):
+    """(mx, shx) with round(d * mx / 2^shx) = x for some d in 1..255, so input q = d - 128 rescales to x exactly."""
+    for shx in range(0, 8):
+        for d in range(255, 0, -1):
+            mx = -(-(x * (1 << shx) - ((1 << shx) >> 1)) // d)  # the smallest mx whose rounded rescale reaches x
+            if mx <= 32767 and ((d * mx + ((1 << shx) >> 1)) >> shx) == x:
+                return mx, shx
+    raise ValueError(f"no int8 input rescales to {x}")
 
 
 def rescale_saturates(p) -> bool:
@@ -332,7 +356,8 @@ def run_int8(args) -> int:
     n_cases = len(gm.INT8_CASES["tanh"])
     assert all(len(gm.INT8_CASES[a]) == n_cases for a, _ in INT8_ACTS), "every activation needs the same number of cases"
     case_batches = n_cases * 256 // per
-    batches = (n_cases + N_RAND_INT8) * 256 // per  # the cases first, then the random sets
+    rand_batches = (n_cases + N_RAND_INT8) * 256 // per
+    batches = (n_cases + N_RAND_INT8 + N_POS_INT8) * 256 // per  # the cases first, then the random sets, then the positive SELU sets
     fmt = types.SimpleNamespace(name="int8", width=8, exp_bits=0, man_bits=7)
     coeff = gm.coeff_file(gm.INT8)
     lane = gm.Lane(gm.INT8, gm.read_rom(os.path.join(ROOT, coeff)))
@@ -341,6 +366,10 @@ def run_int8(args) -> int:
     rr = np.random.default_rng([args.seed, 12])  # the random parameter sets and their input order
     os.makedirs(STIM_DIR, exist_ok=True)
     rows, rand_sets = [], {}
+    rp = np.random.default_rng([args.seed, 14])  # the positive SELU sets and their input order
+    pos_sets = [pos_params_int8(rp, k) for k in range(N_POS_INT8)]  # every activation runs them; only SELU's are of interest
+    pos_q = [rp.permutation(256).astype(np.int64) - 128 for _ in pos_sets]
+    pos_x = np.concatenate([gm.rescale_wide(q, p.zin, p.mx, p.shx) for p, q in zip(pos_sets, pos_q)])
     for act, code in INT8_ACTS:
         stim, gold, par = [], [], []
         for case in gm.INT8_CASES[act]:
@@ -358,6 +387,11 @@ def run_int8(args) -> int:
             stim += [int(v) for v in q]
             gold += [int(v) for v in lane.run(q, code, p)]
             par += [p] * (256 // per)
+        for p, q in zip(pos_sets, pos_q):
+            p = p if code == 1 else p._replace(mout=0, shout=0, zout=0)
+            stim += [int(v) for v in q]
+            gold += [int(v) for v in lane.run(q, code, p)]
+            par += [p] * (256 // per)
         with open(os.path.join(STIM_DIR, f"{act}_in.mem"), "w") as fh:
             fh.write("".join(f"{v & 0xFF:02x}\n" for v in stim))
         with open(os.path.join(STIM_DIR, f"{act}_exp.mem"), "w") as fh:
@@ -367,7 +401,7 @@ def run_int8(args) -> int:
                              for p in par))
     n_sat = {act: sum(rescale_saturates(p) for p in s) for act, s in rand_sets.items()}
     stream = write_stream_int8(lane, np.random.default_rng([args.seed, 13]))
-    print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases and {N_RAND_INT8} random sets x 256 inputs per activation, "
+    print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases, {N_RAND_INT8} random and {N_POS_INT8} positive SELU sets x 256 inputs per activation, "
               f"a {stream['elements']}-element protocol stream, seed {args.seed}\n{'='*78}"))
     raw, wall = run_make("poly")
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -376,10 +410,10 @@ def run_int8(args) -> int:
     parsed = parse_log(raw, expect_total=batches * per, expect_acts=len(INT8_ACTS))
     for act, a in parsed["per_act"].items():
         print_activation(act, a)
-    bad = {act: [0, 0] for act, _ in INT8_ACTS}  # wrong or missing outputs: cases, random sets
+    bad = {act: [0, 0, 0] for act, _ in INT8_ACTS}  # wrong or missing outputs: cases, random sets, positive SELU sets
     for m in re.finditer(r"BATCHFAIL (\w+) b(\d+) : (\d+)", raw):
         if m.group(1) in bad:
-            bad[m.group(1)][int(m.group(2)) >= case_batches] += int(m.group(3))
+            bad[m.group(1)][(int(m.group(2)) >= case_batches) + (int(m.group(2)) >= rand_batches)] += int(m.group(3))
     se = re.search(r"STREAM : elements (\d+)\s+exact (\d+)\s+failed (\d+)\s+missing (\d+)\s+extra (\d+)", raw)
     sb = re.search(r"STREAM boundaries : expected (\d+)\s+observed (\d+)\s+wrong (\d+)\s+edge errors (\d+)", raw)
     stream_ok = bool(se and sb) and int(se.group(1)) == stream["elements"] and int(se.group(2)) == stream["elements"] \
@@ -388,7 +422,7 @@ def run_int8(args) -> int:
     exact_ok = parsed["status"] == "PASS" and stream_ok
     tot = {act: gm.merge_acc(a for x, c, _, a in rows if x == act and c.gated) for act, _ in INT8_ACTS[:3]}
     tol = f"rel <= {100 * gm.REL_TOL_INT8:.2f}% or abs <= {gm.ABS_TOL_LSB} LSB"
-    n_c, n_r = n_cases * 256, N_RAND_INT8 * 256
+    n_c, n_r, n_p = n_cases * 256, N_RAND_INT8 * 256, N_POS_INT8 * 256
     ran = lambda a: a in parsed["per_act"] and parsed["per_act"][a]["total"] == batches * per  # the TB checked all of it
     part = lambda a, k, n: f"{a} {n - bad[a][k]}/{n}" if ran(a) else f"{a} no result"
     L = [f"GPNAE int8 lane, seed {args.seed}: bit-exact against gpnae_model, then the lane against exact_int8 with GPNAE's tolerance",
@@ -398,6 +432,12 @@ def run_int8(args) -> int:
          "  INT8_CASES, every int8 input: " + "  ".join(part(a, 0, n_c) for a, _ in INT8_ACTS),
          f"  random sets ({N_RAND_INT8} per activation, bit-exact only): "
          + "  ".join(f"{part(a, 1, n_r)} ({n_sat[a]} saturate the rescale)" for a, _ in INT8_ACTS),
+         f"  positive SELU sets ({N_POS_INT8} per activation, z_in = -128, bit-exact only): {part('selu', 2, n_p)}; SELU inputs "
+         f"x >= 16: {int((pos_x >= 1 << 15).sum())}, of them in [16, {gm.SELU_POS_SAT / 2048:.2f}) exact: "
+         f"{int(((pos_x >= 1 << 15) & ~gm.selu_pos_saturates(pos_x)).sum())}, saturating lambda * x at int32: "
+         f"{int(gm.selu_pos_saturates(pos_x).sum())} (x = SELU_POS_SAT - 1 hit {int((pos_x == gm.SELU_POS_SAT - 1).sum())}, "
+         f"x = SELU_POS_SAT hit {int((pos_x == gm.SELU_POS_SAT).sum())}); the other activations "
+         + "  ".join(part(a, 2, n_p) for a, _ in INT8_ACTS[1:]),
          f"  protocol stream ({stream['segments']} segments, {stream['groups']} groups, no reset between groups): "
          + (f"exact {se.group(2)}/{se.group(1)}, failed {se.group(3)}, missing {se.group(4)}, extra {se.group(5)}; group starts "
             f"{sb.group(2)} observed of {sb.group(1)} expected, {sb.group(3)} wrong, {sb.group(4)} edge errors"
@@ -419,6 +459,8 @@ def run_int8(args) -> int:
     L.append("random sets (mx shx z_in mout shout z_out), in stimulus order after the cases:")
     for act, s in rand_sets.items():
         L.append(f"  {act}: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in s))
+    L.append("positive SELU sets (mx shx z_in mout shout z_out), in stimulus order after the random sets:")
+    L.append("  selu: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in pos_sets))
     with open(os.path.join(RESULTS_DIR, "gpnae_int8_report.log"), "w") as fh:
         fh.write("\n".join(L) + "\n")
     fields = lambda a: {"pass": a.ok, "fail": a.fail, "worst_rel": a.worst_rel, "worst_lsb": a.worst_lsb,
