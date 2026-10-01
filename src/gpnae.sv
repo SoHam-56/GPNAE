@@ -207,6 +207,11 @@ module gpnae #(
             rx_idx                  <= rx_idx + 1;
             gstate                  <= G_RECV;
           end
+          // A one-element group: barrel_mac's only result and its done_o arrive together.
+          if (mac_done) begin
+            post_idx <= '0;
+            gstate   <= G_POST_START;
+          end
         end
 
         // Collect the group's exponentials as the MAC streams them out.
