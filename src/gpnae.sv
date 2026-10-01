@@ -38,6 +38,8 @@ module gpnae #(
   localparam int SW = $clog2(K);
   // data_o trails a pop by three cycles: rd_ptr, then ram_data_b, then doutb_reg.
   localparam int FIFO_RD_LAT = 3;
+  // A word written into an empty FIFO reaches data_o FIFO_RD_LAT edges later: empty_o at the last two edges must be low.
+  logic [FIFO_RD_LAT-2:0] empty_q;
 
   localparam logic [DATA_WIDTH-1:0] LAMDA       = 32'h3F867D5F;
   localparam logic [DATA_WIDTH-1:0] LAMDA_ALPHA = 32'h3FE10966;
@@ -163,7 +165,9 @@ module gpnae #(
       post_valid     <= 1'b0;
       done_o         <= 1'b0;
       final_result_o <= '0;
+      empty_q        <= '1;
     end else begin
+      empty_q    <= {empty_q[FIFO_RD_LAT-3:0], empty_o};
       ld_valid   <= 1'b0;
       mac_start  <= 1'b0;
       fifo_rd_en <= 1'b0;
@@ -179,13 +183,15 @@ module gpnae #(
         // Capture the head, hand it to the MAC, pop, then let the FIFO catch up.
         G_CAP: begin
           if (!empty_o && (ld_idx < K[SW:0])) begin
-            sig_buf[ld_idx[SW-1:0]] <= fifo_data_o;
-            pos_buf[ld_idx[SW-1:0]] <= sig_is_pos;
-            ld_valid                <= 1'b1;
-            fifo_rd_en              <= 1'b1;
-            ld_idx                  <= ld_idx + 1;
-            wait_cnt                <= '0;
-            gstate                  <= G_WAIT;
+            if (!(|empty_q)) begin  // otherwise wait here: the head is not on data_o yet
+              sig_buf[ld_idx[SW-1:0]] <= fifo_data_o;
+              pos_buf[ld_idx[SW-1:0]] <= sig_is_pos;
+              ld_valid                <= 1'b1;
+              fifo_rd_en              <= 1'b1;
+              ld_idx                  <= ld_idx + 1;
+              wait_cnt                <= '0;
+              gstate                  <= G_WAIT;
+            end
           end else if (ld_idx != '0) begin
             n_elems   <= ld_idx;
             mac_start <= 1'b1;
