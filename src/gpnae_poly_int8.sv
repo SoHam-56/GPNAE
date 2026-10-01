@@ -21,7 +21,7 @@ module gpnae_poly_int8 #(
     input logic [15:0] gp_mx_i,     // input rescale: x = round((q - z_in) * mx / 2^shx) in Q4.11, mx below 2^15
     input logic [ 4:0] gp_shx_i,
     input logic [ 7:0] gp_zin_i,    // input zero point
-    input logic [31:0] gp_mout_i,   // SELU output: TFLite multiplier and shift of 2^-25 / s_out
+    input logic [31:0] gp_mout_i,   // SELU output: TFLite multiplier and shift of 2^-22 / s_out
     input logic [ 7:0] gp_shout_i,
     input logic [ 7:0] gp_zout_i,   // SELU output zero point
 
@@ -36,6 +36,7 @@ module gpnae_poly_int8 #(
   localparam int SW = $clog2(K);
   localparam int CAP_LAG = 3;  // as gpnae_poly: a pop's word appears three cycles later
   localparam int W = 16;  // Q4.11
+  localparam int XW = 24;  // x unsaturated: |q - z_in| <= 255 and mx < 2^15 keep |(q - z_in) * mx| below 2^23
   localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(0, 7);  // intMultiplier
   localparam int FX_LAT = sienna_fmt_pkg::fx_lat();  // fxMac: the tanh squarer
   localparam int RQ_LAT = sienna_fmt_pkg::req_lat();  // tfliteRequant
@@ -57,14 +58,23 @@ module gpnae_poly_int8 #(
     $fatal(1, "gpnae_poly_int8: DATA_WIDTH must be 8, not %0d", DATA_WIDTH);
   end
 
-  // Input rescale: (q - z_in) * mx rounded half up by 2^s, saturated to Q4.11.
-  function automatic logic [W-1:0] rescale(input logic [31:0] p, input logic [4:0] s);
-    logic signed [39:0] pw, r;
+  // Input rescale: (q - z_in) * mx rounded half up by 2^s; below 2^23 in magnitude, so its low XW bits are SELU's unsaturated x.
+  function automatic logic signed [39:0] rescale_raw(input logic [31:0] p, input logic [4:0] s);
+    logic signed [39:0] pw;
     pw = {{8{p[31]}}, p};
-    r  = (s == 5'd0) ? pw : ((pw + (40'sd1 <<< (s - 5'd1))) >>> s);
+    return (s == 5'd0) ? pw : ((pw + (40'sd1 <<< (s - 5'd1))) >>> s);
+  endfunction
+
+  // The rescale saturated to Q4.11.
+  function automatic logic [W-1:0] rescale(input logic signed [39:0] r);
     if (r > 40'sd32767) return 16'h7FFF;
     if (r < -40'sd32768) return 16'h8000;
     return r[W-1:0];
+  endfunction
+
+  // A Q4.11 word sign-extended to the post multiplier's width.
+  function automatic logic [XW-1:0] sx_xw(input logic [W-1:0] v);
+    return {{(XW - W) {v[W-1]}}, v};
   endfunction
 
   // |x|, saturated: sigmoid's MAC operand.
@@ -162,15 +172,17 @@ module gpnae_poly_int8 #(
                                 .result_o(sq_res), .done_o(sq_done));
 
   // Post multiply, as the float lane's POST: tanh x * P; SELU x * P, x * lambda, or -lambda*alpha * 1.0.
-  logic           pm_valid, pm_done, rq_done;
-  logic [W-1:0]   pm_a, pm_b;
-  logic [2*W-1:0] pm_res, rq_acc;
-  logic [7:0]     rq_res;
-  intMultiplier #(.W(W)) POSTM (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(pm_valid), .A(pm_a), .B(pm_b), .result_o(pm_res),
-                                .done_o(pm_done));
+  logic            pm_valid, pm_done, rq_done;
+  logic [XW-1:0]   pm_a, pm_b;  // XW wide for lambda * x unsaturated; the other products are of sign-extended 16-bit operands
+  logic [2*XW-1:0] pm_res;
+  logic [2*W-1:0]  rq_acc;
+  logic [7:0]      rq_res;
+  intMultiplier #(.W(XW)) POSTM (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(pm_valid), .A(pm_a), .B(pm_b), .result_o(pm_res),
+                                 .done_o(pm_done));
 
   logic [DATA_WIDTH-1:0] q_buf[K];    // captured int8 inputs
   logic [W-1:0]          x_buf[K];    // rescaled inputs, Q4.11
+  logic [XW-1:0]         xw_buf[K];   // the same, unsaturated: SELU's positive branch
   logic [K-1:0]          neg_buf, sat_buf;
   logic [W-1:0]          pol_buf[K];
   logic [DATA_WIDTH-1:0] res_buf[K];
@@ -190,8 +202,12 @@ module gpnae_poly_int8 #(
   logic [PS_LAT:0]  ps_v;  // SELU post multiply and requantize
   logic [SW-1:0]    ps_p[PS_LAT+1];
 
-  // SELU requantize: x * P and -lambda*alpha * 1.0 are in 2^-22, x * lambda in 2^-25.
-  assign rq_acc = neg_buf[ps_p[MUL_LAT]] ? {pm_res[2*W-4:0], 3'b000} : pm_res;
+  // SELU requantize in 2^-22: x * P and -lambda*alpha * 1.0 as they are; lambda * x (2^-25) floored by 2^3, saturated to int32.
+  localparam logic signed [2*XW-1:0] I32_MAX = (2*XW)'(32'sh7FFFFFFF), I32_MIN = (2*XW)'(32'sh80000000);
+  logic signed [2*XW-1:0] pm_sh;
+  assign pm_sh  = $signed(pm_res) >>> 3;
+  assign rq_acc = neg_buf[ps_p[MUL_LAT]] ? pm_res[2*W-1:0]
+                : (pm_sh > I32_MAX) ? 32'h7FFFFFFF : (pm_sh < I32_MIN) ? 32'h80000000 : pm_sh[2*W-1:0];
   tfliteRequant #(.ROUNDING(sienna_fmt_pkg::REQ_ROUNDING)) POSTQ (
       .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(ps_v[MUL_LAT]), .acc_i(rq_acc), .mult_i(gp_mout_i), .shift_i(gp_shout_i),
       .zp_i(gp_zout_i), .act_min_i(8'h80), .act_max_i(8'h7F), .result_o(rq_res), .done_o(rq_done)
@@ -199,11 +215,13 @@ module gpnae_poly_int8 #(
 
   logic [DATA_WIDTH-1:0] q_cur;
   logic [W-1:0]          d_cur, x_new, p_cur, x_cur;
+  logic signed [39:0]    x_raw;
   logic                  x_sat;
   logic signed [W:0]     p_ext, y_s;
   assign q_cur = q_buf[iss_idx[SW-1:0]];
   assign d_cur = {{(W - 8) {q_cur[7]}}, q_cur} - {{(W - 8) {gp_zin_i[7]}}, gp_zin_i};  // q - z_in
-  assign x_new = rescale(rm_res, gp_shx_i);
+  assign x_raw = rescale_raw(rm_res, gp_shx_i);
+  assign x_new = rescale(x_raw);
   assign x_sat = is_selu ? ($signed(x_new) < T_SELU)
                : is_sig  ? (($signed(x_new) > T_SIG) || ($signed(x_new) < -T_SIG))
                          : (($signed(x_new) > T_TANH) || ($signed(x_new) < -T_TANH));
@@ -402,6 +420,7 @@ module gpnae_poly_int8 #(
     // A rescaled input: kept for the post stage, and the MAC's or SQ's operand.
     if (rs_v[MUL_LAT]) begin
       x_buf[rs_p[MUL_LAT]]   <= x_new;
+      xw_buf[rs_p[MUL_LAT]]  <= x_raw[XW-1:0];
       neg_buf[rs_p[MUL_LAT]] <= x_new[W-1];
       sat_buf[rs_p[MUL_LAT]] <= x_sat;
       if (is_tanh) sq_a <= x_new;
@@ -409,7 +428,7 @@ module gpnae_poly_int8 #(
     end
     if (sq_v[FX_LAT]) mac_in <= sq_res;
 
-    if (pt_v[MUL_LAT]) res_buf[pt_p[MUL_LAT]] <= quant_tanh(pm_res);
+    if (pt_v[MUL_LAT]) res_buf[pt_p[MUL_LAT]] <= quant_tanh(pm_res[2*W-1:0]);
     if (ps_v[PS_LAT]) res_buf[ps_p[PS_LAT]] <= rq_res;
 
     case (gstate)
@@ -432,9 +451,10 @@ module gpnae_poly_int8 #(
           res_buf[iss_idx[SW-1:0]] <= sat_buf[iss_idx[SW-1:0]] ? (neg_buf[iss_idx[SW-1:0]] ? 8'h80 : 8'h7F)
                                                                : quant_sig(y_s);
         end else begin
-          pm_a <= (is_selu && sat_buf[iss_idx[SW-1:0]]) ? SELU_SAT : x_cur;
-          pm_b <= (is_selu && !neg_buf[iss_idx[SW-1:0]]) ? LAMBDA_Q14
-                : (is_selu && sat_buf[iss_idx[SW-1:0]]) ? ONE_Q11 : p_cur;
+          pm_a <= (is_selu && !neg_buf[iss_idx[SW-1:0]]) ? xw_buf[iss_idx[SW-1:0]]
+                : sx_xw((is_selu && sat_buf[iss_idx[SW-1:0]]) ? SELU_SAT : x_cur);
+          pm_b <= sx_xw((is_selu && !neg_buf[iss_idx[SW-1:0]]) ? LAMBDA_Q14
+                      : (is_selu && sat_buf[iss_idx[SW-1:0]]) ? ONE_Q11 : p_cur);
           if (is_selu) ps_p[0] <= iss_idx[SW-1:0];
           else pt_p[0] <= iss_idx[SW-1:0];
         end
