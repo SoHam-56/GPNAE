@@ -283,7 +283,7 @@ module TB_gpnae;
       s_on    = 1;
       tick();
       s_clear = 0;
-      start_i = 0;  // write_signal leaves start_i, the lane's last_i, high; a held last_i captures a word before data_o has it
+      start_i = 0;  // write_signal leaves start_i, the lane's last_i, high; run_timing covers a held last_i
       for (int i = 0; i < SIGNALS_PER_BATCH && !s_abort; i++) begin
         s_quiet(i);  // the previous group is out and the lane is idle with an empty FIFO
         if (s_abort) break;
@@ -317,6 +317,99 @@ module TB_gpnae;
     end
   endtask
 
+  // Capture timings: a word reaches data_o three edges after its write into an empty FIFO, so no capture may come sooner.
+  localparam logic [2:0] GS_WAIT = 3'd2, GS_POST_WAIT = 3'd6;  // gpnae's gstate_t encoding
+  localparam int T_HELD = 0, T_AT = 1, T_AFTER = 2, T_WAIT = 3, T_NEXT = 4;
+
+  // One write; last_i pulses LAG edges after it (0: on its edge, 2: write_signal's timing), or is left alone if LAG < 0.
+  task automatic t_write(input logic [DATA_WIDTH-1:0] d, input int lag);
+    signal_i = d;
+    wr_en_i  = 1;
+    if (lag == 0) start_i = 1;
+    tick();
+    wr_en_i = 0;
+    if (lag >= 0) start_i = (lag == 1);
+    tick();
+    if (lag >= 0) start_i = (lag == 2);
+    tick();
+    if (lag >= 0) start_i = 0;
+  endtask
+
+  // Polls until the lane state and condition hold, then writes d so its edge is the next one.
+  task automatic t_write_when(input logic [DATA_WIDTH-1:0] d, input int mode, input int wcnt);
+    int guard;
+    guard = 0;
+    while (!((mode == T_WAIT) ? (lane_gs == GS_WAIT && int'(dut.wait_cnt) == wcnt)
+                              : (lane_gs == GS_POST_WAIT && dut.post_done && int'(dut.post_idx) + 1 == int'(dut.n_elems)))
+           && guard < TIMEOUT_CYCLES) begin
+      tick();
+      guard++;
+    end
+    if (guard >= TIMEOUT_CYCLES) begin
+      s_abort = 1;
+      $display("  TIMING timeout waiting for lane state %0d", (mode == T_WAIT) ? GS_WAIT : GS_POST_WAIT);
+    end
+    signal_i = d;
+    wr_en_i  = 1;
+    tick();
+    wr_en_i = 0;
+  endtask
+
+  // The last batch again under one capture timing, no reset; every output bit-identical to its batch result, in order.
+  task automatic run_timing(input string act_name, input int mode);
+    string tname;
+    int base, fails, missing, extra, shown;
+    real rel;
+    begin
+      base    = (NUM_BATCHES - 1) * SIGNALS_PER_BATCH;
+      tname   = (mode == T_HELD) ? "held_last" : (mode == T_AT) ? "last_at_write" : (mode == T_AFTER) ? "last_after_write" :
+                (mode == T_WAIT) ? "refill_in_wait" : "refill_at_next";
+      s_abort = 0;
+      s_clear = 1;
+      s_on    = 1;
+      tick();
+      s_clear = 0;
+      start_i = (mode == T_HELD);
+      for (int i = 0; i < SIGNALS_PER_BATCH && !s_abort; i++) begin
+        s_quiet(i);
+        if (s_abort) break;
+        case (mode)
+          T_HELD:  t_write(stim[base+i], -1);
+          T_AT:    t_write(stim[base+i], 0);
+          T_AFTER: t_write(stim[base+i], 1);
+          default: begin  // a pair: the second word refills the drained FIFO while the first runs
+            t_write(stim[base+i], 2);
+            if (i + 1 < SIGNALS_PER_BATCH) begin
+              t_write_when(stim[base+i+1], mode, (i % 4 == 0) ? 3 : 2);
+              i++;
+            end
+          end
+        endcase
+      end
+      if (!s_abort) s_quiet(SIGNALS_PER_BATCH);
+      start_i = 0;
+      repeat (20) tick();  // a spurious done_o would show up in s_n
+      fails = 0;
+      shown = 0;
+      for (int i = 0; i < SIGNALS_PER_BATCH && i < s_n; i++)
+        if (!within_tol(gold[base+i], s_got[i], rel) || i >= n_captured || s_got[i] !== got[i]) begin
+          fails++;
+          if (shown < 6) begin
+            $display("  TIMING %s i%0d  in %0h  batch %0h  got %0h  FAIL", tname, i, stim[base+i], got[i], s_got[i]);
+            shown++;
+          end
+        end
+      missing = (s_n < SIGNALS_PER_BATCH) ? SIGNALS_PER_BATCH - s_n : 0;
+      extra   = (s_n > SIGNALS_PER_BATCH) ? s_n - SIGNALS_PER_BATCH : 0;
+      s_on = 0;
+      $display("  TIMING %s %s : elements %0d  passed %0d  failed %0d  missing %0d  extra %0d", act_name, tname,
+               SIGNALS_PER_BATCH, SIGNALS_PER_BATCH - fails - missing, fails, missing, extra);
+      total_failed  += fails + extra + (s_abort ? 1 : 0);
+      total_missing += missing;
+      @(posedge clk);  // back on a clock edge, so the next activation's CYCLES count is unchanged
+    end
+  endtask
+
   initial begin
     clk = 0;
     total_checked = 0; total_exact = 0; total_tol = 0;
@@ -343,10 +436,13 @@ module TB_gpnae;
 
     run_activation(2'b01, "selu", SELU_TERMS);
     run_single("selu");
+    for (int m = T_HELD; m <= T_NEXT; m++) run_timing("selu", m);
     run_activation(2'b10, "sigmoid", SIGMOID_TERMS);
     run_single("sigmoid");
+    for (int m = T_HELD; m <= T_NEXT; m++) run_timing("sigmoid", m);
     run_activation(2'b11, "tanh", TANH_TERMS);
     run_single("tanh");
+    for (int m = T_HELD; m <= T_NEXT; m++) run_timing("tanh", m);
 
     $display("\n==============================================");
     $display(" SUMMARY");
