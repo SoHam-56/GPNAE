@@ -47,8 +47,8 @@ The published engine computed one input at a time. Today's lane is built for thr
 
 ![GPNAE lane](docs/gpnae_lane.svg)
 
-1. **Fitted polynomials instead of e^x.** Each activation is a polynomial fitted directly to the function, so there is no exponential and no divider. Inputs beyond the fitted range go to a tail unit that runs alongside.
-2. **A barrel multiply-accumulate unit.** The published controller issued one multiply every 15 cycles, about 6% use of the multiplier. The barrel unit interleaves many inputs round-robin, so the multiplier takes a new operation every cycle.
+1. **A short polynomial per function.** The published design built every function from e^x, which needed up to 30 series terms and, for sigmoid and tanh, a division. Today each function has its own short polynomial, fitted to that function alone, so only multiplies and adds are left. Inputs too large for the fit go to a small side unit that handles the flat tails of the curve.
+2. **Many inputs share one multiply-add unit.** A polynomial is evaluated as a chain in which each step waits for the previous one, so the published design kept its multiplier busy only about 6% of the time. The new unit works on many inputs in turn, like a barrel processor, so it starts a new operation every cycle.
 3. **Three number formats.** bf16 runs the same lane at lower precision. A fixed-point int8 lane takes quantized inputs and returns quantized outputs, as TensorFlow Lite does.
 4. **Verification.** Bit-exact Python models of every lane, a regression with ten stimulus patterns per activation, and correctness fixes in the control logic. The published Taylor lane is still in the repository (`src/gpnae.sv`) and is checked by the same regression.
 
