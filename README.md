@@ -49,7 +49,7 @@ The published engine computed one input at a time. Today's lane is built for thr
 
 1. **A short polynomial per function.** The published design built every function from e^x, which needed up to 30 series terms and, for sigmoid and tanh, a division. Today each function has its own short polynomial, fitted to that function alone, so only multiplies and adds are left. Inputs too large for the fit go to a small side unit that handles the flat tails of the curve.
 2. **Many inputs share one multiply-add unit.** A polynomial is evaluated as a chain in which each step waits for the previous one, so the published design kept its multiplier busy only about 6% of the time. The new unit works on many inputs in turn, like a barrel processor, so it starts a new operation every cycle.
-3. **Three number formats.** bf16 runs the same lane at lower precision. A fixed-point int8 lane takes quantized inputs and returns quantized outputs, as TensorFlow Lite does.
+3. **Three number formats.** A build parameter switches the lane's arithmetic between fp32 and bf16. A separate fixed-point int8 lane takes quantized inputs and returns quantized outputs, as TensorFlow Lite does.
 4. **Verification.** Bit-exact Python models of every lane, a regression with ten stimulus patterns per activation, and correctness fixes in the control logic. The published Taylor lane is still in the repository (`src/gpnae.sv`) and is checked by the same regression.
 
 ---
@@ -88,7 +88,7 @@ In fp32 every output is within the regression's 1% bound. bf16 carries only 8 si
 | UNO [2] | degree 2–4 Taylor series on existing MAC units | 8-bit fixed point | 3–5 per primitive (exp, log, divide) |
 | CORDIC-based [3] | CORDIC rotations and division | 8-bit | 9 |
 
-Lookup tables and short series take fewer cycles at reduced precision or with fewer segments. GPNAE keeps fp32 results within 0.39% of the exact functions, and it supports bf16 and int8 in the same lane design.
+Lookup tables and short series take fewer cycles at reduced precision or with fewer segments. GPNAE keeps fp32 results within 0.39% of the exact functions, and it also has bf16 and int8 versions.
 
 [1] NN-LUT, DAC 2022, [arXiv:2112.02191](https://arxiv.org/abs/2112.02191) · [2] UNO, ISLPED 2021, [paper](https://jsm.ece.wisc.edu/docs/wu-islped2021.pdf) · [3] Kokane et al., "CORDIC Is All You Need", 2025, [arXiv:2503.11685](https://arxiv.org/abs/2503.11685)
 
