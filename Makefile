@@ -11,6 +11,10 @@ WAVE = gtkwave
 
 DESIGN_FILES = \
 	../ArithmeticLibrary/Common/src/sienna_fmt_pkg.sv \
+	../ArithmeticLibrary/Common/src/credit_link_if.sv \
+	../ArithmeticLibrary/Common/src/credit_counter.sv \
+	../ArithmeticLibrary/Common/src/credit_reg.sv \
+	../ArithmeticLibrary/Common/src/credit_link_checker.sv \
 	TYTAN/Memory/CoeffROM.v \
 	TYTAN/Memory/InputFIFO.v \
 	TYTAN/Memory/PE5B.v \

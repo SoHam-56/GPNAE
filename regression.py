@@ -248,7 +248,7 @@ INT8_ACTS = (("selu", 1), ("sigmoid", 2), ("tanh", 3), ("relu", 4), ("linear", 5
 N_RAND_INT8, N_SAT_INT8 = 32, 8  # random lane parameter sets per activation, and how many saturate the rescale; bit-exact only
 N_POS_INT8 = 64  # positive SELU sets per activation, x from 0 past the int32 limit; the last two hit it exactly; bit-exact only
 STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2),
-               (0, 16), (2, 1))  # (mode, elements): 0 write then last_i, 1 last_i with the last write, 2 write while busy
+               (0, 16), (2, 1))  # (mode, elements): 0 puts with last on the final one, 1 the final put held back, 2 puts while busy
 STREAM_BYP = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 8), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2), (0, 16),
               (2, 1))  # ReLU and linear emit 16 cycles after capture, so a busy group is at most 8
 S_IDLE, S_NEXT, LANE_K = 0, 8, 16  # gpnae_poly_int8's G_IDLE and G_NEXT encodings, and its group size
@@ -301,10 +301,8 @@ def stream_starts(mode, n):
     """The group starts one stream group should produce, as (state it starts from, size)."""
     if mode == 2:
         first, via = min(LANE_K, n), S_NEXT  # queued while the lane works: G_NEXT takes it
-    elif mode == 1:
-        first, via = max(1, min(LANE_K, n - 1)), S_IDLE  # G_IDLE counts the FIFO before the last write; a lone one waits
     else:
-        first, via = min(LANE_K, n), S_IDLE
+        first, via = min(LANE_K, n), S_IDLE  # G_IDLE starts it at its last put, held back or not
     out, left = [(via, first)], n - first
     while left:
         out.append((S_NEXT, min(LANE_K, left)))  # the rest is already queued: G_NEXT takes it, 16 at a time

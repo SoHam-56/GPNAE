@@ -27,14 +27,15 @@ module gpnae_poly #(
     parameter int    ADDR_LINES    = 5,
     parameter int    CONTROL_WIDTH = 3,  // 001 SELU, 010 sigmoid, 011 tanh, 100 ReLU, 101 linear
     parameter int    K             = 16,
-    parameter int    TAIL_CONTEXTS = 4   // tail elements gpnae_tail works on at once
+    parameter int    TAIL_CONTEXTS = 4,  // tail elements gpnae_tail works on at once
+    parameter int    OUT_MAX       = 64,  // the most output credits the downstream consumer may advertise
+    parameter int    OUT_CRW       = 1    // out.credit width
 ) (
     input logic clk_i,
     input logic rstn_i,
 
-    input logic [DATA_WIDTH-1:0] signal_i,
-    input logic                  wr_en_i,
-    input logic                  last_i,
+    credit_link_if.consumer in,   // {last, signal}, last on a set's final element; the lane advertises its 2**ADDR_LINES FIFO slots
+    credit_link_if.producer out,  // one result per put; a group starts only with K output credits
 
     input  logic [   ADDR_LINES-1:0] terms_i,         // unused: degree comes from the table
     input  logic [CONTROL_WIDTH-1:0] control_word_i,
@@ -44,14 +45,7 @@ module gpnae_poly #(
     input logic [ 7:0] gp_zin_i,    // int8: input zero point
     input logic [31:0] gp_mout_i,   // int8: SELU output multiplier
     input logic [ 7:0] gp_shout_i,  // int8: SELU output shift
-    input logic [ 7:0] gp_zout_i,   // int8: SELU output zero point
-
-    output logic full_o,
-    output logic empty_o,
-    output logic idle_o,
-
-    output logic [DATA_WIDTH-1:0] final_result_o,
-    output logic                  done_o
+    input logic [ 7:0] gp_zout_i    // int8: SELU output zero point
 );
 
   localparam int SW = $clog2(K);
@@ -73,6 +67,15 @@ module gpnae_poly #(
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "gpnae_poly: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
   end
+  if (OUT_MAX < K) begin : G_BAD_OUT_MAX
+    $fatal(1, "gpnae_poly: OUT_MAX %0d is below K %0d, so no group could start", OUT_MAX, K);
+  end
+`ifndef SYNTHESIS
+  // Interface widths are not elaboration constants in Verilator, so the link widths are checked at time 0.
+  initial
+    if ($bits(in.data) != DATA_WIDTH + 1 || $bits(out.data) != DATA_WIDTH || $bits(out.credit) != OUT_CRW)
+      $fatal(1, "gpnae_poly: links need in.data %0d bits, out.data %0d, out.credit OUT_CRW %0d", DATA_WIDTH + 1, DATA_WIDTH, OUT_CRW);
+`endif
 
   // int8 builds use the fixed-point lane; the float lane below is unchanged, only wrapped in G_FLOAT.
   if (sienna_fmt_pkg::is_int(EXP_W)) begin : G_INT8
@@ -80,13 +83,14 @@ module gpnae_poly #(
         .DATA_WIDTH   (DATA_WIDTH),
         .ADDR_LINES   (ADDR_LINES),
         .CONTROL_WIDTH(CONTROL_WIDTH),
-        .K            (K)
+        .K            (K),
+        .OUT_MAX      (OUT_MAX),
+        .OUT_CRW      (OUT_CRW)
     ) lane_inst (
         .clk_i         (clk_i),
         .rstn_i        (rstn_i),
-        .signal_i      (signal_i),
-        .wr_en_i       (wr_en_i),
-        .last_i        (last_i),
+        .in            (in),
+        .out           (out),
         .terms_i       (terms_i),
         .control_word_i(control_word_i),
         .gp_mx_i       (gp_mx_i),
@@ -94,12 +98,7 @@ module gpnae_poly #(
         .gp_zin_i      (gp_zin_i),
         .gp_mout_i     (gp_mout_i),
         .gp_shout_i    (gp_shout_i),
-        .gp_zout_i     (gp_zout_i),
-        .full_o        (full_o),
-        .empty_o       (empty_o),
-        .idle_o        (idle_o),
-        .final_result_o(final_result_o),
-        .done_o        (done_o)
+        .gp_zout_i     (gp_zout_i)
     );
   end else begin : G_FLOAT
 
@@ -118,15 +117,31 @@ module gpnae_poly #(
   ) input_fifo_inst (
       .clk_i  (clk_i),
       .rstn_i (rstn_i),
-      .full_o (full_o),
-      .empty_o(empty_o),
-      .idle_o (idle_o),
-      .wr_en_i(wr_en_i),
+      .full_o (),
+      .empty_o(),
+      .idle_o (),
+      .wr_en_i(in.put),
       .rd_en_i(fifo_rd_en),
       .count_o(fifo_count),
-      .data_i (signal_i),
+      .data_i (in.data[DATA_WIDTH-1:0]),
       .data_o (fifo_data_o)
   );
+
+  // Input link: one credit per free FIFO slot, 2**ADDR_LINES after reset, then one per pop, at most one a cycle.
+  logic [ADDR_LINES:0] in_owed;  // freed slots not yet credited
+  logic in_cr, fifo_pop, last_pend, grp_go, out_ok, res_put;
+  logic [DATA_WIDTH-1:0] res_data;
+  assign fifo_pop  = fifo_rd_en && (fifo_count != '0);
+  assign in.credit = in_cr;
+
+  // Output link: a group of up to K starts only with K credits, so the barrel MAC never waits on the consumer mid-group.
+  localparam int OCW = $clog2(OUT_MAX + 1);
+  logic [OCW-1:0] out_cnt;
+  credit_counter #(.MAX(OUT_MAX), .CRW(OUT_CRW)) out_cc (.clk_i(clk_i), .rstn_i(rstn_i), .put_i(res_put), .credit_i(out.credit),
+                                                        .has_credit_o(), .count_o(out_cnt));
+  assign out_ok   = int'(out_cnt) >= K + int'(res_put);  // a put this cycle spends its credit at this edge
+  assign out.put  = res_put;
+  assign out.data = res_data;
 
   logic [ADDR_LINES-1:0] poly_base, poly_deg;
   logic is_tanh, is_sig, is_selu, is_relu, is_byp;
@@ -302,6 +317,23 @@ module gpnae_poly #(
   } gstate_t;
   gstate_t gstate;
 
+  // A set waits in the FIFO for its last put; G_NEXT then takes whatever is queued, as before.
+  assign grp_go = (fifo_count != '0) && out_ok && ((gstate == G_IDLE && last_pend) || gstate == G_NEXT);
+
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      in_owed   <= (ADDR_LINES + 1)'(1 << ADDR_LINES);
+      in_cr     <= 1'b0;
+      last_pend <= 1'b0;
+    end else begin
+      in_owed   <= in_owed + (ADDR_LINES + 1)'(fifo_pop) - (ADDR_LINES + 1)'(in_owed != '0);
+      in_cr     <= in_owed != '0;
+      // A last put sets it, a group start clears it; the start counts the FIFO before a put in the same cycle.
+      if (in.put && in.data[DATA_WIDTH]) last_pend <= 1'b1;
+      else if (grp_go) last_pend <= 1'b0;
+    end
+  end
+
   // Squaring pipeline: index of the element whose square is in flight. Bit 0 lines up with
   // the cycle valid_i is high, so the result lands at bit MUL_LAT, not MUL_LAT-1.
   logic [MUL_LAT:0] sq_v;
@@ -336,8 +368,8 @@ module gpnae_poly #(
       sq_valid       <= 1'b0;
       mul_valid      <= 1'b0;
       dn_valid       <= 1'b0;
-      done_o         <= 1'b0;
-      final_result_o <= '0;
+      res_put        <= 1'b0;
+      res_data       <= '0;
       sq_v           <= '0;
       pm_v           <= '0;
       pd_v           <= '0;
@@ -358,7 +390,7 @@ module gpnae_poly #(
       sq_valid   <= 1'b0;
       mul_valid  <= 1'b0;
       dn_valid   <= 1'b0;
-      done_o     <= 1'b0;
+      res_put    <= 1'b0;
 
       // Shift the three result pipelines every cycle; their tails write back below.
       sq_v <= {sq_v[MUL_LAT-1:0], 1'b0};
@@ -396,12 +428,12 @@ module gpnae_poly #(
         G_IDLE: begin
           ld_idx <= '0;
           pop_idx <= '0;
-          if (last_i) begin
+          if (grp_go) begin
             // The FIFO reports its own occupancy, so the whole group can be popped back to back
             // instead of one element every FIFO_RD_LAT+1 cycles. empty_o lags a pop by a cycle
             // and cannot be used to stop a streaming read without discarding a word.
             grp_n  <= (fifo_count > K[ADDR_LINES:0]) ? K[SW:0] : fifo_count[SW:0];
-            gstate <= (fifo_count == '0) ? G_IDLE : G_CAP;
+            gstate <= G_CAP;
           end
         end
 
@@ -521,36 +553,48 @@ module gpnae_poly #(
           else iss_idx <= iss_idx + 1;
         end
 
-        // Retire in index order, so done_o still pulses once per element in sequence.
+        // Retire in index order, one put per element in sequence.
         G_EMIT: begin
           if (tail_buf[emit_idx[SW-1:0]]) begin
             // A tail element takes gpnae_tail's result; its polynomial result is discarded.
             if (trdy[emit_idx[SW-1:0]]) begin
-              final_result_o <= tres_buf[emit_idx[SW-1:0]];
-              done_o         <= 1'b1;
+              res_data <= tres_buf[emit_idx[SW-1:0]];
+              res_put  <= 1'b1;
               if (emit_idx + 1 == n_elems) gstate <= G_NEXT;
               else emit_idx <= emit_idx + 1;
             end
           end else if (res_rdy[emit_idx[SW-1:0]]) begin
-            final_result_o <= res_buf[emit_idx[SW-1:0]];
-            done_o         <= 1'b1;
+            res_data <= res_buf[emit_idx[SW-1:0]];
+            res_put  <= 1'b1;
             if (emit_idx + 1 == n_elems) gstate <= G_NEXT;
             else emit_idx <= emit_idx + 1;
           end
         end
 
+        // Waits here while queued words lack K output credits.
         G_NEXT: begin
           ld_idx  <= '0;
           pop_idx <= '0;
           cap_v   <= '0;
           grp_n   <= (fifo_count > K[ADDR_LINES:0]) ? K[SW:0] : fifo_count[SW:0];
-          gstate  <= (fifo_count == '0) ? G_IDLE : G_CAP;
+          if (fifo_count == '0) gstate <= G_IDLE;
+          else if (grp_go) gstate <= G_CAP;
         end
 
         default: gstate <= G_IDLE;
       endcase
     end
   end
+
+`ifndef SYNTHESIS
+  // A put needs a free slot; InputFIFO drops a word written while full.
+  a_in_room: assert property (@(posedge clk_i) disable iff (!rstn_i) in.put |-> int'(fifo_count) < (1 << ADDR_LINES))
+    else $error("gpnae_poly: put into a full input FIFO");
+  // InputFIFO writes its lowest free slot and reads its lowest full one, so a put keeps order only while the full slots are a prefix.
+  a_in_order: assert property (@(posedge clk_i) disable iff (!rstn_i)
+      in.put |-> ((input_fifo_inst.status + 1'b1) & input_fifo_inst.status) == '0)
+    else $error("gpnae_poly: put while the input FIFO has a freed slot below a waiting word, so it would be read out of order");
+`endif
 
   end  // G_FLOAT
 
