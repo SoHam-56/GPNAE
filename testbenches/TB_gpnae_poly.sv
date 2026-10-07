@@ -6,7 +6,8 @@
 // Reads testbenches/stimulus/<act>_{in,exp}.mem and testbenches/gpnae_test_config.svh.
 // Drives the lane's input link as a producer and takes its results as a consumer of +out_slots (default 64), +stall_pct withholding credits.
 
-module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into a full FIFO, 2: a credited put while the lane pops
+// FAULT 1: puts with no credit into a full FIFO, 2: a credited put while the lane pops, 3: an output link one bit wide.
+module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_CAP: the most +out_slots, and the lane's OUT_MAX
 
 `include "gpnae_test_config.svh"
 
@@ -16,7 +17,6 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
   localparam int TOTAL = NUM_BATCHES * SIGNALS_PER_BATCH;
 
   localparam int IN_SLOTS = 1 << ADDR_LINES;  // the lane advertises its FIFO
-  localparam int OUT_CAP = 64;  // the most output slots +out_slots may advertise, and the lane's OUT_MAX
   localparam int LANE_K = 16;  // the lane's group size: it needs that many output credits to start one
 
   reg clk;
@@ -32,7 +32,7 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
 
   // Input link: the testbench is the producer, counting the lane's credits.
   credit_link_if #(.DATA_W(DATA_WIDTH + 1), .CRW(1)) lin ();
-  credit_link_if #(.DATA_W(DATA_WIDTH), .CRW(1)) lout ();
+  credit_link_if #(.DATA_W(DATA_WIDTH + ((FAULT == 3) ? 1 : 0)), .CRW(1)) lout ();
   wire in_has;
   wire [$clog2(IN_SLOTS + 1)-1:0] in_cnt;
   assign lin.put  = in_put;

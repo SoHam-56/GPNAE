@@ -51,15 +51,6 @@ module gpnae_poly_int8 #(
   if (DATA_WIDTH != 8) begin : G_BAD_WIDTH
     $fatal(1, "gpnae_poly_int8: DATA_WIDTH must be 8, not %0d", DATA_WIDTH);
   end
-  if (OUT_MAX < K) begin : G_BAD_OUT_MAX
-    $fatal(1, "gpnae_poly_int8: OUT_MAX %0d is below K %0d, so no group could start", OUT_MAX, K);
-  end
-`ifndef SYNTHESIS
-  // Interface widths are not elaboration constants in Verilator, so the link widths are checked at time 0.
-  initial
-    if ($bits(in.data) != DATA_WIDTH + 1 || $bits(out.data) != DATA_WIDTH || $bits(out.credit) != OUT_CRW)
-      $fatal(1, "gpnae_poly_int8: links need in.data %0d bits, out.data %0d, out.credit OUT_CRW %0d", DATA_WIDTH + 1, DATA_WIDTH, OUT_CRW);
-`endif
 
   // Input rescale: (q - z_in) * mx rounded half up by 2^s; below 2^23 in magnitude, so its low XW bits are SELU's unsaturated x.
   function automatic logic signed [39:0] rescale_raw(input logic [31:0] p, input logic [4:0] s);
@@ -122,21 +113,10 @@ module gpnae_poly_int8 #(
       .data_o (fifo_data_o)
   );
 
-  // Input link, as gpnae_poly: one credit per free FIFO slot, 2**ADDR_LINES after reset, then one per pop.
-  logic [ADDR_LINES:0] in_owed;  // freed slots not yet credited
-  logic in_cr, fifo_pop, last_pend, grp_go, out_ok, res_put;
+  logic fifo_pop, last_pend, grp_go, out_ok, res_put;
   logic [DATA_WIDTH-1:0] res_data;
-  assign fifo_pop  = fifo_rd_en && (fifo_count != '0);
-  assign in.credit = in_cr;
-
-  // Output link: a group of up to K starts only with K credits, so nothing in flight waits on the consumer.
-  localparam int OCW = $clog2(OUT_MAX + 1);
-  logic [OCW-1:0] out_cnt;
-  credit_counter #(.MAX(OUT_MAX), .CRW(OUT_CRW)) out_cc (.clk_i(clk_i), .rstn_i(rstn_i), .put_i(res_put), .credit_i(out.credit),
-                                                        .has_credit_o(), .count_o(out_cnt));
-  assign out_ok   = int'(out_cnt) >= K + int'(res_put);  // a put this cycle spends its credit at this edge
-  assign out.put  = res_put;
-  assign out.data = res_data;
+  logic [$clog2(OUT_MAX + 1)-1:0] out_cnt;  // output credits held, from lane_link
+  assign fifo_pop = fifo_rd_en && (fifo_count != '0);
 
   logic is_selu, is_sig, is_byp, is_tanh;
   assign is_selu = (control_word_i == 3'b001);
@@ -260,22 +240,31 @@ module gpnae_poly_int8 #(
   } gstate_t;
   gstate_t gstate;
 
-  // A set waits in the FIFO for its last put; G_NEXT then takes whatever is queued, as before.
-  assign grp_go = (fifo_count != '0) && out_ok && ((gstate == G_IDLE && last_pend) || gstate == G_NEXT);
-
-  always_ff @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) begin
-      in_owed   <= (ADDR_LINES + 1)'(1 << ADDR_LINES);
-      in_cr     <= 1'b0;
-      last_pend <= 1'b0;
-    end else begin
-      in_owed   <= in_owed + (ADDR_LINES + 1)'(fifo_pop) - (ADDR_LINES + 1)'(in_owed != '0);
-      in_cr     <= in_owed != '0;
-      // A last put sets it, a group start clears it; the start counts the FIFO before a put in the same cycle.
-      if (in.put && in.data[DATA_WIDTH]) last_pend <= 1'b1;
-      else if (grp_go) last_pend <= 1'b0;
-    end
-  end
+  // The credit front end: input credits, the last bit, the K-credit group gate, output credits and the link checks.
+  lane_link #(
+      .DATA_WIDTH(DATA_WIDTH),
+      .ADDR_LINES(ADDR_LINES),
+      .K         (K),
+      .OUT_MAX   (OUT_MAX),
+      .OUT_CRW   (OUT_CRW)
+  ) link (
+      .clk_i       (clk_i),
+      .rstn_i      (rstn_i),
+      .in          (in),
+      .out         (out),
+      .fifo_pop_i  (fifo_pop),
+      .fifo_count_i(fifo_count),
+      .idle_i      (gstate == G_IDLE),
+      .next_i      (gstate == G_NEXT),
+      .res_put_i   (res_put),
+      .res_data_i  (res_data),
+      .cap_i       (gstate == G_CAP && cap_v[CAP_LAG-1]),
+      .cap_data_i  (fifo_data_o),
+      .grp_go_o    (grp_go),
+      .out_ok_o    (out_ok),
+      .last_pend_o (last_pend),
+      .out_cnt_o   (out_cnt)
+  );
 
   // Control: FSM state, counters and valid bits, the only registers under reset (D-8).
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -510,23 +499,6 @@ module gpnae_poly_int8 #(
       if ((pt_v[MUL_LAT] | ps_v[MUL_LAT]) != pm_done) $fatal(1, "gpnae_poly_int8: post intMultiplier latency is not %0d", MUL_LAT);
       if (ps_v[PS_LAT] != rq_done) $fatal(1, "gpnae_poly_int8: tfliteRequant latency is not %0d", RQ_LAT);
       if (rm_valid && rm_b[W-1]) $fatal(1, "gpnae_poly_int8: gp_mx_i must be below 2^15");
-    end
-
-  // A put needs a free slot: with 32 words held no credit can be outstanding.
-  a_in_room: assert property (@(posedge clk_i) disable iff (!rstn_i) in.put |-> int'(fifo_count) < (1 << ADDR_LINES))
-    else $error("gpnae_poly_int8: a_in_room: put into a full input FIFO");
-  // Every captured word is the oldest one put and not yet captured: no reorder, loss or overwrite in the FIFO.
-  logic [DATA_WIDTH-1:0] in_shadow[$];
-  always @(posedge clk_i)
-    if (!rstn_i) in_shadow.delete();
-    else begin
-      if (gstate == G_CAP && cap_v[CAP_LAG-1]) begin
-        a_in_order: assert (in_shadow.size() != 0 && fifo_data_o == in_shadow[0])
-        else $error("gpnae_poly_int8: a_in_order: captured %h, the oldest word put is %h", fifo_data_o,
-                    (in_shadow.size() != 0) ? in_shadow[0] : '0);
-        if (in_shadow.size() != 0) void'(in_shadow.pop_front());
-      end
-      if (in.put) in_shadow.push_back(in.data[DATA_WIDTH-1:0]);
     end
 `endif
 

@@ -16,6 +16,7 @@ DESIGN_FILES = \
 	../ArithmeticLibrary/Common/src/credit_reg.sv \
 	../ArithmeticLibrary/Common/src/credit_link_checker.sv \
 	lane_fifo.sv \
+	lane_link.sv \
 	TYTAN/Memory/CoeffROM.v \
 	TYTAN/Memory/InputFIFO.v \
 	TYTAN/Memory/PE5B.v \
