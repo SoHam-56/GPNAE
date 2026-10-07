@@ -108,15 +108,13 @@ module gpnae_poly_int8 #(
   logic                  fifo_rd_en;
   logic [ADDR_LINES:0]   fifo_count;
 
-  InputFIFO #(
+  // A circular FIFO: credits let the producer write while the lane pops, which InputFIFO's lowest-free-slot order would reorder.
+  lane_fifo #(
       .DATA_WIDTH(DATA_WIDTH),
       .ADDR_LINES(ADDR_LINES)
   ) input_fifo_inst (
       .clk_i  (clk_i),
       .rstn_i (rstn_i),
-      .full_o (),
-      .empty_o(),
-      .idle_o (),
       .wr_en_i(in.put),
       .rd_en_i(fifo_rd_en),
       .count_o(fifo_count),
@@ -514,13 +512,22 @@ module gpnae_poly_int8 #(
       if (rm_valid && rm_b[W-1]) $fatal(1, "gpnae_poly_int8: gp_mx_i must be below 2^15");
     end
 
-  // A put needs a free slot; InputFIFO drops a word written while full.
+  // A put needs a free slot: with 32 words held no credit can be outstanding.
   a_in_room: assert property (@(posedge clk_i) disable iff (!rstn_i) in.put |-> int'(fifo_count) < (1 << ADDR_LINES))
-    else $error("gpnae_poly_int8: put into a full input FIFO");
-  // InputFIFO writes its lowest free slot and reads its lowest full one, so a put keeps order only while the full slots are a prefix.
-  a_in_order: assert property (@(posedge clk_i) disable iff (!rstn_i)
-      in.put |-> ((input_fifo_inst.status + 1'b1) & input_fifo_inst.status) == '0)
-    else $error("gpnae_poly_int8: put while the input FIFO has a freed slot below a waiting word, so it would be read out of order");
+    else $error("gpnae_poly_int8: a_in_room: put into a full input FIFO");
+  // Every captured word is the oldest one put and not yet captured: no reorder, loss or overwrite in the FIFO.
+  logic [DATA_WIDTH-1:0] in_shadow[$];
+  always @(posedge clk_i)
+    if (!rstn_i) in_shadow.delete();
+    else begin
+      if (gstate == G_CAP && cap_v[CAP_LAG-1]) begin
+        a_in_order: assert (in_shadow.size() != 0 && fifo_data_o == in_shadow[0])
+        else $error("gpnae_poly_int8: a_in_order: captured %h, the oldest word put is %h", fifo_data_o,
+                    (in_shadow.size() != 0) ? in_shadow[0] : '0);
+        if (in_shadow.size() != 0) void'(in_shadow.pop_front());
+      end
+      if (in.put) in_shadow.push_back(in.data[DATA_WIDTH-1:0]);
+    end
 `endif
 
 endmodule

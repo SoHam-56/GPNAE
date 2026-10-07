@@ -70,7 +70,11 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
   reg [DATA_WIDTH-1:0] stim[0:TOTAL-1];
   reg [DATA_WIDTH-1:0] gold[0:TOTAL-1];
   reg [DATA_WIDTH-1:0] got [0:SIGNALS_PER_BATCH-1];
+  reg [DATA_WIDTH-1:0] got_all[0:TOTAL-1];  // every batch's outputs, the reference for the overlap run
+  reg [DATA_WIDTH-1:0] ov_got[0:TOTAL-1];
   integer n_captured;
+  int ov_n, ov_mid;  // overlap outputs, and puts made while the lane was popping
+  reg ov_on = 1'b0, ov_clear = 1'b0;
   reg cap_clear;
 
   integer total_checked, total_exact, total_tol, total_failed, total_missing;
@@ -173,22 +177,48 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
     end
   end
 
-  localparam logic [3:0] GS_IDLE = 4'd0, GS_CAP = 4'd1;  // gpnae_poly_int8's gstate_t encoding (G_NEXT is 8)
+  localparam logic [3:0] GS_IDLE = 4'd0, GS_CAP = 4'd1, GS_NEXT = 4'd8;  // gpnae_poly_int8's gstate_t encoding
   logic [3:0] lane_gs;  // the lane's state, FIFO count and group size, from G_MON
   logic [ADDR_LINES:0] lane_cnt;
   logic [4:0] lane_grp;
   logic [$clog2(OUT_CAP + 1)-1:0] lane_ocnt;  // the lane's output credits
+  logic lane_pend, lane_ook;  // a last put waits, and K output credits are held
 
   if (IS_INT) begin : G_MON
     assign lane_gs   = dut.G_INT8.lane_inst.gstate;
     assign lane_cnt  = dut.G_INT8.lane_inst.fifo_count;
     assign lane_grp  = dut.G_INT8.lane_inst.grp_n;
     assign lane_ocnt = dut.G_INT8.lane_inst.out_cnt;
+    assign lane_pend = dut.G_INT8.lane_inst.last_pend;
+    assign lane_ook  = dut.G_INT8.lane_inst.out_ok;
   end else begin : G_MON
     assign lane_gs   = dut.G_FLOAT.gstate;  // same gstate_t encoding as the int8 lane
     assign lane_cnt  = dut.G_FLOAT.fifo_count;
     assign lane_grp  = dut.G_FLOAT.grp_n;
     assign lane_ocnt = dut.G_FLOAT.out_cnt;
+    assign lane_pend = dut.G_FLOAT.last_pend;
+    assign lane_ook  = dut.G_FLOAT.out_ok;
+  end
+
+  // The lane has words to start but waits for K output credits while every credit the consumer advertised is back: below K, a deadlock.
+  logic starved;
+  assign starved = (lane_cnt != '0) && !lane_ook && ((lane_gs == GS_IDLE && lane_pend) || lane_gs == GS_NEXT) && owed == 0 && !ocred
+                   && int'(lane_ocnt) == out_slots && out_slots < LANE_K;
+  a_out_starved: assert property (@(posedge clk) disable iff (!rstn_i) !$rose(starved))
+    else $error("a_out_starved: the lane waits for %0d output credits and holds all %0d the consumer advertised", LANE_K, out_slots);
+
+  // Sole writer of ov_n, ov_got[] and ov_mid.
+  always @(posedge clk) begin
+    if (ov_clear) begin
+      ov_n   <= 0;
+      ov_mid <= 0;
+    end else if (ov_on) begin
+      if (lout.put && ov_n < TOTAL) begin
+        ov_got[ov_n] <= lout.data;
+        ov_n         <= ov_n + 1;
+      end
+      if (lin.put && lane_gs == GS_CAP) ov_mid <= ov_mid + 1;
+    end
   end
 
   // Every link input changes 1 ns after an edge, so the lane and the assertions see the same value.
@@ -297,7 +327,7 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
         for (int i = 0; i < SIGNALS_PER_BATCH; i++)
           put_in(stim[base+i], (i == SIGNALS_PER_BATCH - 1));
 
-        // FAULT 2: a credited put once the lane has popped part of the batch, so it lands in a freed slot below waiting words.
+        // FAULT 2: a credited put once the lane has popped part of the batch; it must come out after the batch, in order.
         if (FAULT == 2 && b == 0 && act_name == "selu") begin
           while (!(lane_gs == GS_CAP && int'(lane_cnt) < SIGNALS_PER_BATCH && in_has)) tick();
           put_in(stim[base], 1'b0);
@@ -312,6 +342,7 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
 
         bfail = fail_n + miss_n;
         for (int i = 0; i < SIGNALS_PER_BATCH; i++) begin
+          got_all[base+i] = (i < n_captured) ? got[i] : 'x;
           if (i >= n_captured) begin
             miss_n++;
             if (shown < (EXACT_MATCH ? 200 : 12)) begin
@@ -513,6 +544,57 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
     end
   endtask
 
+  // Every batch of an activation streamed with no reset, each set's words put as credits allow, so the next set fills while the lane pops.
+  task automatic run_overlap(input [CONTROL_WIDTH-1:0] ctrl, input string act_name, input [ADDR_LINES-1:0] n_terms);
+    int guard, differ, missing;
+    time t0;
+    begin
+      reset_sequence();
+      control_word_i = ctrl;
+      terms_i        = n_terms;
+      ov_clear = 1;
+      ov_on    = 1;
+      tick();
+      ov_clear = 0;
+      t0 = $time;
+      for (int b = 0; b < NUM_BATCHES; b++) begin
+        // int8 lane parameters change only while the lane is idle, so a new set waits for the old one to finish.
+        if (IS_INT && (b == 0 || par[b] != par[b-1])) begin
+          guard = 0;
+          while (!(ov_n >= b * SIGNALS_PER_BATCH && lane_gs == GS_IDLE && lane_cnt == 0) && guard < TIMEOUT_CYCLES) begin
+            tick();
+            guard++;
+          end
+          {gp_mx, gp_shx, gp_zin, gp_mout, gp_shout, gp_zout} = par[b];
+          tick();
+        end
+        for (int i = 0; i < SIGNALS_PER_BATCH; i++) begin
+          if (stall_pct != 0 && $urandom_range(0, 99) < stall_pct) tick();  // the producer stalls too
+          put_in(stim[b*SIGNALS_PER_BATCH+i], (i == SIGNALS_PER_BATCH - 1));
+        end
+      end
+      guard = 0;
+      while (ov_n < TOTAL && guard < TIMEOUT_CYCLES) begin
+        tick();
+        guard++;
+      end
+      repeat (20) tick();  // a spurious put would show up in ov_n
+      drain_check({act_name, " overlap"});
+      ov_on   = 0;
+      differ  = 0;
+      missing = (ov_n < TOTAL) ? TOTAL - ov_n : 0;
+      for (int i = 0; i < TOTAL && i < ov_n; i++)
+        if (ov_got[i] !== got_all[i]) begin
+          if (differ < 12) $display("  OVERLAP %s e%0d  in %0h  batch run %0h  overlap run %0h  DIFFER", act_name, i, stim[i], got_all[i], ov_got[i]);
+          differ++;
+        end
+      $display("  OVERLAP %s : elements %0d  identical %0d  differ %0d  missing %0d  puts while popping %0d  cycles %0d", act_name, TOTAL,
+               TOTAL - differ - missing, differ, missing, ov_mid, ($time - t0) / clk_period);
+      // No put during a pop would leave the overlap untested.
+      total_failed += differ + missing + (ov_n > TOTAL ? 1 : 0) + (ov_mid == 0 ? 1 : 0);
+    end
+  endtask
+
   // Float lane: each element of the last batch alone as a one-element group, no reset; checked against gold and its batch result.
   task automatic run_single(input string act_name);
     logic [DATA_WIDTH-1:0] ref_b[SIGNALS_PER_BATCH];
@@ -569,7 +651,7 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
     n_captured = 0;
     if (!$value$plusargs("out_slots=%d", out_slots)) out_slots = OUT_CAP;
     if (!$value$plusargs("stall_pct=%d", stall_pct)) stall_pct = 0;
-    if (out_slots < LANE_K || out_slots > OUT_CAP) $fatal(1, "+out_slots=%0d: the lane needs %0d to %0d", out_slots, LANE_K, OUT_CAP);
+    if (out_slots < 1 || out_slots > OUT_CAP) $fatal(1, "+out_slots=%0d: 1 to %0d", out_slots, OUT_CAP);  // below K the lane deadlocks
     if (stall_pct < 0 || stall_pct > 99) $fatal(1, "+stall_pct=%0d: 0 to 99", stall_pct);
 
     $display("==============================================");
@@ -591,13 +673,18 @@ module TB_gpnae_poly #(parameter int FAULT = 0);  // 1: puts with no credit into
 
     run_activation(2'b01, "selu", SELU_TERMS);
     if (!IS_INT) run_single("selu");
+    run_overlap(2'b01, "selu", SELU_TERMS);
     run_activation(2'b10, "sigmoid", SIGMOID_TERMS);
     if (!IS_INT) run_single("sigmoid");
+    run_overlap(2'b10, "sigmoid", SIGMOID_TERMS);
     run_activation(2'b11, "tanh", TANH_TERMS);
     if (!IS_INT) run_single("tanh");
+    run_overlap(2'b11, "tanh", TANH_TERMS);
     if (IS_INT) begin
       run_activation(3'b100, "relu", TANH_TERMS);
+      run_overlap(3'b100, "relu", TANH_TERMS);
       run_activation(3'b101, "linear", TANH_TERMS);
+      run_overlap(3'b101, "linear", TANH_TERMS);
       run_stream();
     end
 
