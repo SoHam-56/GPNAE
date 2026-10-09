@@ -23,7 +23,6 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
   reg rstn_i = 1'b0;  // reset held from power-up, as the hardware sees it
   reg in_put = 1'b0, in_last = 1'b0;
   reg [DATA_WIDTH-1:0] in_sig = '0;
-  reg [ADDR_LINES-1:0] terms_i;
   reg [CONTROL_WIDTH-1:0] control_word_i;
   reg [15:0] gp_mx = '0;  // int8 lane parameters, one set per batch from <act>_par.mem
   reg [7:0] gp_shx = '0, gp_zin = '0, gp_shout = '0, gp_zout = '0;
@@ -93,7 +92,6 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
       .rstn_i(rstn_i),
       .in(lin),
       .out(lout),
-      .terms_i(terms_i),
       .control_word_i(control_word_i),
       .gp_mx_i(gp_mx),
       .gp_shx_i(gp_shx[4:0]),
@@ -234,7 +232,6 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
       in_last = 0;
       in_sig = '0;
       control_word_i = '0;
-      terms_i = '0;
       cap_clear = 1;          // the capture block owns n_captured; pulse a clear
       repeat (8) @(posedge clk);  // fp32Adder's unreset valid stages need 4+ cycles of reset to flush (D-7)
       cap_clear = 0;
@@ -285,8 +282,7 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
     end
   end
 
-  task automatic run_activation(input [CONTROL_WIDTH-1:0] ctrl, input string act_name,
-                                input [ADDR_LINES-1:0] n_terms);
+  task automatic run_activation(input [CONTROL_WIDTH-1:0] ctrl, input string act_name);
     int exact_n, tol_n, fail_n, miss_n, guard, base, shown, bfail;
     time t0;
     real rel, worst, sum_rel;
@@ -300,8 +296,8 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
       if (IS_INT) $readmemh({STIM_DIR, act_name, "_par.mem"}, par);
 
       $display("\n==============================================");
-      $display(" %s  control=%02b  terms=%0d  %0d batches x %0d signals",
-               act_name.toupper(), ctrl, n_terms, NUM_BATCHES, SIGNALS_PER_BATCH);
+      $display(" %s  control=%02b  %0d batches x %0d signals",
+               act_name.toupper(), ctrl, NUM_BATCHES, SIGNALS_PER_BATCH);
       $display("==============================================");
 
       t0 = $time;
@@ -310,7 +306,6 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
 
         reset_sequence();
         control_word_i = ctrl;
-        terms_i        = n_terms;
         if (IS_INT) {gp_mx, gp_shx, gp_zin, gp_mout, gp_shout, gp_zout} = par[b];
 
         // FAULT 1: one put past the FIFO's depth, none of them credited; a reset then starts the batch clean.
@@ -321,7 +316,6 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
           in_put = 0;
           reset_sequence();
           control_word_i = ctrl;
-          terms_i        = n_terms;
         end
 
         for (int i = 0; i < SIGNALS_PER_BATCH; i++)
@@ -545,13 +539,12 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
   endtask
 
   // Every batch of an activation streamed with no reset, each set's words put as credits allow, so the next set fills while the lane pops.
-  task automatic run_overlap(input [CONTROL_WIDTH-1:0] ctrl, input string act_name, input [ADDR_LINES-1:0] n_terms);
+  task automatic run_overlap(input [CONTROL_WIDTH-1:0] ctrl, input string act_name);
     int guard, differ, missing;
     time t0;
     begin
       reset_sequence();
       control_word_i = ctrl;
-      terms_i        = n_terms;
       ov_clear = 1;
       ov_on    = 1;
       tick();
@@ -671,20 +664,20 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
     @(posedge clk);
     clk_period = $time - clk_period;
 
-    run_activation(2'b01, "selu", SELU_TERMS);
+    run_activation(2'b01, "selu");
     if (!IS_INT) run_single("selu");
-    run_overlap(2'b01, "selu", SELU_TERMS);
-    run_activation(2'b10, "sigmoid", SIGMOID_TERMS);
+    run_overlap(2'b01, "selu");
+    run_activation(2'b10, "sigmoid");
     if (!IS_INT) run_single("sigmoid");
-    run_overlap(2'b10, "sigmoid", SIGMOID_TERMS);
-    run_activation(2'b11, "tanh", TANH_TERMS);
+    run_overlap(2'b10, "sigmoid");
+    run_activation(2'b11, "tanh");
     if (!IS_INT) run_single("tanh");
-    run_overlap(2'b11, "tanh", TANH_TERMS);
+    run_overlap(2'b11, "tanh");
     if (IS_INT) begin
-      run_activation(3'b100, "relu", TANH_TERMS);
-      run_overlap(3'b100, "relu", TANH_TERMS);
-      run_activation(3'b101, "linear", TANH_TERMS);
-      run_overlap(3'b101, "linear", TANH_TERMS);
+      run_activation(3'b100, "relu");
+      run_overlap(3'b100, "relu");
+      run_activation(3'b101, "linear");
+      run_overlap(3'b101, "linear");
       run_stream();
     end
 

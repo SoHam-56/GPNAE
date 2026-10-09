@@ -16,7 +16,6 @@ module gpnae_poly_int8 #(
     credit_link_if.consumer in,   // {last, q}, last on a set's final element; the lane advertises its 2**ADDR_LINES FIFO slots
     credit_link_if.producer out,  // one int8 result per put; a group starts only with K output credits
 
-    input logic [   ADDR_LINES-1:0] terms_i,         // unused: degree comes from the table
     input logic [CONTROL_WIDTH-1:0] control_word_i,
 
     input logic [15:0] gp_mx_i,     // input rescale: x = round((q - z_in) * mx / 2^shx) in Q4.11, mx below 2^15

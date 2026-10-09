@@ -37,7 +37,6 @@ module gpnae_poly #(
     credit_link_if.consumer in,   // {last, signal}, last on a set's final element; the lane advertises its 2**ADDR_LINES FIFO slots
     credit_link_if.producer out,  // one result per put; a group starts only with K output credits
 
-    input  logic [   ADDR_LINES-1:0] terms_i,         // unused: degree comes from the table
     input  logic [CONTROL_WIDTH-1:0] control_word_i,
 
     input logic [15:0] gp_mx_i,     // int8 only (D-2): input rescale multiplier, below 2^15
@@ -81,7 +80,6 @@ module gpnae_poly #(
         .rstn_i        (rstn_i),
         .in            (in),
         .out           (out),
-        .terms_i       (terms_i),
         .control_word_i(control_word_i),
         .gp_mx_i       (gp_mx_i),
         .gp_shx_i      (gp_shx_i),
