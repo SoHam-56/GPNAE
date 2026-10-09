@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Arbitrary binary floating-point formats, so stimulus, golden values and the coefficient ROM
-can be generated for whatever format the RTL is built with. Run with --rtl for the retargeting map,
---check for a self-test against struct. Encode/decode is round-to-nearest-even unless told otherwise.
+can be generated for whatever format the RTL is built with. Run with --check for a self-test against struct. Encode/decode is round-to-nearest-even unless told otherwise.
 """
 
 import argparse
@@ -162,46 +161,6 @@ def suggested_rel_tol(fmt: FloatFormat) -> float:
 
 
 # --------------------------------------------------------------------------
-# What has to change in the RTL to retarget the block
-# --------------------------------------------------------------------------
-
-def rtl_dependencies() -> str:
-    return """
-GPNAE format-retargeting map (from reading the RTL)
-
-  Already format-agnostic -- carry DATA_WIDTH only, nothing to change:
-    TYTAN/controller.sv        sequencing only
-    TYTAN/mac.sv               wiring only
-    TYTAN/Memory/ROM.v         coefficient storage
-    TYTAN/Memory/RAM.v         FIFO backing store
-    TYTAN/Memory/InputFIFO.v   status-bitmap FIFO
-    TYTAN/Memory/PE5B.v        priority encoder
-
-  Swap the arithmetic instance, nothing else:
-    TYTAN/datapath.v           fp32Multiplier MUL, fp32Adder ADD
-    SeLu.sv                    fp32_down, fp32Multiplier
-    sigtan.sv                  fp32_up_down, fp32Divider
-
-  Needs a per-format replacement module:
-    fp32_down.sv               A - 1.0
-    fp32_up_down.sv            A + 1.0 and A - 1.0 in parallel
-
-  Needs parameterising, not replacing:
-    gpnae.sv  LAMDA / LAMDA_ALPHA   SELU constants, format bit patterns
-    gpnae.sv  tanh input doubler    hardcodes [30:23], 8'h00, 8'hFF, 8'd1;
-                                    should use EXP_BITS / MAN_BITS
-    gpnae.sv  current_is_positive   already generic, uses DATA_WIDTH
-
-  Regenerate per format:
-    TYTAN/Memory/taylor_coeffs.mem  1/k! coefficients, binary ($readmemb)
-
-  The doubler is worth a note: it increments the exponent field rather than
-  multiplying by two, which is exact and cheap but assumes the field position.
-  Parameterising it is a two-line change once EXP_BITS/MAN_BITS exist.
-"""
-
-
-# --------------------------------------------------------------------------
 # Self-test
 # --------------------------------------------------------------------------
 
@@ -243,12 +202,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Number formats for GPNAE testing")
     p.add_argument("--list", action="store_true")
     p.add_argument("--check", action="store_true")
-    p.add_argument("--rtl", action="store_true", help="show the retargeting map")
     a = p.parse_args()
 
-    if a.rtl:
-        print(rtl_dependencies())
-        return
     if a.check:
         print("\n  Self-test:", "PASS" if self_check() else "FAIL", "\n")
         return

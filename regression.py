@@ -232,8 +232,6 @@ def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol)
     L.append("                 from series truncation or format precision.")
     L.append("* Stimulus ranges come from `python3 gpnae_tests.py --accuracy`, which shows")
     L.append("  where each term count stops tracking the true function for this format.")
-    L.append("* `python3 number_formats.py --rtl` lists the RTL files that must be swapped")
-    L.append("  or parameterised to retarget the block to another number format.")
     L.append("=" * W)
     with open(path, "w") as f:
         f.write("\n".join(L) + "\n")
@@ -527,10 +525,6 @@ def main() -> None:
     print(f"  Reference   : {args.model}    seed {args.seed}    lane {args.lane}")
     print(f"  Tolerance   : rel <= {rel_tol*100:.4f}%  abs <= {args.abs_tol}")
     print(hdr(f"{'='*78}"))
-
-    if fmt.name != "fp32":
-        print(f"  {_Y}NOTE{_X} the RTL must already be built for {fmt.name}; "
-              f"see `python number_formats.py --rtl`")
 
     if args.write_coeffs:
         terms = max(c["terms"] for c in ACTIVATIONS.values())
