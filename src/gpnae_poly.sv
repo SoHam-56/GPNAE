@@ -49,7 +49,6 @@ module gpnae_poly #(
 );
 
   localparam int SW = $clog2(K);
-  localparam int FIFO_RD_LAT = 3;  // data_o trails a pop: rd_ptr, ram_data_b, doutb_reg
   // Pop issued at cycle c -> rd_en at c+1 -> status clear visible c+2 -> data_o(t+2)=mem[rd_ptr(t)],
   // so the word for that pop appears at c+3 and one per cycle after.
   localparam int CAP_LAG = 3;
@@ -417,7 +416,7 @@ module gpnae_poly #(
           pop_idx <= '0;
           if (grp_go) begin
             // The FIFO reports its own occupancy, so the whole group can be popped back to back
-            // instead of one element every FIFO_RD_LAT+1 cycles. empty_o lags a pop by a cycle
+            // instead of one element per FIFO read latency. empty_o lags a pop by a cycle
             // and cannot be used to stop a streaming read without discarding a word.
             grp_n  <= (fifo_count > K[ADDR_LINES:0]) ? K[SW:0] : fifo_count[SW:0];
             gstate <= G_CAP;
