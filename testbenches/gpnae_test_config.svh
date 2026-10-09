@@ -13,5 +13,8 @@
   localparam real ABS_TOL         = 1e-06;
   localparam int TIMEOUT_CYCLES   = 200000;
   localparam int SEED             = 1;
-  localparam string REF_MODEL     = "series";
+  localparam string REF_MODEL     = "exact";
   localparam string STIM_DIR      = "testbenches/stimulus/";
+  localparam bit EXACT_MATCH      = 0;
+  localparam string COEFF_FILE    = "poly_coeffs.mem";
+  localparam string REQ_ROUNDING  = "DOUBLE";
