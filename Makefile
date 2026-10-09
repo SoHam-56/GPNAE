@@ -13,7 +13,6 @@ DESIGN_FILES = \
 	../ArithmeticLibrary/Common/src/sienna_fmt_pkg.sv \
 	../ArithmeticLibrary/Common/src/credit_link_if.sv \
 	../ArithmeticLibrary/Common/src/credit_counter.sv \
-	../ArithmeticLibrary/Common/src/credit_reg.sv \
 	../ArithmeticLibrary/Common/src/credit_link_checker.sv \
 	lane_fifo.sv \
 	lane_link.sv \
