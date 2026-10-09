@@ -151,7 +151,7 @@ module gpnae_poly #(
 
   logic                  ld_valid, mac_start;
   logic [DATA_WIDTH-1:0] mac_in;
-  logic                  mac_res_valid, mac_busy, mac_done;
+  logic                  mac_res_valid, mac_done;
   logic [DATA_WIDTH-1:0] mac_res;
 
   // The format's coefficient table, as a literal: a string parameter passed down to the ROM's $readmemb is not found.
@@ -174,7 +174,7 @@ module gpnae_poly #(
         .coeff_base_i(poly_base),
         .res_valid_o (mac_res_valid),
         .res_data_o  (mac_res),
-        .busy_o      (mac_busy),
+        .busy_o      (),
         .done_o      (mac_done)
     );
   end else begin : G_MAC
@@ -195,7 +195,7 @@ module gpnae_poly #(
         .coeff_base_i(poly_base),
         .res_valid_o (mac_res_valid),
         .res_data_o  (mac_res),
-        .busy_o      (mac_busy),
+        .busy_o      (),
         .done_o      (mac_done)
     );
   end
@@ -226,7 +226,7 @@ module gpnae_poly #(
   end
 
   logic [K-1:0] tail_buf;
-  logic tail_start, tail_done, tail_busy, tail_ready;
+  logic tail_start, tail_done, tail_ready;
   logic [DATA_WIDTH-1:0] tail_res;
   // Tail elements start as they are captured and run beside the polynomial; results park in tres_buf until emit.
   logic [K-1:0] tail_pend, trdy;
@@ -257,7 +257,7 @@ module gpnae_poly #(
       .result_o(tail_res),
       .idx_o   (tail_idx),
       .done_o  (tail_done),
-      .busy_o  (tail_busy)
+      .busy_o  ()
   );
 
   // Post stage: one multiply, or P - 1 (fp32_down, or an adder with -1) plus a sign flip. No divider.

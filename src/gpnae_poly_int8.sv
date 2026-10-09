@@ -130,7 +130,7 @@ module gpnae_poly_int8 #(
 
   logic         ld_valid, mac_start;
   logic [W-1:0] mac_in;
-  logic         mac_res_valid, mac_busy, mac_done;
+  logic         mac_res_valid, mac_done;
   logic [W-1:0] mac_res;
 
   // The int8 table as a literal: a string parameter passed down to the ROM's $readmemb is not found.
@@ -151,7 +151,7 @@ module gpnae_poly_int8 #(
       .coeff_base_i(poly_base),
       .res_valid_o (mac_res_valid),
       .res_data_o  (mac_res),
-      .busy_o      (mac_busy),
+      .busy_o      (),
       .done_o      (mac_done)
   );
 
