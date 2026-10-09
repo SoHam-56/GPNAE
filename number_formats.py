@@ -135,9 +135,6 @@ class FloatFormat:
     def to_hex(self, x) -> str:
         return format(self.encode(x), f"0{self.hex_digits}x")
 
-    def from_hex(self, h: str) -> float:
-        return self.decode(int(h, 16))
-
 
 # --------------------------------------------------------------------------
 # Catalogue
