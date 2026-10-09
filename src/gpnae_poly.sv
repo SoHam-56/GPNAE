@@ -320,10 +320,8 @@ module gpnae_poly #(
       .out_cnt_o   (out_cnt)
   );
 
-  // Squaring pipeline: index of the element whose square is in flight. Bit 0 lines up with
-  // the cycle valid_i is high, so the result lands at bit MUL_LAT, not MUL_LAT-1.
+  // Squaring pipeline valid: bit 0 lines up with the cycle valid_i is high, so the square lands at bit MUL_LAT.
   logic [MUL_LAT:0] sq_v;
-  logic [SW-1:0] sq_p[MUL_LAT+1];
 
   // Post pipelines: the multiply and fp32_down paths have different latencies, so each
   // carries its own element index and results are parked in res_buf until emitted in order.
@@ -364,10 +362,7 @@ module gpnae_poly #(
       tail_buf       <= '0;
       tail_pend      <= '0;
       trdy           <= '0;
-      for (int i = 0; i <= MUL_LAT; i++) begin
-        sq_p[i] <= '0;
-        pm_p[i] <= '0;
-      end
+      for (int i = 0; i <= MUL_LAT; i++) pm_p[i] <= '0;
       for (int i = 0; i <= DN_LAT; i++) pd_p[i] <= '0;
     end else begin
       ld_valid   <= 1'b0;
@@ -382,10 +377,7 @@ module gpnae_poly #(
       sq_v <= {sq_v[MUL_LAT-1:0], 1'b0};
       pm_v <= {pm_v[MUL_LAT-1:0], 1'b0};
       pd_v <= {pd_v[DN_LAT-1:0], 1'b0};
-      for (int i = 1; i <= MUL_LAT; i++) begin
-        sq_p[i] <= sq_p[i-1];
-        pm_p[i] <= pm_p[i-1];
-      end
+      for (int i = 1; i <= MUL_LAT; i++) pm_p[i] <= pm_p[i-1];
       for (int i = 1; i <= DN_LAT; i++) pd_p[i] <= pd_p[i-1];
 
       // A finished square is the MAC operand for its element, in load order.
@@ -464,7 +456,6 @@ module gpnae_poly #(
             sq_a              <= sig_buf[iss_idx[SW-1:0]];
             sq_valid          <= 1'b1;
             sq_v[0]           <= 1'b1;
-            sq_p[0]           <= iss_idx[SW-1:0];
           end else begin
             mac_in   <= is_sig ? {1'b0, sig_buf[iss_idx[SW-1:0]][DATA_WIDTH-2:0]}
                                : sig_buf[iss_idx[SW-1:0]];
