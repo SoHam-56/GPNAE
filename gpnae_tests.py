@@ -167,6 +167,14 @@ def gen_act_threshold(act, n, rng, fmt, rs):
     return vals[:n]
 
 
+POLY_NEG_BOUND = {"selu": 4.0, "sigmoid": 3.5, "tanh": 4.0}  # gpnae_poly's polynomial range below zero (sig_in_tail)
+
+
+def gen_act_neg_dense(act, n, rng, fmt, rs):
+    """Stratified sweep of (-rng, 0): one point in each of n equal steps at a random phase, so batches interleave."""
+    return _q(-rng * (np.arange(n) + rs.uniform(0.0, 1.0)) / n, fmt)
+
+
 def gen_act_mixed_stress(act, n, rng, fmt, rs):
     """Adversarial mix: a quarter each of normal, log-uniform, near-zero and"""
     k = max(1, n // 4)
@@ -189,6 +197,8 @@ TESTS = [
     dict(name="act_edge",         description="Representable-boundary values",            gen_fn=gen_act_edge),
     dict(name="act_threshold",    description="Range thresholds and their neighbours",    gen_fn=gen_act_threshold),
     dict(name="act_mixed_stress", description="Adversarial shuffled mix (hard default)",  gen_fn=gen_act_mixed_stress),
+    dict(name="act_neg_dense",    description="Dense sweep of the polynomial range below zero (poly lane)", gen_fn=gen_act_neg_dense,
+         lanes=("poly",), bound=POLY_NEG_BOUND),
 ]
 
 

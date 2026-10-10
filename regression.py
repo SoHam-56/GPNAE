@@ -74,14 +74,14 @@ def generate_vectors(test_name: str, fmt, batches: int, per_batch: int, model: s
     test = get_test(test_name)
     ranges = {}
     for act, cfg in ACTIVATIONS.items():
-        rmax = range_override if range_override is not None else cfg["default_range"]
+        rmax = range_override if range_override is not None else test.get("bound", {}).get(act, cfg["default_range"])
         stim = []
         for b in range(batches):
             rs = np.random.RandomState(seed + 1013 * b + 7919 * ACTIVATIONS[act]["code"])
             # Bound is swept, not random: batch b gets (b+1)/batches of rmax, so the last batch reaches full range.
             # Drawing it randomly let every batch fall short of large |x| and hid a known defect.
-            # act_sweep and act_edge keep the full bound; act_edge places +/-rng literally, so it is the reproducer.
-            if test["name"] in ("act_sweep", "act_edge"):
+            # act_sweep, act_edge and a test with its own bound keep the full bound; act_edge places +/-rng literally, so it is the reproducer.
+            if test["name"] in ("act_sweep", "act_edge") or "bound" in test:
                 rng = rmax
             else:
                 frac = (b + 1) / batches
@@ -513,7 +513,10 @@ def main() -> None:
             sys.exit(1)
         rel_tol, args.abs_tol = 0.0, 0.0
     coeff = "poly_coeffs.mem" if fmt.name == "fp32" else f"poly_coeffs_{fmt.name}.mem"
-    tests = TESTS if args.test is None else [get_test(args.test)]
+    tests = [t for t in TESTS if args.lane in t.get("lanes", ("gpnae", "poly"))] if args.test is None else [get_test(args.test)]
+    if any(args.lane not in t.get("lanes", ("gpnae", "poly")) for t in tests):
+        print(err(f"[ERROR] --test {args.test} runs on --lane poly only"))
+        sys.exit(1)
     per_act = args.batches * args.per_batch
 
     print(hdr(f"\n{'='*78}\n  GPNAE — Activation Regression Suite\n{'='*78}"))
