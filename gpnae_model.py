@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bit-exact model of gpnae_poly and gpnae_tail, op for op and operand for operand, in the lane's format; built on AriL's fpu.py; the int8 lane (gpnae_poly_int8) on AriL's ipu.py.
-fp32's negative sigmoid goes through fp32_down, modelled as fpAdder(P, -1); Task 11 measures whether that holds."""
+fp32's negative sigmoid goes through fp32_down, modelled stage for stage (fp32_down below): it truncates the aligned operand, unlike fpAdder."""
 import os
 import re
 import sys
@@ -28,6 +28,27 @@ def coeff_file(f) -> str:
 
 def read_rom(path: str) -> list:
     return [int(ln.strip(), 2) for ln in open(path) if ln.strip()]
+
+
+def fp32_down(a):
+    """fp32_down.sv, A + (-1.0) for fp32 bit patterns: the smaller operand is shifted right and truncated (no guard bits), then exact add or subtract and normalize."""
+    a = np.asarray(a, dtype=np.int64)
+    s, e, m = (a >> 31) & 1, (a >> 23) & 0xFF, a & 0x7FFFFF
+    comp, mag, zero = e > 127, (e == 127) & (m > 0), (e == 0) & (m == 0)  # C = -1.0: exponent 127, mantissa 0
+    sign = np.where(comp | mag, s, np.where(zero, 0, 1))
+    bexp = np.where(zero, 0, np.where(comp, e, 127))
+    sexp = np.where(zero, 0, np.where(comp, 127, e))
+    bman = np.where(zero, 0, (1 << 23) | np.where(comp | mag, m, 0))
+    sman = np.where(zero, 0, (1 << 23) | np.where(comp | mag, 0, m))
+    d = (bexp - sexp) & 0xFF
+    tot = np.where(s == 0, bman - (sman >> np.minimum(d, 24)), bman + (sman >> np.minimum(d, 24))) & 0x1FFFFFF  # {carry, TempMan}
+    carry, tm = (tot >> 24) & 1, tot & 0xFFFFFF
+    zc = np.where(tm == 0, 24, 24 - np.frexp(tm.astype(np.float64))[1]).astype(np.int64)  # cntlz24
+    lo = tm & 0x7FFFFF
+    conds = [carry == 1, lo != 0, tm == 0]
+    man = np.select(conds, [(tm >> 1) & 0x7FFFFF, (lo << np.minimum(zc, 23)) & 0x7FFFFF, 0], default=lo)
+    exp = np.select(conds, [(bexp + 1) & 0xFF, (bexp - zc) & 0xFF, 0], default=bexp)
+    return (np.where((carry == 0) & (tm == 0), 0, sign) << 31) | (exp << 23) | man
 
 
 class Lane:
@@ -76,7 +97,8 @@ class Lane:
             acc = self._add(np.full_like(x, rom[base + deg - r]), self._mul(t, acc))
         pos = ((x & S) == 0) | ((x & MAG) == 0)
         if code == 2:
-            return np.where(pos, acc, self._add(acc, np.full_like(x, self.neg_one)) ^ S)
+            down = fp32_down(acc) if (self.f.e, self.f.m) == (8, 23) else self._add(acc, np.full_like(x, self.neg_one))  # gpnae_poly's POSTD
+            return np.where(pos, acc, down ^ S)
         if code == 1:
             return self._mul(x, np.where(pos, self.lam, acc))
         return self._mul(x, acc)
