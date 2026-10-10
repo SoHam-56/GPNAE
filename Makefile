@@ -57,13 +57,16 @@ VERILATOR_DIR = $(PRJ_DIR)/Verilator
 IVERILOG_DIR = $(PRJ_DIR)/Icarus
 VCS_DIR = $(PRJ_DIR)/VCS
 
+# Simulation threads; several simulations at once each need fewer (Verilator's threads spin, so oversubscribed runs crawl).
+SIM_THREADS ?= $(shell nproc)
+
 VERILATOR_FLAGS = \
 	--binary \
 	--trace \
 	--timing \
 	--assert \
 	--top-module $(TOP_MODULE) \
-	--threads $(shell nproc) \
+	--threads $(SIM_THREADS) \
 	--build-jobs $(shell nproc) \
 	--sv \
 	-I$(SRC_DIR) \
