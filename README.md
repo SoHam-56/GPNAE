@@ -8,8 +8,8 @@ Neural-network accelerators are good at multiply-accumulate and slow at non-line
 |---|---|
 | **35× fewer cycles** per activation | than the published design: 747 → 20–22 cycles for tanh (fp32) |
 | **21 ns** per tanh in fp32 | 15 ns in int8, on one lane at 950 MHz |
-| **within 0.39%** of the exact functions | in fp32, over 7 200 checked inputs |
-| **bit-exact** | bf16 and int8 lanes match a Python model of the hardware on every output |
+| **within 0.39%** of the exact functions | in fp32, over 7 920 checked inputs |
+| **bit-exact** | fp32, bf16 and int8 lanes match a Python model of the hardware on every output |
 | **35.8× smaller, 1.77× lower power** | than NVDLA's activation processor in the same 45 nm process (published TYTAN core) |
 
 ---
@@ -50,7 +50,7 @@ The published engine computed one input at a time. Today's lane is built for thr
 1. **A short polynomial per function.** The published design built every function from e^x, which needed up to 30 series terms and, for sigmoid and tanh, a division. Today each function has its own short polynomial, fitted to that function alone, so only multiplies and adds are left. Inputs too large for the fit go to a small side unit that handles the flat tails of the curve.
 2. **Many inputs share one multiply-add unit.** A polynomial is evaluated as a chain in which each step waits for the previous one, so the published design kept its multiplier busy only about 6% of the time. The new unit works on many inputs in turn, like a barrel processor, so it starts a new operation every cycle.
 3. **Three number formats.** A build parameter switches the lane's arithmetic between fp32 and bf16. A separate fixed-point int8 lane takes quantized inputs and returns quantized outputs, as TensorFlow Lite does.
-4. **Verification.** Bit-exact Python models of every lane, a regression with ten stimulus patterns per activation, and correctness fixes in the control logic. The published Taylor lane is still in the repository (`src/gpnae.sv`) and is checked by the same regression.
+4. **Verification.** Bit-exact Python models of every lane, a regression with ten stimulus patterns per activation (eleven on the polynomial lane), and correctness fixes in the control logic. The published Taylor lane is still in the repository (`src/gpnae.sv`) and is checked by the same regression.
 
 ---
 
@@ -68,15 +68,15 @@ The published engine computed one input at a time. Today's lane is built for thr
 
 The upper end of each range comes from inputs at the edges of the fitted range, which take the tail unit.
 
-**Accuracy against the exact functions** (worst case over ten stimulus patterns):
+**Accuracy against the exact functions** (worst case over eleven stimulus patterns):
 
 | Format | SELU | sigmoid | tanh |
 |---|---|---|---|
-| fp32 | 0.006% | 0.061% | 0.39% |
-| bf16 | 2.8% | 7.2% | 8.6% |
+| fp32 | 0.006% | 0.073% | 0.39% |
+| bf16 | 2.8% | 17.6% | 8.6% |
 | int8 | 9 LSB | 7 LSB | 3 LSB |
 
-In fp32 every output is within the regression's 1% bound. bf16 carries only 8 significant bits, and with that precision sigmoid and tanh exceed the 6.25% bound at their worst points. The bf16 and int8 lanes match their bit-exact models on every output.
+In fp32 every output is within the regression's 1% bound. bf16 carries only 8 significant bits, and with that precision sigmoid and tanh exceed the 6.25% bound at their worst points; sigmoid's worst is between -3.5 and -3, where 1 - P is small. The fp32, bf16 and int8 lanes match their bit-exact models on every output.
 
 ### Compared with other activation hardware
 
@@ -104,7 +104,7 @@ cd GPNAE
 
 python3 regression.py                                    # the published Taylor lane, fp32
 python3 regression.py --lane poly --format bf16          # today's lane, against the exact functions
-python3 regression.py --lane poly --format bf16 --model hw   # bit for bit against the hardware model
+python3 regression.py --lane poly --format bf16 --model hw   # bit for bit against the hardware model (fp32 too)
 python3 regression.py --lane poly --format int8          # the int8 lane
 ```
 
