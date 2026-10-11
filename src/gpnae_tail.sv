@@ -46,7 +46,8 @@ module gpnae_tail #(
   localparam logic [W-1:0] BIG_W = K_(32'h42D00000);
   localparam logic [W-2:0] BIG = BIG_W[W-2:0];  // |a| > 104: e^a is below every normal value
   localparam logic [W-1:0] SIGN = {1'b1, {(W - 1) {1'b0}}};
-  localparam bit NWT = (NEWTON > 0);  // the Newton states act only then; with NEWTON = 0 they fall to T_IDLE, as the default did
+  localparam bit NWT = (NEWTON > 0);  // the Newton states exist only then; a NEWTON = 0 build is today's
+  // Once E is known, a sigmoid x < 0 element goes to T_ND when NWT, else to T_U; the constant select keeps a NEWTON = 0 netlist today's.
 
   // 1/(k+1)! for k = 0..10
   logic [W-1:0] cinv[11];
@@ -97,11 +98,6 @@ module gpnae_tail #(
   // Negate for subtraction.
   function automatic logic [W-1:0] neg(input logic [W-1:0] v);
     return {~v[W-1], v[W-2:0]};
-  endfunction
-
-  // Where a sigmoid/tanh element goes once E is known: the Newton states for sigmoid x < 0, else the series.
-  function automatic tstate_t after_e(input logic [1:0] f, input logic sgn);
-    return (NWT && f == 2'b10 && sgn) ? T_ND : T_U;
   endfunction
 
   // What each context wants from the shared units this cycle, exactly the operands the one-context version issued.
@@ -260,7 +256,7 @@ module gpnae_tail #(
                 // e^a underflows: e^a - 1 = -1 and e^a = 0
                 d[c]  <= {1'b1, ONE[W-2:0]};
                 e[c]  <= '0;
-                st[c] <= (func_i == 2'b01) ? T_SELU_OUT : after_e(func_i, x_i[W-1]);
+                st[c] <= (func_i == 2'b01) ? T_SELU_OUT : (NWT ? ((func_i == 2'b10 && x_i[W-1]) ? T_ND : T_U) : T_U);
               end else begin
                 if (a[W-2:MAN_W] < EXP_W'(BIAS)) begin
                   z[c] <= a;
@@ -314,7 +310,7 @@ module gpnae_tail #(
           end
 
           T_E1: if (ares) begin
-            e[c] <= add_res; issued[c] <= 1'b0; st[c] <= (m[c] == 0) ? after_e(fn[c], x[c][W-1]) : T_SQ;
+            e[c] <= add_res; issued[c] <= 1'b0; st[c] <= (m[c] == 0) ? (NWT ? ((fn[c] == 2'b10 && x[c][W-1]) ? T_ND : T_U) : T_U) : T_SQ;
           end
 
           T_SQ: begin
@@ -322,12 +318,12 @@ module gpnae_tail #(
               // E^2 would fall below the normal range, and the chain is exact at 0
               e[c]  <= '0;
               m[c]  <= '0;
-              st[c] <= after_e(fn[c], x[c][W-1]);
+              st[c] <= (NWT ? ((fn[c] == 2'b10 && x[c][W-1]) ? T_ND : T_U) : T_U);
             end else if (mres) begin
               e[c] <= mul_res;
               issued[c] <= 1'b0;
               m[c] <= m[c] - 1'b1;
-              st[c] <= (m[c] == 4'd1) ? after_e(fn[c], x[c][W-1]) : T_SQ;
+              st[c] <= (m[c] == 4'd1) ? (NWT ? ((fn[c] == 2'b10 && x[c][W-1]) ? T_ND : T_U) : T_U) : T_SQ;
             end
           end
 
