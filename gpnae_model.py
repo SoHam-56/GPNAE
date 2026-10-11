@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bit-exact model of gpnae_poly and gpnae_tail, op for op and operand for operand, in the lane's format; built on AriL's fpu.py; the int8 lane (gpnae_poly_int8) on AriL's ipu.py.
-fp32's negative sigmoid goes through fp32_down, modelled stage for stage (fp32_down below): it truncates the aligned operand, unlike fpAdder."""
+fp32's negative sigmoid goes through fp32_down, modelled stage for stage (fp32_down below): it truncates the aligned operand, unlike fpAdder.
+bf16's tail runs in fp32 (x widened, the result narrowed to nearest) and takes every sigmoid x < 0, with NEWTON_BF16 Newton steps for 1/(1 + E)."""
 import os
 import re
 import sys
@@ -18,6 +19,7 @@ from number_formats import suggested_rel_tol  # noqa: E402  GPNAE root, the floa
 SETS = {1: (0, 8), 2: (9, 6), 3: (16, 8)}  # control word: (ROM base, degree), gpnae_poly's BASE_* and DEG_*
 LAMBDA, LA, ONE, TWO, NEG_ONE = 0x3F867D5F, 0x3FE10966, 0x3F800000, 0x40000000, 0xBF800000
 FOUR, THREE_HALF, BIG = 0x40800000, 0x40600000, 0x42D00000
+NEWTON_Y0, NEWTON_BF16 = 0x3FC00000, 2  # 1.5, the Newton seed's constant; gpnae_poly's bf16 branch sets gpnae_tail's NEWTON to NEWTON_BF16
 CINV = [0x3F800000, 0x3F000000, 0x3E2AAAAB, 0x3D2AAAAB, 0x3C088889, 0x3AB60B61,
         0x39500D01, 0x37D00D01, 0x3638EF1D, 0x3493F27E, 0x32D7322B]  # 1/(k+1)!, gpnae_tail's cinv
 
@@ -57,10 +59,15 @@ class Lane:
             return super().__new__(LaneInt8)
         return super().__new__(cls)
 
-    def __init__(self, f, rom):
+    def __init__(self, f, rom, newton=None, neg_tail=None):
+        """newton: gpnae_tail's NEWTON (default NEWTON_BF16 in bf16, 0 in fp32); a bf16 lane with newton > 0 runs its tail in fp32; neg_tail sends every sigmoid x < 0 to it."""
         self.f, self.rom = f, rom
+        self.newton = (NEWTON_BF16 if f.w < 32 else 0) if newton is None else newton
+        self.wide = f.w < 32 and self.newton > 0  # gpnae_poly's bf16 branch: gpnae_tail in fp32, x widened, the result narrowed to nearest
+        self.neg_tail = self.wide if neg_tail is None else neg_tail
+        self.t32 = Lane(fpu.FP32, rom, newton=self.newton) if self.wide else None
         k = lambda v: fpu.from_fp32(v, f.m)
-        self.lam, self.la, self.one, self.two, self.neg_one = map(k, (LAMBDA, LA, ONE, TWO, NEG_ONE))
+        self.lam, self.la, self.one, self.two, self.neg_one, self.y0 = map(k, (LAMBDA, LA, ONE, TWO, NEG_ONE, NEWTON_Y0))
         self.four, self.three_half, self.big = (k(v) & ((1 << (f.w - 1)) - 1) for v in (FOUR, THREE_HALF, BIG))
         self.cinv = [k(v) for v in CINV]
         self.S = 1 << (f.w - 1)
@@ -75,15 +82,19 @@ class Lane:
     def _e(self, v):
         return (v >> self.f.m) & self.f.emax
 
-    def in_tail(self, x, code) -> bool:
-        mag = x & self.MAG
+    def in_tail(self, x, code):
+        """gpnae_poly's sig_in_tail, for an int (a bool back) or an array."""
+        x = np.asarray(x, dtype=np.int64)
+        mag, neg = x & self.MAG, (x & self.S) != 0
         if code == 1:
-            return bool(x & self.S) and mag > self.four
-        if code == 2:
-            return mag > self.three_half
-        if code == 3:
-            return mag > self.four
-        return False
+            r = neg & (mag > self.four)
+        elif code == 2:
+            r = (mag > self.three_half) | (self.neg_tail & neg & (mag != 0))
+        elif code == 3:
+            r = mag > self.four
+        else:
+            r = np.zeros(x.shape, dtype=bool)
+        return bool(r) if r.ndim == 0 else r
 
     def poly(self, x, code, rom=None):
         """Polynomial path for an array of inputs: MAC operand, Horner in the barrel MAC, post stage."""
@@ -103,7 +114,19 @@ class Lane:
             return self._mul(x, np.where(pos, self.lam, acc))
         return self._mul(x, acc)
 
+    def newton_s(self, e):
+        """gpnae_tail's T_ND..T_NS: s = E y with y -> 1/D, D = 1 + E, from y = 1.5 - D/2 (an exponent decrement, D >= 1), each step y = y (2 - D y)."""
+        e = np.asarray(e, dtype=np.int64)
+        full = lambda c: np.full_like(e, c)
+        d = self._add(full(self.one), e)
+        y = self._add(full(self.y0), (d - (1 << self.f.m)) ^ self.S)
+        for _ in range(self.newton):
+            y = self._mul(y, self._add(full(self.two), self._mul(d, y) ^ self.S))
+        return self._mul(e, y)
+
     def tail(self, x, code) -> int:
+        if self.wide:
+            return int(fpu.narrow(self.f, self.t32.tail(int(fpu.widen(self.f, x)), code)))
         f, S, MAG, E = self.f, self.S, self.MAG, self._e
         mul = lambda a, b: int(self._mul(a, b))
         add = lambda a, b: int(self._add(a, b))
@@ -137,11 +160,54 @@ class Lane:
                     e = 0
                     break
                 e = mul(e, e)
+        if code == 2 and self.newton and (x & S):
+            return int(self.newton_s(e))
         s = mul(e, add(self.one, neg(mul(e, add(self.one, neg(e))))))
         if code == 2:
             return s if (x & S) else add(self.one, neg(s))
         two_s = S if (s & MAG) == 0 else S | (((E(s) + 1) & f.emax) << f.m) | (s & f.mmask)
         return (x & S) | (add(self.one, two_s) & MAG)
+
+    def tail_v(self, x, code):
+        """tail() over an array, op for op."""
+        x = np.asarray(x, dtype=np.int64)
+        if self.wide:
+            return fpu.narrow(self.f, self.t32.tail_v(fpu.widen(self.f, x), code))
+        f, S, MAG, E = self.f, self.S, self.MAG, self._e
+        full = lambda c: np.full_like(x, c)
+        if code == 1:
+            a = x
+        elif code == 2:
+            a = S | (x & MAG)
+        else:
+            a = np.where(E(x) >= f.bias + 6, S | (self.big + 1), S | (((E(x) + 1) & f.emax) << f.m) | (x & f.mmask))
+        under = (a & MAG) > self.big
+        small = E(a) < f.bias
+        z = np.where(small, a, (a & S) | ((f.bias - 1) << f.m) | (a & f.mmask))
+        m = np.where(small | under, 0, E(a) - (f.bias - 1))
+        acc = full(self.cinv[10])
+        for k in range(9, -1, -1):
+            acc = self._add(self._mul(acc, z), full(self.cinv[k]))
+        d = self._mul(z, acc)
+        if code == 1:
+            for i in range(int(m.max(initial=0))):
+                d = np.where(i < m, self._mul(d, self._add(d, full(self.two))), d)
+            return self._mul(full(self.la), np.where(under, S | self.one, d))
+        e = self._add(full(self.one), d)
+        zeroed = np.zeros(x.shape, dtype=bool)
+        for i in range(int(m.max(initial=0))):
+            act = (i < m) & ~zeroed
+            low = act & (E(e) < (f.bias + 1) // 2)  # E^2 would fall below the normal range: 0, and the squarings stop
+            zeroed |= low
+            e = np.where(low, 0, np.where(act, self._mul(e, e), e))
+        e = np.where(under, 0, e)
+        s = self._mul(e, self._add(full(self.one), self._mul(e, self._add(full(self.one), e ^ S)) ^ S))
+        neg = (x & S) != 0
+        if code == 2:
+            out = np.where(neg, s, self._add(full(self.one), s ^ S))
+            return np.where(neg, self.newton_s(e), out) if self.newton else out
+        two_s = np.where((s & MAG) == 0, S, S | (((E(s) + 1) & f.emax) << f.m) | (s & f.mmask))
+        return (x & S) | (self._add(full(self.one), two_s) & MAG)
 
     def element(self, x, code) -> int:
         code = code if code in (1, 2, 4, 5) else 3  # gpnae_poly runs tanh for every other control word (is_tanh)
@@ -154,7 +220,7 @@ class Lane:
         return int(self.poly(np.array([x]), code)[0])
 
     def run(self, x, code):
-        """element() over an array: the polynomial path vectorized, tail elements one at a time."""
+        """element() over an array: the polynomial path and the tail (tail_v) vectorized."""
         x = np.asarray(x, dtype=np.int64)
         code = code if code in (1, 2, 4, 5) else 3
         if code == 4:
@@ -162,10 +228,9 @@ class Lane:
         if code == 5:
             return x.copy()
         out = np.asarray(self.poly(x, code), dtype=np.int64).copy()
-        for i in range(x.size):
-            v = int(x.flat[i])
-            if self.in_tail(v, code):
-                out.flat[i] = self.tail(v, code)
+        t = np.asarray(self.in_tail(x, code), dtype=bool)
+        if t.any():
+            out[t] = self.tail_v(x[t], code)
         return out
 
 
@@ -175,6 +240,40 @@ def golden(values, code, fmt):
     lane = Lane(f, read_rom(os.path.join(ROOT, coeff_file(f))))
     out = lane.run(np.array([fmt.encode(v) for v in values], dtype=np.int64), code)
     return [fmt.decode(int(b)) for b in out]
+
+
+# bf16 sigmoid gate (spec Decision 5): every finite input, relative error <= 1% where sigmoid >= 2^-126, |out| <= 2^-126 below.
+MIN_NORMAL = 2.0 ** -126
+SIG_BOUND = 0.01
+Gate = namedtuple("Gate", "ok worst at over flush n n_sub worst_sub")
+
+
+def finite_inputs(f):
+    """Every finite bit pattern of an 8-exponent-bit format: normals, zeros and subnormals."""
+    b = np.arange(1 << f.w, dtype=np.int64)
+    return b[((b >> f.m) & f.emax) != f.emax]
+
+
+def to_float(f, b):
+    """Bit patterns of an 8-exponent-bit format as float64, exactly."""
+    return (fpu.widen(f, b) & 0xFFFFFFFF).astype(np.uint32).view(np.float32).astype(np.float64)
+
+
+def sigmoid_gate(f, x, out, bound=SIG_BOUND):
+    """The gate on sigmoid outputs: the reference is float64 sigmoid of x as the units read it (a subnormal reads as zero)."""
+    x = np.asarray(x, dtype=np.int64)
+    sub = (((x >> f.m) & f.emax) == 0) & ((x & ((1 << (f.w - 1)) - 1)) != 0)
+    v = np.where(sub, 0.0, to_float(f, x))
+    a = np.exp(-np.abs(v))
+    ref = np.where(v >= 0, 1 / (1 + a), a / (1 + a))
+    got = to_float(f, out)
+    big = ref >= MIN_NORMAL
+    rel = np.where(big, np.abs(got - ref) / np.where(big, ref, 1.0), 0.0)
+    flush = ~big & (np.abs(got) > MIN_NORMAL)
+    i = int(np.argmax(rel))
+    over = int((rel > bound).sum())
+    return Gate(over == 0 and not flush.any(), float(rel[i]), float(v[i]), over, int(flush.sum()), int(x.size), int(sub.sum()),
+                float(rel[sub].max(initial=0.0)))
 
 
 # int8 lane: the float lane's forms on integer units (fxMac Horner in Q4.11, integer products), then int8 quantization.
