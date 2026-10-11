@@ -21,6 +21,8 @@ from gpnae_tests import (ACTIVATIONS, MAX_SIGNALS, TESTS, get_test, golden,
 from number_formats import FORMATS, get_format, suggested_rel_tol
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "Common", "models"))
+import truth  # noqa: E402  AriL's true-function gate: every gpnae_poly run gates its RTL words on it
 TB_DIR = os.path.join(ROOT, "testbenches")
 STIM_DIR = os.path.join(TB_DIR, "stimulus")
 RESULTS_DIR = os.path.join(TB_DIR, "results")
@@ -155,6 +157,79 @@ def parse_log(raw: str, expect_total: int = 0, expect_acts: int = 3) -> dict:
                 per_act=per_act, failed=total_failed, short=[])
 
 
+# --------------------------------------------------------------------------
+# The true-function gate on the RTL's own words; the TB's check against gpnae_model (or number_formats) is a diagnostic
+# --------------------------------------------------------------------------
+
+FLOAT_ACTS = ("selu", "sigmoid", "tanh")  # every float pattern; the exhaustive patterns add ReLU and linear
+ALL_ACTS = FLOAT_ACTS + ("relu", "linear")
+
+
+def read_words(path):
+    with open(path) as fh:
+        return np.array([int(ln, 16) for ln in fh if ln.strip()], dtype=np.int64)
+
+
+def clear_got(acts) -> None:
+    """Remove earlier +dump_got files, so a stale dump never stands in for this run's words."""
+    for act in acts:
+        p = os.path.join(STIM_DIR, f"{act}_got.mem")
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def rtl_words(act, n):
+    """The RTL's words for act from +dump_got, or None (and a FAIL line) when they are missing or short."""
+    try:
+        got = read_words(os.path.join(STIM_DIR, f"{act}_got.mem"))
+    except (OSError, ValueError) as e:
+        print(err(f"      TRUTH {act}: FAIL, no RTL words ({e})"))
+        return None
+    if got.size != n:
+        print(err(f"      TRUTH {act}: FAIL, {got.size} RTL words for {n} inputs"))
+        return None
+    return got
+
+
+def show_truth(r, note="") -> str:
+    """Print a gate result and its first misses; returns the result line."""
+    s = truth.line(r) + note
+    print(f"      {ok(s) if r.ok else err(s)}")
+    for i, x, o, t in r.first[:4]:
+        print(f"        miss: element {i}  x {x:.9g}  out {o:.9g}  true {t:.9g}")
+    return s
+
+
+def truth_float(fmt_name, acts) -> dict:
+    """The gate on each activation's RTL words at the inputs the RTL read (<act>_in.mem); None where the words are missing."""
+    out = {}
+    for act in acts:
+        x = read_words(os.path.join(STIM_DIR, f"{act}_in.mem"))
+        got = rtl_words(act, x.size)
+        out[act] = None if got is None else truth.gate(fmt_name, act, x, got)
+        if out[act] is not None:
+            show_truth(out[act])
+    return out
+
+
+def truth_verdict(fmt_name, runs) -> tuple:
+    """The ACCURACY line over every gated run, per activation; FAIL when any run missed or left no words."""
+    parts, bad = [], not runs
+    for act, rs in runs.items():
+        if not rs or any(r is None for r in rs):
+            bad = True
+            parts.append(f"{act} NO RTL WORDS")
+            continue
+        w = max(rs, key=lambda r: r.worst)
+        over, over_t, n = (sum(getattr(r, k) for r in rs) for k in ("over", "over_target", "n"))
+        bad |= over > 0
+        lsb = f" ({w.worst_lsb} LSB)" if fmt_name == "int8" else ""
+        parts.append(f"{act} worst {100 * w.worst:.3f}%{lsb} at x = {w.at:.6g}, {over} of {n} over {100 * truth.BOUND:g}%, "
+                     f"{over_t} over {100 * truth.TARGET:g}%")
+    return (f"ACCURACY: {'FAIL' if bad else 'PASS'} (true function, truth.py, {fmt_name}; bound {100 * truth.BOUND:g}%, "
+            f"target {100 * truth.TARGET:g}%: " + ("; ".join(parts) if parts else "no gated run") + ")"), bad
+
+
 def print_activation(act: str, r: dict) -> None:
     tot = max(r["total"], 1)
     sym = ok("PASS") if (r["failed"] + r["missing"]) == 0 else err("FAIL")
@@ -249,7 +324,7 @@ N_RAND_INT8, N_SAT_INT8 = 32, 8  # random lane parameter sets per activation, an
 N_POS_INT8 = 64  # positive SELU sets per activation, x from 0 past the int32 limit; the last two hit it exactly; bit-exact only
 N_LAD_INT8 = 41  # sigmoid ladder edge sets: t_i - 1 and t_i for the 19 thresholds, the hand-over 5119 and 5120, a rescale saturating at -32768
 N_SWEEP_INT8 = 64  # the scale sweep: s_in log-spaced 1/128 to 1/8, every int8 input; bit-exact only
-GATED_INT8 = ("sigmoid",)  # activations whose gated accuracy fails the run; tanh and SELU stay reported
+GATED_INT8 = ("sigmoid",)  # gpnae_model's words against exact_int8 at 6.25%: sigmoid gated, tanh and SELU reported (the truth gate takes all)
 STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2),
                (0, 16), (2, 1))  # (mode, elements): 0 puts with last on the final one, 1 the final put held back, 2 puts while busy
 STREAM_BYP = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 8), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2), (0, 16),
@@ -373,6 +448,73 @@ def write_stream_int8(lane, rng) -> dict:
     return {"segments": len(seg_l), "groups": len(grp_l), "elements": len(q_all), "starts": len(bnd)}
 
 
+def int8_sets(seed) -> dict:
+    """Every lane parameter set run_int8 drives, per activation in stimulus order: (kind, case or None, params, the 256 inputs)."""
+    import gpnae_model as gm
+    lad_sets, sweep = ladder_sets(), sweep_sets(np.random.default_rng([seed, 16]))
+    rl = np.random.default_rng([seed, 15])  # their input order: a new stream, so the earlier sets' stimulus is unchanged
+    extra_q = [rl.permutation(256).astype(np.int64) - 128 for _ in range(N_LAD_INT8 + N_SWEEP_INT8)]
+    rs = np.random.RandomState(seed)
+    rr = np.random.default_rng([seed, 12])  # the random parameter sets and their input order
+    rp = np.random.default_rng([seed, 14])  # the positive SELU sets and their input order
+    pos_sets = [pos_params_int8(rp, k) for k in range(N_POS_INT8)]  # every activation runs them; only SELU's are of interest
+    pos_q = [rp.permutation(256).astype(np.int64) - 128 for _ in pos_sets]
+    out = {}
+    for act, code in INT8_ACTS:
+        sets = []
+        for case in gm.INT8_CASES[act]:
+            sets.append(("case", case, gm.int8_params(case, code), rs.permutation(256).astype(np.int64) - 128))  # every input once
+        rand = [rand_params_int8(rr, code, k < N_SAT_INT8) for k in range(N_RAND_INT8)]
+        sets += [("random", None, p, rr.permutation(256).astype(np.int64) - 128) for p in rand]
+        sets += [("positive", None, p if code == 1 else p._replace(mout=0, shout=0, zout=0), q) for p, q in zip(pos_sets, pos_q)]
+        sets += [("ladder" if k < N_LAD_INT8 else "sweep", None, p, q) for k, (p, q) in enumerate(zip(lad_sets + sweep, extra_q))]
+        out[act] = sets
+    assert len(lad_sets) == N_LAD_INT8
+    return out
+
+
+INT8_OUT = {2: (1 / 256, -128), 3: (1 / 128, 0)}  # sigmoid's and tanh's fixed output quantization (TFLite's)
+
+
+def int8_quant(code, case, p):
+    """(s_in, z_in, s_out, z_out) of a set: a case's own float scales; otherwise the scales its integers encode."""
+    if case is not None:
+        return case.s_in, case.z_in, case.s_out, case.z_out
+    s_in = p.mx * 2.0 ** -p.shx / 2048  # the rescale: x = (q - z_in) mx / 2^shx in Q4.11
+    if code == 1:
+        s_out = 2.0 ** (9 - p.shout) / p.mout if p.mout else np.inf  # requantize: q = v mout 2^shout / 2^31, v in units of 2^-22
+        return s_in, p.zin, s_out, p.zout  # a zero multiplier (the ladder and sweep sets) leaves only the zero point
+    if code in INT8_OUT:
+        return (s_in, p.zin) + INT8_OUT[code]
+    return s_in, p.zin, s_in, p.zin  # ReLU and linear pass the code through
+
+
+def truth_int8(sets, gots) -> tuple:
+    """The gate on each activation's RTL words over every set and input; ReLU only where q >= z_in, the codes the requantize clamp delivers."""
+    res, lines = {}, []
+    for act, code in INT8_ACTS:
+        got = gots[act]
+        if got is None:
+            res[act] = None
+            continue
+        rows = [(kind, q, int8_quant(code, case, p)) for kind, case, p, q in sets[act]]
+        q = np.concatenate([r[1] for r in rows])
+        quant = [np.repeat([r[2][k] for r in rows], 256) for k in range(4)]
+        kinds = np.repeat([r[0] for r in rows], 256)
+        keep = q >= quant[1] if act == "relu" else np.ones(q.size, dtype=bool)
+        r = truth.gate("int8", act, q[keep], got[keep], quant=[v[keep] for v in quant])
+        note = f"; {int((~keep).sum())} inputs below z_in not gated (the requantize clamp applies ReLU)" if act == "relu" else ""
+        lines.append(show_truth(r, note))
+        for kind in dict.fromkeys(kinds):
+            m = keep & (kinds == kind)
+            rk = truth.gate("int8", act, q[m], got[m], quant=[v[m] for v in quant])
+            lines.append(f"  {kind:<9}{truth.line(rk)}")
+            print(f"        {kind:<9}{'PASS' if rk.ok else 'FAIL'}  n {rk.n}  worst {100 * rk.worst:.3f}% ({rk.worst_lsb} LSB)  "
+                  f"over {100 * truth.BOUND:g}%: {rk.over}  over {100 * truth.TARGET:g}%: {rk.over_target}")
+        res[act] = r
+    return res, lines
+
+
 def run_int8(args) -> int:
     """int8 lane: every int8 input at each gpnae_model.INT8_CASES case, bit-exact against the lane model, then accuracy."""
     import json
@@ -390,48 +532,26 @@ def run_int8(args) -> int:
     pos_batches = (n_cases + N_RAND_INT8 + N_POS_INT8) * 256 // per
     lad_batches = pos_batches + N_LAD_INT8 * 256 // per
     batches = lad_batches + N_SWEEP_INT8 * 256 // per  # cases, random, positive SELU, ladder edges, the scale sweep
-    lad_sets, sweep = ladder_sets(), sweep_sets(np.random.default_rng([args.seed, 16]))
-    assert len(lad_sets) == N_LAD_INT8
-    rl = np.random.default_rng([args.seed, 15])  # their input order: a new stream, so the earlier sets' stimulus is unchanged
-    extra_q = [rl.permutation(256).astype(np.int64) - 128 for _ in range(N_LAD_INT8 + N_SWEEP_INT8)]
+    sets = int8_sets(args.seed)
+    lad_sets = [p for kind, _, p, _ in sets["tanh"] if kind == "ladder"]
+    sweep = [p for kind, _, p, _ in sets["tanh"] if kind == "sweep"]
     fmt = types.SimpleNamespace(name="int8", width=8, exp_bits=0, man_bits=7)
     coeff = gm.coeff_file(gm.INT8)
     lane = gm.Lane(gm.INT8, gm.read_rom(os.path.join(ROOT, coeff)))
     write_config(fmt, batches, per, 0.0, 0.0, "hw", args.timeout, args.seed, True, coeff)
-    rs = np.random.RandomState(args.seed)
-    rr = np.random.default_rng([args.seed, 12])  # the random parameter sets and their input order
     os.makedirs(STIM_DIR, exist_ok=True)
     rows, rand_sets = [], {}
-    rp = np.random.default_rng([args.seed, 14])  # the positive SELU sets and their input order
-    pos_sets = [pos_params_int8(rp, k) for k in range(N_POS_INT8)]  # every activation runs them; only SELU's are of interest
-    pos_q = [rp.permutation(256).astype(np.int64) - 128 for _ in pos_sets]
-    pos_x = np.concatenate([gm.rescale_wide(q, p.zin, p.mx, p.shx) for p, q in zip(pos_sets, pos_q)])
+    pos_x = np.concatenate([gm.rescale_wide(q, p.zin, p.mx, p.shx) for kind, _, p, q in sets["selu"] if kind == "positive"])
     for act, code in INT8_ACTS:
         stim, gold, par = [], [], []
-        for case in gm.INT8_CASES[act]:
-            p = gm.int8_params(case, code)
-            q = rs.permutation(256).astype(np.int64) - 128  # every int8 input once, in a seeded order
+        for kind, case, p, q in sets[act]:
             y = lane.run(q, code, p)
             stim += [int(v) for v in q]
             gold += [int(v) for v in y]
             par += [p] * (256 // per)
-            if code <= 3:
+            if kind == "case" and code <= 3:
                 rows.append((act, case, p, gm.accuracy_int8(y, q, code, case)))
-        rand_sets[act] = [rand_params_int8(rr, code, k < N_SAT_INT8) for k in range(N_RAND_INT8)]
-        for p in rand_sets[act]:
-            q = rr.permutation(256).astype(np.int64) - 128
-            stim += [int(v) for v in q]
-            gold += [int(v) for v in lane.run(q, code, p)]
-            par += [p] * (256 // per)
-        for p, q in zip(pos_sets, pos_q):
-            p = p if code == 1 else p._replace(mout=0, shout=0, zout=0)
-            stim += [int(v) for v in q]
-            gold += [int(v) for v in lane.run(q, code, p)]
-            par += [p] * (256 // per)
-        for p, q in zip(lad_sets + sweep, extra_q):
-            stim += [int(v) for v in q]
-            gold += [int(v) for v in lane.run(q, code, p)]
-            par += [p] * (256 // per)
+        rand_sets[act] = [p for kind, _, p, _ in sets[act] if kind == "random"]
         with open(os.path.join(STIM_DIR, f"{act}_in.mem"), "w") as fh:
             fh.write("".join(f"{v & 0xFF:02x}\n" for v in stim))
         with open(os.path.join(STIM_DIR, f"{act}_exp.mem"), "w") as fh:
@@ -443,7 +563,8 @@ def run_int8(args) -> int:
     stream = write_stream_int8(lane, np.random.default_rng([args.seed, 13]))
     print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases, {N_RAND_INT8} random, {N_POS_INT8} positive SELU, {N_LAD_INT8} ladder edge and {N_SWEEP_INT8} scale sweep sets x 256 inputs per activation, "
               f"a {stream['elements']}-element protocol stream, seed {args.seed}\n{'='*78}"))
-    raw, wall = run_make("poly")
+    clear_got(ALL_ACTS)
+    raw, wall = run_make("poly", "+dump_got")
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(os.path.join(RESULTS_DIR, "int8_exhaustive.log"), "w") as fh:
         fh.write(raw)
@@ -465,8 +586,13 @@ def run_int8(args) -> int:
     n_c, n_r, n_p = n_cases * 256, N_RAND_INT8 * 256, N_POS_INT8 * 256
     ran = lambda a: a in parsed["per_act"] and parsed["per_act"][a]["total"] == batches * per  # the TB checked all of it
     part = lambda a, k, n: f"{a} {n - bad[a][k]}/{n}" if ran(a) else f"{a} no result"
-    L = [f"GPNAE int8 lane, seed {args.seed}: bit-exact against gpnae_model, then the lane against exact_int8 with GPNAE's tolerance",
-         f"BITEXACT: {'PASS' if exact_ok else (parsed['status'] if parsed['status'] != 'PASS' else 'FAIL')}  "
+    print(hdr("      true-function gate (truth.py) on the RTL's words, every input of every set:"))
+    t_res, t_lines = truth_int8(sets, {act: rtl_words(act, batches * per) for act, _ in INT8_ACTS})
+    t_line, t_bad = truth_verdict("int8", {act: [r] for act, r in t_res.items()})
+    L = [f"GPNAE int8 lane, seed {args.seed}: the true-function gate on the RTL's words; bit-exact against gpnae_model and the model's "
+         f"words against exact_int8 with GPNAE's tolerance are diagnostics",
+         t_line, *t_lines,
+         f"BITEXACT: {'PASS' if exact_ok else (parsed['status'] if parsed['status'] != 'PASS' else 'FAIL')} (a diagnostic)  "
          + "  ".join(f"{a} {v['exact']}/{v['total']}" for a, v in parsed["per_act"].items())
          + (f"  stream {se.group(2)}/{se.group(1)}" if se else "  stream NO-RESULT"),
          "  INT8_CASES, every int8 input: " + "  ".join(part(a, 0, n_c) for a, _ in INT8_ACTS),
@@ -499,7 +625,7 @@ def run_int8(args) -> int:
     missed = [act for act, a in tot.items() if not a.ok]
     n_gated = {act: 256 * sum(c.gated for c in gm.INT8_CASES[act]) for act in tot}
     gated_miss = [a for a in GATED_INT8 if a in missed]
-    L.append(f"ACCURACY: {'FAIL' if gated_miss else 'PASS' if not missed else 'MISSED'} ({tol}; gated: "
+    L.append(f"MODEL ACCURACY: {'FAIL' if gated_miss else 'PASS' if not missed else 'MISSED'} (gpnae_model's words, {tol}; gated: "
              + ", ".join(f"{a} {tot[a].fail} of {n_gated[a]} outside" for a in GATED_INT8) + "; reported, not gated: "
              + ", ".join(f"{a} {tot[a].fail} of {n_gated[a]} outside" for a in tot if a not in GATED_INT8) + ")")
     k_rand = len(L)
@@ -507,7 +633,7 @@ def run_int8(args) -> int:
     for act, s in rand_sets.items():
         L.append(f"  {act}: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in s))
     L.append("positive SELU sets (mx shx z_in mout shout z_out), in stimulus order after the random sets:")
-    L.append("  selu: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in pos_sets))
+    L.append("  selu: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for kind, _, p, _ in sets["selu"] if kind == "positive"))
     L.append("sigmoid ladder edge sets (mx shx x; z_in = 0, mout = shout = z_out = 0), in stimulus order after the positive SELU sets:")
     L.append("  " + " ".join(f"({p.mx} {p.shx} {x})" for p, x in zip(lad_sets, ladder_xs())))
     L.append("scale sweep sets (s_in mx shx z_in; mout = shout = z_out = 0), in stimulus order after the ladder edge sets:")
@@ -522,55 +648,80 @@ def run_int8(args) -> int:
         summary[act]["cases"].append({"s_in": float(case.s_in), "z_in": int(case.z_in), "s_out": float(case.s_out),
                                       "z_out": int(case.z_out), "gated": bool(case.gated), **fields(a)})
     with open(os.path.join(RESULTS_DIR, "gpnae_int8_accuracy.json"), "w") as fh:
-        json.dump({"seed": args.seed, "bitexact": exact_ok, "gated": list(GATED_INT8), "activations": summary}, fh, indent=1)
-    print("\n".join(L[1:k_rand]))
+        truth_js = {act: None if r is None else {"pass": r.ok, "n": r.n, "worst": r.worst, "worst_lsb": r.worst_lsb, "over": r.over,
+                                                 "over_target": r.over_target} for act, r in t_res.items()}
+        json.dump({"seed": args.seed, "bitexact": exact_ok, "gated": list(GATED_INT8), "truth": truth_js, "activations": summary}, fh, indent=1)
+    print("\n".join(L[2 + len(t_lines):k_rand]))
+    print(t_line)
     print(f"  {_D}{wall:.1f}s{_X}")
-    return 0 if exact_ok and not gated_miss else 1
+    return 0 if exact_ok and not gated_miss and not t_bad else 1
 
 
-BF16_ALL = "bf16_all"  # every finite bf16 input through each activation, bit-exact; sigmoid's RTL words gated by gpnae_model.sigmoid_gate
+BF16_ALL = "bf16_all"  # every finite bf16 input through each activation; also gpnae_model.sigmoid_gate on sigmoid's RTL words
+FP32_DENSE = "fp32_dense"  # fp32: a grid over [-16, 16], 2^20 random inputs and the range edges, through each activation
+EXHAUSTIVE = {"bf16": BF16_ALL, "fp32": FP32_DENSE}  # the --model hw pattern per float format
+N_FP32_GRID, N_FP32_RAND = 1 << 17, 1 << 20
 
 
-def run_bf16_all(args, fmt) -> dict:
-    """The exhaustive bf16 pattern: 65280 inputs per activation, bit-exact against the lane model, then the sigmoid gate on the RTL's words."""
+def gm_finite_bf16():
     import gpnae_model as gm
-    f = gm.fpu.BF16
-    x = gm.finite_inputs(f)
+    return gm.finite_inputs(gm.fpu.BF16)
+
+
+def fp32_dense_inputs(seed):
+    """fp32_dense's inputs: a 2^17 + 1 point grid over [-16, 16], 2^19 random finite bit patterns, 2^19 uniform in [-20, 20], edges."""
+    rng = np.random.default_rng([seed, 17])
+    grid = truth.encode("fp32", np.linspace(-16.0, 16.0, N_FP32_GRID + 1))
+    pat = rng.integers(0, 1 << 32, N_FP32_RAND, dtype=np.int64)
+    pat = pat[((pat >> 23) & 0xFF) != 0xFF][:N_FP32_RAND // 2]  # every magnitude, subnormals included; no Inf or NaN
+    uni = truth.encode("fp32", rng.uniform(-20.0, 20.0, N_FP32_RAND // 2))
+    pow2 = [1 << k for k in range(23)] + [e << 23 for e in range(1, 255)]  # 2^-149 .. 2^127
+    near = [int(truth.encode("fp32", v)) + d for v in (2.5, 3.5, 4.0, 16.0, 88.72283935546875, 0.0625, 1.0) for d in (-2, -1, 0, 1, 2)]
+    tops = [0x7F7FFFFF - k for k in range(4)] + [0x007FFFFF - k for k in range(4)] + [0x00800000 + k for k in range(4)]
+    edges = np.array(pow2 + near + tops + [0], dtype=np.int64)
+    x = np.concatenate([grid, pat, uni, edges, edges | (1 << 31)])
+    pad = -x.size % MAX_SIGNALS
+    return np.concatenate([x, truth.encode("fp32", rng.uniform(-16.0, 16.0, pad))])
+
+
+def run_exhaustive(args, fmt, name, x) -> dict:
+    """Every activation at inputs x: the TB bit-exact against the lane model (a diagnostic), then the true-function gate on the RTL's words."""
+    import gpnae_model as gm
+    f = gm.fpu.FORMATS[fmt.name]
     per = MAX_SIGNALS
     assert x.size % per == 0
     lane = gm.Lane(f, gm.read_rom(os.path.join(ROOT, gm.coeff_file(f))))
     write_config(fmt, x.size // per, per, 0.0, 0.0, "hw", args.timeout, args.seed, True, gm.coeff_file(f))
     os.makedirs(STIM_DIR, exist_ok=True)
-    words = lambda v: "".join(f"{int(b) & 0xFFFF:04x}\n" for b in v)
-    for act, cfg in ACTIVATIONS.items():
+    nd, mask = fmt.width // 4, (1 << fmt.width) - 1
+    words = lambda v: "".join(f"{int(b) & mask:0{nd}x}\n" for b in v)
+    for act, code in INT8_ACTS:  # all five control words
         with open(os.path.join(STIM_DIR, f"{act}_in.mem"), "w") as fh:
             fh.write(words(x))
         with open(os.path.join(STIM_DIR, f"{act}_exp.mem"), "w") as fh:
-            fh.write(words(lane.run(x, cfg["code"])))
-    got_path = os.path.join(STIM_DIR, "sigmoid_got.mem")
-    if os.path.exists(got_path):
-        os.remove(got_path)  # a stale dump must not stand in for this run's words
-    raw, wall = run_make("poly", "+dump_got")
+            fh.write(words(lane.run(x, code)))
+    clear_got(ALL_ACTS)
+    raw, wall = run_make("poly", "+dump_got +all_acts")
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    with open(os.path.join(RESULTS_DIR, f"{BF16_ALL}.log"), "w") as fh:
+    with open(os.path.join(RESULTS_DIR, f"{name}.log"), "w") as fh:
         fh.write(raw)
-    parsed = parse_log(raw, expect_total=x.size)
-    parsed.update(name=BF16_ALL, wall=wall)
-    g = None
-    try:
-        got = np.array([int(ln, 16) for ln in open(got_path) if ln.strip()], dtype=np.int64)
-    except (OSError, ValueError) as e:
-        got = None
-        print(err(f"      SIGMOID GATE: FAIL, no RTL words ({e})"))
-    if got is not None and got.size != x.size:
-        print(err(f"      SIGMOID GATE: FAIL, {got.size} RTL words for {x.size} inputs"))
-        got = None
-    if got is not None:
-        g = gm.sigmoid_gate(f, x, got)
-        tag = ok("PASS") if g.ok else err("FAIL")
-        print(f"      SIGMOID GATE: {tag}  RTL words, every finite bf16 input ({g.n}, {g.n_sub} subnormal): worst {100 * g.worst:.3f}% "
-              f"at x = {g.at:.6g}; over {100 * gm.SIG_BOUND:g}%: {g.over}; below-normal misses: {g.flush}")
-    if g is None or not g.ok:
+    parsed = parse_log(raw, expect_total=x.size, expect_acts=len(ALL_ACTS))
+    parsed.update(name=name, wall=wall)
+    parsed["truth"] = truth_float(fmt.name, ALL_ACTS)
+    bad = any(r is None or not r.ok for r in parsed["truth"].values())
+    if name == BF16_ALL:  # Task 1.14a's sigmoid gate at 1%, on gpnae_model's reference (subnormal inputs read as zero)
+        r = parsed["truth"]["sigmoid"]
+        got = None if r is None else read_words(os.path.join(STIM_DIR, "sigmoid_got.mem"))
+        if got is None:
+            print(err("      SIGMOID GATE: FAIL, no RTL words"))
+            bad = True
+        else:
+            g = gm.sigmoid_gate(f, x, got)
+            tag = ok("PASS") if g.ok else err("FAIL")
+            print(f"      SIGMOID GATE: {tag}  RTL words, every finite bf16 input ({g.n}, {g.n_sub} subnormal): worst {100 * g.worst:.3f}% "
+                  f"at x = {g.at:.6g}; over {100 * gm.SIG_BOUND:g}%: {g.over}; below-normal misses: {g.flush}")
+            bad |= not g.ok
+    if bad:
         parsed["status"] = "FAIL"
         parsed["failed"] = max(1, parsed["failed"])
     return parsed
@@ -616,11 +767,12 @@ def main() -> None:
             sys.exit(1)
         rel_tol, args.abs_tol = 0.0, 0.0
     coeff = "poly_coeffs.mem" if fmt.name == "fp32" else f"poly_coeffs_{fmt.name}.mem"
-    all_bf16 = fmt.name == "bf16" and args.lane == "poly" and exact and args.test in (None, BF16_ALL)  # the exhaustive pattern, a hard gate
-    if args.test == BF16_ALL and not all_bf16:
-        print(err(f"[ERROR] --test {BF16_ALL} runs with --lane poly --format bf16 --model hw"))
+    poly = args.lane == "poly"  # gpnae_poly: every run gates its RTL words on the true function
+    exh = EXHAUSTIVE.get(fmt.name) if poly and exact and args.test in (None, EXHAUSTIVE.get(fmt.name)) else None
+    if args.test in EXHAUSTIVE.values() and exh != args.test:
+        print(err(f"[ERROR] --test {args.test} runs with --lane poly --format {args.test.split('_')[0]} --model hw"))
         sys.exit(1)
-    if args.test == BF16_ALL:
+    if args.test in EXHAUSTIVE.values():
         tests = []
     else:
         tests = [t for t in TESTS if args.lane in t.get("lanes", ("gpnae", "poly"))] if args.test is None else [get_test(args.test)]
@@ -636,7 +788,10 @@ def main() -> None:
           f"{per_act*3} per pattern")
     print(f"  Patterns    : {len(tests)}  ->  {len(tests)*per_act*3} element checks")
     print(f"  Reference   : {args.model}    seed {args.seed}    lane {args.lane}")
-    print(f"  Tolerance   : rel <= {rel_tol*100:.4f}%  abs <= {args.abs_tol}")
+    print(f"  Tolerance   : rel <= {rel_tol*100:.4f}%  abs <= {args.abs_tol}" + ("  (the TB's check: a diagnostic)" if poly else ""))
+    if poly:
+        print(f"  Accuracy    : the RTL's words against the true function (truth.py): bound {100 * truth.BOUND:g}%, "
+              f"target {100 * truth.TARGET:g}% reported, floor 2^-126")
     print(hdr(f"{'='*78}"))
 
     if args.write_coeffs:
@@ -649,11 +804,14 @@ def main() -> None:
                  args.model, args.timeout, args.seed, exact, coeff)
 
     results, ranges = [], {}
+    truth_runs = {act: [] for act in (ALL_ACTS if exh else FLOAT_ACTS)} if poly else {}
     for idx, t in enumerate(tests):
         print(f"\n  [{idx+1}/{len(tests)}] {_O}{t['name']}{_X}  —  {t['description']}")
         ranges = generate_vectors(t["name"], fmt, args.batches, args.per_batch,
                                   args.model, args.seed, args.range)
-        raw, wall = run_make(args.lane)
+        if poly:
+            clear_got(FLOAT_ACTS)
+        raw, wall = run_make(args.lane, "+dump_got" if poly else "")
 
         os.makedirs(RESULTS_DIR, exist_ok=True)
         with open(os.path.join(RESULTS_DIR, f"{t['name']}.log"), "w") as f:
@@ -680,17 +838,26 @@ def main() -> None:
 
         for act, a in parsed["per_act"].items():
             print_activation(act, a)
+        if poly:
+            parsed["truth"] = truth_float(fmt.name, FLOAT_ACTS)
+            if any(r is None or not r.ok for r in parsed["truth"].values()):
+                parsed["status"] = "FAIL"
         print(f"      {_D}{wall:.1f}s{_X}")
 
-    if all_bf16:
-        print(f"\n  [{len(tests) + 1}/{len(tests) + 1}] {_O}{BF16_ALL}{_X}  —  every finite bf16 input, bit-exact; sigmoid gated")
-        parsed = run_bf16_all(args, fmt)
+    if exh:
+        what = "every finite bf16 input" if exh == BF16_ALL else "a grid over [-16, 16], 2^20 random inputs and the edges"
+        x = gm_finite_bf16() if exh == BF16_ALL else fp32_dense_inputs(args.seed)
+        print(f"\n  [{len(tests) + 1}/{len(tests) + 1}] {_O}{exh}{_X}  —  {what} ({x.size}), five activations, the truth gate")
+        parsed = run_exhaustive(args, fmt, exh, x)
         results.append(parsed)
         if parsed["status"] in ("BUILD-ERROR", "NO-RESULTS"):
-            print(err(f"      {parsed['status']} — see {BF16_ALL}.log"))
+            print(err(f"      {parsed['status']} — see {exh}.log"))
         for act, a in parsed["per_act"].items():
             print_activation(act, a)
         print(f"      {_D}{parsed['wall']:.1f}s{_X}")
+    for r in results:
+        for act, g in r.get("truth", {}).items():
+            truth_runs[act].append(g)
 
     n_pass = sum(1 for r in results if r["status"] == "PASS")
     total_checks = sum(a["total"] for r in results for a in r["per_act"].values())
@@ -701,7 +868,14 @@ def main() -> None:
         sym = ok("PASS") if r["status"] == "PASS" else err("FAIL")
         print(f"  {sym}  {r['name']}")
     print(f"\n  Element checks : {total_checks}")
-    print(f"  Worst rel error: {worst:.4f}%   (tolerance {rel_tol*100:.4f}%)")
+    print(f"  Worst rel error: {worst:.4f}%   (tolerance {rel_tol*100:.4f}%)" + ("  the TB's check against its golden, a diagnostic" if poly else ""))
+    if poly:
+        acc, acc_bad = truth_verdict(fmt.name, truth_runs)
+        print(err(acc) if acc_bad else ok(acc))
+        with open(os.path.join(RESULTS_DIR, f"truth_{fmt.name}.log"), "w") as fh:
+            fh.write(acc + "\n" + "".join(f"{r['name']:<18}{truth.line(g) if g else f'TRUTH {act}: NO RTL WORDS'}\n"
+                                          for r in results for act, g in r.get("truth", {}).items()))
+
     verdict = ok("All patterns passed") if n_pass == len(results) else err(
         f"{len(results)-n_pass} pattern(s) failed")
     print(hdr(f"\n  Verdict : {verdict}"))
@@ -732,7 +906,7 @@ MODEL_CHECKS = ("check-model-fp32", "check-model-bf16", "check-model-int8")  # g
 class LaneSpec(regress.Spec):
     title = "GPNAE REGRESSION"
     formats = LANE_FORMATS
-    reported = frozenset({"bf16/lane-accuracy"})  # bf16 accuracy against the functions: an open item, shown, not gated; fp32's is gated at 1%
+    reported = frozenset({"bf16/lane-accuracy"})  # the TB's 6.25% check fails on bf16 tanh; bf16/lane gates every input on the true function
     drop = ("GPNAE_MODEL",)
 
     def points(self, small, formats):
@@ -762,8 +936,9 @@ class LaneSpec(regress.Spec):
         if name in MODEL_CHECKS:
             return regress.marker_verdict(text, rc, (r"^RESULT: PASSED$", r": 0 errors$"), (r"RESULT: FAILED",))
         if name.startswith("int8/"):
-            return regress.marker_verdict(text, rc, (r"^BITEXACT: PASS",))
-        v = regress.marker_verdict(text, rc, (r"Verdict : All patterns passed",))
+            return regress.marker_verdict(text, rc, (r"^BITEXACT: PASS", r"^ACCURACY: PASS"), (r"^ACCURACY: FAIL",))
+        gate = () if name == "fp32/taylor" else (r"^ACCURACY: PASS",)  # every gpnae_poly point carries the true-function gate
+        v = regress.marker_verdict(text, rc, (r"Verdict : All patterns passed",) + gate, (r"^ACCURACY: FAIL",))
         n = re.findall(r"^\s*Element checks\s*:\s*(\d+)", regress.ANSI.sub("", text), re.M)
         return v if v != "PASS" or (n and int(n[-1]) > 0) else f"FAIL ({n[-1] if n else 'no'} element checks)"
 
