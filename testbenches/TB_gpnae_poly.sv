@@ -720,13 +720,13 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
     $finish;
   end
 
-  // Waveforms opt-in via +dump, scoped to the DUT: dumping the whole TB crashes Verilator's trace_init.
+  // Waveforms only in a TRACE=1 build (ENABLE_TRACE), scoped to the DUT: dumping the whole TB crashes Verilator's trace_init.
+`ifdef ENABLE_TRACE
   initial begin
-    if ($test$plusargs("dump")) begin
-      $dumpfile("tb_gpnae.vcd");
-      $dumpvars(1, dut);
-    end
+    $dumpfile("tb_gpnae.vcd");
+    $dumpvars(1, dut);
   end
+`endif
 
 
 endmodule

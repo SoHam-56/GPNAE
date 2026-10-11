@@ -58,12 +58,18 @@ VERILATOR_DIR = $(PRJ_DIR)/Verilator
 IVERILOG_DIR = $(PRJ_DIR)/Icarus
 VCS_DIR = $(PRJ_DIR)/VCS
 
+# Waveforms as in SIENNA: TRACE=1 (or vcd) builds with --trace and ENABLE_TRACE; the default 0 writes none.
+TRACE ?= 0
+ifeq ($(filter $(TRACE),0 1 vcd),)
+$(error Invalid TRACE=$(TRACE): must be one of 0, 1, vcd)
+endif
+TRACE_ON = $(filter $(TRACE),1 vcd)
+
 # Simulation threads; several simulations at once each need fewer (Verilator's threads spin, so oversubscribed runs crawl).
 SIM_THREADS ?= $(shell nproc)
 
 VERILATOR_FLAGS = \
 	--binary \
-	--trace \
 	--timing \
 	--assert \
 	--top-module $(TOP_MODULE) \
@@ -81,13 +87,17 @@ VERILATOR_FLAGS = \
 
 # Hooks as in SIENNA: one-off defines (EXTRA_FLAGS) and simulator arguments (SIM_ARGS).
 VERILATOR_FLAGS += $(EXTRA_FLAGS)
+ifneq ($(TRACE_ON),)
+VERILATOR_FLAGS += --trace -DENABLE_TRACE
+endif
 
 IVERILOG_FLAGS = \
 	-g2012 \
 	-Wall \
 	-Wno-timescale \
 	-I$(SRC_DIR) \
-	-I$(TB_DIR)
+	-I$(TB_DIR) \
+	$(if $(TRACE_ON),-DENABLE_TRACE)
 
 VCS_FLAGS = \
 	-full64 \
@@ -97,13 +107,14 @@ VCS_FLAGS = \
 	-Mdir=$(VCS_DIR) \
 	+v2k \
 	+incdir+$(SRC_DIR) \
-	+incdir+$(TB_DIR)
+	+incdir+$(TB_DIR) \
+	$(if $(TRACE_ON),+define+ENABLE_TRACE)
 
 default: help
 
 help:
 	@echo "Simulation Targets:"
-	@echo "  make verilator    - Simulate using Verilator"
+	@echo "  make verilator    - Simulate using Verilator (TRACE=1: also write tb_gpnae.vcd)"
 	@echo "  make iverilog     - Simulate using Icarus Verilog"
 	@echo "  make vcs          - Simulate using Synopsys VCS"
 	@echo "  make clean        - Remove all simulation artifacts"
@@ -130,8 +141,8 @@ iverilog:
 		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES)) \
 		$(TB_DIR)/$(TESTBENCH)
 	@echo "-- Running Icarus Verilog simulation"
-	cd $(IVERILOG_DIR) && $(VVP) ./$(TOP_MODULE)_sim -vcd=$(TOP_MODULE).vcd
-	@echo "-- Waveform generated at $(IVERILOG_DIR)/$(TOP_MODULE).vcd"
+	cd $(IVERILOG_DIR) && $(VVP) ./$(TOP_MODULE)_sim
+	@$(if $(TRACE_ON),echo "-- Waveform generated at $(IVERILOG_DIR)/tb_gpnae.vcd",true)
 
 vcs:
 	@echo "-- VCS simulation for GPNAE"
@@ -145,8 +156,9 @@ vcs:
 	@echo "-- Simulation complete"
 
 view:
+	$(MAKE) iverilog TRACE=1
 	@echo "-- Opening waveform"
-	$(WAVE) $(IVERILOG_DIR)/$(TOP_MODULE).vcd
+	$(WAVE) $(IVERILOG_DIR)/tb_gpnae.vcd
 
 clean:
 	@echo "-- Cleaning simulation artifacts"
