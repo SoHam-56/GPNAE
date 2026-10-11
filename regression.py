@@ -918,6 +918,11 @@ class LaneSpec(regress.Spec):
             return {"n": 0, "fmt": name.split("/")[0] if "/" in name else None}
         raise ValueError(f"{name}: points are selftest, {', '.join(MODEL_CHECKS)}, fp32/taylor, <fmt>/lane (fmt one of {', '.join(LANE_FORMATS)}) and fp32/, bf16/lane-accuracy")
 
+    def env(self, name, env):
+        if "/lane" in name:  # one lane is too small to share: 1 thread beats 8 by 4x (rs1_tf_thr1/8); make -jN runs points side by side
+            env = dict(env, SIM_THREADS="1")
+        return env
+
     def argv(self, name, opts):
         if name == "selftest":
             return [sys.executable, "test_regression_sweep.py"]

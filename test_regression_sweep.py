@@ -38,6 +38,14 @@ def test_commands():
     assert reg.SPEC.argv("int8/lane", None) == lane + ["int8", "--model", "exact"] and reg.SPEC.argv("selftest", None) == [py, "test_regression_sweep.py"]
 
 
+def test_lane_threads():
+    """A lane point simulates on one thread under any make -jN; other points keep the engine's share of the cores."""
+    for flags in ("-j2", "-j", "", "-j8"):
+        for p in ("fp32/lane", "bf16/lane-accuracy", "int8/lane"):
+            assert reg.regress.point_env(reg.SPEC, p, flags, 8).get("SIM_THREADS") == "1", (p, flags)
+    assert reg.regress.point_env(reg.SPEC, "fp32/taylor", "-j2", 8).get("SIM_THREADS") == "4"  # the Taylor lane keeps cores / N
+
+
 def test_verdicts():
     v = lambda p, t, rc=0: reg.SPEC.verdict(p, t, rc)
     fl = "  Element checks : 7200\n  Worst rel error: 0.0000%\n\x1b[92mACCURACY: PASS (true function)\x1b[0m\n\n  Verdict : \x1b[92mAll patterns passed\x1b[0m\n"
@@ -165,7 +173,7 @@ def test_int8_sets():
     assert np.array_equal(x, reg.fp32_dense_inputs(1)) and not np.array_equal(x, reg.fp32_dense_inputs(2))
 
 
-MIN_TESTS = 6  # tests this file holds; fewer run means one was lost, which is a failure
+MIN_TESTS = 7  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
