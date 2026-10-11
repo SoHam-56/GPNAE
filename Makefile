@@ -106,7 +106,7 @@ help:
 	@echo "  make iverilog     - Simulate using Icarus Verilog"
 	@echo "  make vcs          - Simulate using Synopsys VCS"
 	@echo "  make clean        - Remove all simulation artifacts"
-	@echo "  make regression   - The model checks, the lane in fp32, bf16, int8 (FMT=<f>: one), bit-exact and against the functions, then one table"
+	@echo "  make regression   - The model checks, the Taylor lane (fp32), the poly lane in fp32, bf16, int8 (FMT=<f>: one), then one table"
 	@echo "  make regression/<point>, make regression-summary - one point (regression.py --action points), the table again"
 
 verilator:
@@ -159,7 +159,7 @@ lint_fmt:
 
 .PHONY: default help verilator iverilog vcs view clean lint_fmt regression regression-summary
 
-# make regression: the model checks, gpnae_poly bit-exact in fp32, bf16, int8 and against the functions (fp32 gated, bf16 reported); one target per point, then one table.
+# make regression: the model checks, the published Taylor lane (fp32), gpnae_poly bit-exact and against the functions (fp32 gated, bf16 reported); one target per point, then one table.
 PYTHON  ?= python3
 FORMATS  = fp32 bf16 int8
 # Only FMT= on make's command line narrows it, not an exported FMT.

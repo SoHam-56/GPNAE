@@ -618,18 +618,21 @@ class LaneSpec(regress.Spec):
     def points(self, small, formats):
         if not formats:
             return []
-        return ["selftest", *MODEL_CHECKS] + [p for f in formats for p in ([f"{f}/lane"] + ([f"{f}/lane-accuracy"] if f != "int8" else []))]
+        return ["selftest", *MODEL_CHECKS] + [p for f in formats for p in ((["fp32/taylor"] if f == "fp32" else []) + [f"{f}/lane"]
+                                                                            + ([f"{f}/lane-accuracy"] if f != "int8" else []))]
 
     def parse(self, name):
-        if name in ("selftest", *MODEL_CHECKS) or name in [f"{f}/lane" for f in LANE_FORMATS] + ["fp32/lane-accuracy", "bf16/lane-accuracy"]:
+        if name in ("selftest", *MODEL_CHECKS, "fp32/taylor") or name in [f"{f}/lane" for f in LANE_FORMATS] + ["fp32/lane-accuracy", "bf16/lane-accuracy"]:
             return {"n": 0, "fmt": name.split("/")[0] if "/" in name else None}
-        raise ValueError(f"{name}: points are selftest, {', '.join(MODEL_CHECKS)}, <fmt>/lane (fmt one of {', '.join(LANE_FORMATS)}) and fp32/, bf16/lane-accuracy")
+        raise ValueError(f"{name}: points are selftest, {', '.join(MODEL_CHECKS)}, fp32/taylor, <fmt>/lane (fmt one of {', '.join(LANE_FORMATS)}) and fp32/, bf16/lane-accuracy")
 
     def argv(self, name, opts):
         if name == "selftest":
             return [sys.executable, "test_regression_sweep.py"]
         if name in MODEL_CHECKS:
             return [sys.executable, f"check_gpnae_model_{name.rsplit('-', 1)[1]}.py"]
+        if name == "fp32/taylor":  # the published Taylor lane (gpnae.sv, fp32 only), its patterns and tolerance as they are
+            return [sys.executable, "regression.py", "--lane", "gpnae", "--format", "fp32"]
         f = name.split("/")[0]
         return [sys.executable, "regression.py", "--lane", "poly", "--format", f, "--model", "exact" if name.endswith("-accuracy") else LANE_MODEL[f]]
 

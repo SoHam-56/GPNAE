@@ -10,10 +10,11 @@ import regression as reg  # noqa: E402
 
 def test_points():
     once = ["selftest", "check-model-fp32", "check-model-int8"]
-    assert reg.SPEC.points(False, ["fp32", "bf16", "int8"]) == once + ["fp32/lane", "fp32/lane-accuracy", "bf16/lane", "bf16/lane-accuracy", "int8/lane"]
+    assert reg.SPEC.points(False, ["fp32", "bf16", "int8"]) == once + ["fp32/taylor", "fp32/lane", "fp32/lane-accuracy", "bf16/lane", "bf16/lane-accuracy", "int8/lane"]
+    assert reg.SPEC.points(False, ["bf16"]) == once + ["bf16/lane", "bf16/lane-accuracy"]  # the published Taylor lane is fp32 only
     assert reg.SPEC.points(True, ["int8"]) == once + ["int8/lane"] and reg.SPEC.points(False, []) == []
     assert reg.SPEC.reported == {"bf16/lane-accuracy"}  # fp32's accuracy is gated at its 1% bound
-    for bad in ("fp16/lane", "int8/lane-accuracy", "fp32/N8_T2/lane", "fp32/check-model-fp32", "nosuch"):
+    for bad in ("fp16/lane", "int8/lane-accuracy", "fp32/N8_T2/lane", "fp32/check-model-fp32", "bf16/taylor", "int8/taylor", "nosuch"):
         try:
             reg.SPEC.parse(bad)
         except ValueError:
@@ -27,6 +28,7 @@ def test_commands():
     assert reg.SPEC.argv("bf16/lane-accuracy", None) == lane + ["bf16", "--model", "exact"]  # against the functions, reported
     assert reg.SPEC.argv("fp32/lane", None) == lane + ["fp32", "--model", "hw"]  # fp32 too: gpnae_model models fp32_down's P - 1
     assert reg.SPEC.argv("fp32/lane-accuracy", None) == lane + ["fp32", "--model", "exact"]
+    assert reg.SPEC.argv("fp32/taylor", None) == [py, "regression.py", "--lane", "gpnae", "--format", "fp32"]  # the published lane, its tests unchanged
     assert reg.SPEC.argv("check-model-fp32", None) == [py, "check_gpnae_model_fp32.py"] and reg.SPEC.argv("check-model-int8", None) == [py, "check_gpnae_model_int8.py"]
     assert reg.SPEC.argv("int8/lane", None) == lane + ["int8", "--model", "exact"] and reg.SPEC.argv("selftest", None) == [py, "test_regression_sweep.py"]
 
