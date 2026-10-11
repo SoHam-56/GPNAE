@@ -365,6 +365,14 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
       end
 
       if (worst > worst_rel_overall) worst_rel_overall = worst;
+      // +dump_got: every output of the batch runs goes to <act>_got.mem, so regression.py judges the RTL's own words.
+      if ($test$plusargs("dump_got")) begin
+        int dump_h;
+        dump_h = $fopen({STIM_DIR, act_name, "_got.mem"}, "w");
+        if (dump_h == 0) $fatal(1, "cannot write %s_got.mem", act_name);
+        for (int i = 0; i < TOTAL; i++) $fwrite(dump_h, "%h\n", got_all[i]);
+        $fclose(dump_h);
+      end
 
       $display("  ----------------------------------------------");
       $display("  RESULT %s : total %0d  exact %0d  tol %0d  failed %0d  missing %0d",

@@ -98,12 +98,14 @@ def generate_vectors(test_name: str, fmt, batches: int, per_batch: int, model: s
 # Run and parse
 # --------------------------------------------------------------------------
 
-def run_make(lane: str = "gpnae") -> tuple:
-    """Build and run via the project Makefile."""
+def run_make(lane: str = "gpnae", sim_args: str = "") -> tuple:
+    """Build and run via the project Makefile; sim_args go after the environment's SIM_ARGS."""
     t0 = time.time()
     cmd = ["make", "verilator"]
     if lane == "poly":
         cmd += ["TESTBENCH=TB_gpnae_poly.sv", "TOP_MODULE=TB_gpnae_poly"]
+    if sim_args:
+        cmd += [f"SIM_ARGS={(os.environ.get('SIM_ARGS', '') + ' ' + sim_args).strip()}"]
     if os.environ.get("GPNAE_PIN", "0") == "1" and shutil.which("taskset"):
         cmd = ["taskset", "-c", "0"] + cmd
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
@@ -526,6 +528,54 @@ def run_int8(args) -> int:
     return 0 if exact_ok and not gated_miss else 1
 
 
+BF16_ALL = "bf16_all"  # every finite bf16 input through each activation, bit-exact; sigmoid's RTL words gated by gpnae_model.sigmoid_gate
+
+
+def run_bf16_all(args, fmt) -> dict:
+    """The exhaustive bf16 pattern: 65280 inputs per activation, bit-exact against the lane model, then the sigmoid gate on the RTL's words."""
+    import gpnae_model as gm
+    f = gm.fpu.BF16
+    x = gm.finite_inputs(f)
+    per = MAX_SIGNALS
+    assert x.size % per == 0
+    lane = gm.Lane(f, gm.read_rom(os.path.join(ROOT, gm.coeff_file(f))))
+    write_config(fmt, x.size // per, per, 0.0, 0.0, "hw", args.timeout, args.seed, True, gm.coeff_file(f))
+    os.makedirs(STIM_DIR, exist_ok=True)
+    words = lambda v: "".join(f"{int(b) & 0xFFFF:04x}\n" for b in v)
+    for act, cfg in ACTIVATIONS.items():
+        with open(os.path.join(STIM_DIR, f"{act}_in.mem"), "w") as fh:
+            fh.write(words(x))
+        with open(os.path.join(STIM_DIR, f"{act}_exp.mem"), "w") as fh:
+            fh.write(words(lane.run(x, cfg["code"])))
+    got_path = os.path.join(STIM_DIR, "sigmoid_got.mem")
+    if os.path.exists(got_path):
+        os.remove(got_path)  # a stale dump must not stand in for this run's words
+    raw, wall = run_make("poly", "+dump_got")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    with open(os.path.join(RESULTS_DIR, f"{BF16_ALL}.log"), "w") as fh:
+        fh.write(raw)
+    parsed = parse_log(raw, expect_total=x.size)
+    parsed.update(name=BF16_ALL, wall=wall)
+    g = None
+    try:
+        got = np.array([int(ln, 16) for ln in open(got_path) if ln.strip()], dtype=np.int64)
+    except (OSError, ValueError) as e:
+        got = None
+        print(err(f"      SIGMOID GATE: FAIL, no RTL words ({e})"))
+    if got is not None and got.size != x.size:
+        print(err(f"      SIGMOID GATE: FAIL, {got.size} RTL words for {x.size} inputs"))
+        got = None
+    if got is not None:
+        g = gm.sigmoid_gate(f, x, got)
+        tag = ok("PASS") if g.ok else err("FAIL")
+        print(f"      SIGMOID GATE: {tag}  RTL words, every finite bf16 input ({g.n}, {g.n_sub} subnormal): worst {100 * g.worst:.3f}% "
+              f"at x = {g.at:.6g}; over {100 * gm.SIG_BOUND:g}%: {g.over}; below-normal misses: {g.flush}")
+    if g is None or not g.ok:
+        parsed["status"] = "FAIL"
+        parsed["failed"] = max(1, parsed["failed"])
+    return parsed
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="GPNAE activation regression",
@@ -566,7 +616,14 @@ def main() -> None:
             sys.exit(1)
         rel_tol, args.abs_tol = 0.0, 0.0
     coeff = "poly_coeffs.mem" if fmt.name == "fp32" else f"poly_coeffs_{fmt.name}.mem"
-    tests = [t for t in TESTS if args.lane in t.get("lanes", ("gpnae", "poly"))] if args.test is None else [get_test(args.test)]
+    all_bf16 = fmt.name == "bf16" and args.lane == "poly" and exact and args.test in (None, BF16_ALL)  # the exhaustive pattern, a hard gate
+    if args.test == BF16_ALL and not all_bf16:
+        print(err(f"[ERROR] --test {BF16_ALL} runs with --lane poly --format bf16 --model hw"))
+        sys.exit(1)
+    if args.test == BF16_ALL:
+        tests = []
+    else:
+        tests = [t for t in TESTS if args.lane in t.get("lanes", ("gpnae", "poly"))] if args.test is None else [get_test(args.test)]
     if any(args.lane not in t.get("lanes", ("gpnae", "poly")) for t in tests):
         print(err(f"[ERROR] --test {args.test} runs on --lane poly only"))
         sys.exit(1)
@@ -625,6 +682,16 @@ def main() -> None:
             print_activation(act, a)
         print(f"      {_D}{wall:.1f}s{_X}")
 
+    if all_bf16:
+        print(f"\n  [{len(tests) + 1}/{len(tests) + 1}] {_O}{BF16_ALL}{_X}  —  every finite bf16 input, bit-exact; sigmoid gated")
+        parsed = run_bf16_all(args, fmt)
+        results.append(parsed)
+        if parsed["status"] in ("BUILD-ERROR", "NO-RESULTS"):
+            print(err(f"      {parsed['status']} — see {BF16_ALL}.log"))
+        for act, a in parsed["per_act"].items():
+            print_activation(act, a)
+        print(f"      {_D}{parsed['wall']:.1f}s{_X}")
+
     n_pass = sum(1 for r in results if r["status"] == "PASS")
     total_checks = sum(a["total"] for r in results for a in r["per_act"].values())
     worst = max((a["worst"] for r in results for a in r["per_act"].values()), default=0.0)
@@ -659,7 +726,7 @@ def _engine():
 regress = _engine()
 LANE_FORMATS = ("fp32", "bf16", "int8")  # the formats gpnae_poly is built in
 LANE_MODEL = {"fp32": "hw", "bf16": "hw", "int8": "exact"}  # floats: bit-exact against the lane model, accuracy a point of its own; int8 runs both
-MODEL_CHECKS = ("check-model-fp32", "check-model-int8")  # gpnae_model against RTL words and fp32_down / the int8 references, no simulator
+MODEL_CHECKS = ("check-model-fp32", "check-model-bf16", "check-model-int8")  # gpnae_model against RTL words, fp32_down, the bf16 sigmoid gate, the int8 references; no simulator
 
 
 class LaneSpec(regress.Spec):
