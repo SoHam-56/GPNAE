@@ -57,6 +57,10 @@ def test_regression_target():
     assert len(one) == 1 and "--keep-going" not in one[0], one
     assert run("regression", "FMT=fp16").returncode != 0
     assert "--threads 3" in run("verilator", "SIM_THREADS=3").stdout
+    for fmt in ("int8", "fp16"):  # an exported FMT does not narrow make regression (only FMT= on its command line does)
+        r = subprocess.run(["make", "-s", "-n", "regression", f"PYTHON={sys.executable}"], cwd=reg.ROOT, capture_output=True, text=True, env=dict(env, FMT=fmt))
+        names = [x.split("--name ")[1].split()[0] for x in r.stdout.splitlines() if "--action point " in x]
+        assert r.returncode == 0 and names == reg.SPEC.points(False, ["fp32", "bf16", "int8"]), (fmt, r.stderr[-200:], names)
 
 
 MIN_TESTS = 4  # tests this file holds; fewer run means one was lost, which is a failure

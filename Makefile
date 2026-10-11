@@ -159,19 +159,20 @@ lint_fmt:
 
 .PHONY: default help verilator iverilog vcs view clean lint_fmt regression regression-summary
 
-# make regression: the model checks, then gpnae_poly bit-exact in fp32, bf16 and int8 (FMT=<f>: one format) and its accuracy
-# against the functions (fp32 gated at 1%, bf16 reported), each point its own target (make -j runs them side by side), then one table.
+# make regression: the model checks, gpnae_poly bit-exact in fp32, bf16, int8 and against the functions (fp32 gated, bf16 reported); one target per point, then one table.
 PYTHON  ?= python3
 FORMATS  = fp32 bf16 int8
-ifneq ($(origin FMT),undefined)
-ifneq ($(filter-out $(FORMATS),$(FMT))$(words $(FMT)),1)
+# Only FMT= on make's command line narrows it, not an exported FMT.
+REG_FMT  = $(if $(filter command line,$(origin FMT)),$(FMT))
+ifneq ($(REG_FMT),)
+ifneq ($(filter-out $(FORMATS),$(REG_FMT))$(words $(REG_FMT)),1)
 $(error Invalid FMT=$(FMT): must be one of fp32, bf16, int8)
 endif
 endif
 comma := ,
 empty :=
 space := $(empty) $(empty)
-REG_SELECT  = --formats $(subst $(space),$(comma),$(strip $(or $(FMT),$(FORMATS))))
+REG_SELECT  = --formats $(subst $(space),$(comma),$(strip $(or $(REG_FMT),$(FORMATS))))
 REG_DIR    ?= $(TB_DIR)/results/regression
 REG_SUMMARY = $(PYTHON) regression.py --action summary --results $(REG_DIR) $(REG_SELECT)
 ifneq ($(filter regression,$(MAKECMDGOALS)),)
