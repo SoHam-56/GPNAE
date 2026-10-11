@@ -10,3 +10,5 @@ __pycache__/
 *.ron
 *.wcfg
 testbenches/results/regression/
+# regression.py --test bf16_all: the RTL words TB_gpnae_poly dumps with +dump_got
+testbenches/stimulus/*_got.mem
