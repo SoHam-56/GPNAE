@@ -422,17 +422,21 @@ def write_stream_int8(lane, rng) -> dict:
     import gpnae_model as gm
     segs = []
     for act, code in INT8_ACTS:
-        segs.append((code, gm.int8_params(gm.INT8_CASES[act][0], code)))
+        segs.append((code, gm.int8_params(gm.INT8_CASES[act][0], code), gm.INT8_CASES[act][0]))
         if code <= 3:
-            segs.append((code, rand_params_int8(rng, code, True)))
-    segs += [(cw, gm.int8_params(gm.INT8_CASES["tanh"][1], 3)) for cw in (0, 6, 7)]  # every other control word runs tanh
-    seg_l, grp_l, bnd, q_all, y_all = [], [], [], [], []
-    for cw, p in segs:
+            segs.append((code, rand_params_int8(rng, code, True), None))
+    tc = gm.INT8_CASES["tanh"][1]
+    segs += [(cw, gm.int8_params(tc, 3), tc) for cw in (0, 6, 7)]  # every other control word runs tanh
+    seg_l, grp_l, bnd, q_all, y_all, funcs, quants = [], [], [], [], [], [], []
+    for cw, p, case in segs:
         script = STREAM_BYP if cw in (4, 5) else STREAM_POLY
         n_el = sum(n for _, n in script)
         q = np.concatenate([rng.permutation(256) for _ in range(-(-n_el // 256))]).astype(np.int64)[:n_el] - 128
         q_all += [int(v) for v in q]
         y_all += [int(v) for v in lane.run(q, cw, p)]
+        code = cw if cw in (1, 2, 4, 5) else 3
+        funcs += [INT8_ACTS[code - 1][0]] * n_el
+        quants += [int8_quant(code, case, p)] * n_el  # the element's function and scales, for the truth gate
         seg_l.append(f"{cw:02x}{len(script):02x}{p.mx:04x}{p.shx:02x}{p.zin & 0xFF:02x}{p.mout:08x}{p.shout & 0xFF:02x}"
                      f"{p.zout & 0xFF:02x}\n")
         for mode, n in script:
@@ -445,7 +449,24 @@ def write_stream_int8(lane, rng) -> dict:
     for name, lines in files.items():
         with open(os.path.join(STIM_DIR, name), "w") as fh:
             fh.write("".join(lines))
-    return {"segments": len(seg_l), "groups": len(grp_l), "elements": len(q_all), "starts": len(bnd)}
+    return {"segments": len(seg_l), "groups": len(grp_l), "elements": len(q_all), "starts": len(bnd), "q": np.array(q_all),
+            "func": np.array(funcs), "quant": [np.array([x[k] for x in quants]) for k in range(4)]}
+
+
+def truth_stream(stream, got) -> tuple:
+    """The gate on the protocol stream's RTL words (stream_got.mem), per function: (results, lines); None where the words are missing."""
+    res, lines = {}, []
+    for act, _ in INT8_ACTS:
+        m = stream["func"] == act
+        if got is None:
+            res[act] = None
+            continue
+        r = truth.gate("int8", act, stream["q"][m], got[m], quant=[v[m] for v in stream["quant"]])
+        lines.append(f"  stream   {truth.line(r)}")
+        print(f"        stream   {'PASS' if r.ok else 'FAIL'}  n {r.n}  worst {truth.worst_text(r.worst)} ({r.worst_lsb} LSB)  "
+              f"over {100 * truth.BOUND:g}%: {r.over}  over {100 * truth.TARGET:g}%: {r.over_target}  ({act})")
+        res[act] = r
+    return res, lines
 
 
 def int8_sets(seed) -> dict:
@@ -561,7 +582,7 @@ def run_int8(args) -> int:
     stream = write_stream_int8(lane, np.random.default_rng([args.seed, 13]))
     print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases, {N_RAND_INT8} random, {N_POS_INT8} positive SELU, {N_LAD_INT8} ladder edge and {N_SWEEP_INT8} scale sweep sets x 256 inputs per activation, "
               f"a {stream['elements']}-element protocol stream, seed {args.seed}\n{'='*78}"))
-    clear_got(ALL_ACTS)
+    clear_got(ALL_ACTS + ("stream",))
     raw, wall = run_make("poly", "+dump_got")
     os.makedirs(RESULTS_DIR, exist_ok=True)
     with open(os.path.join(RESULTS_DIR, "int8_exhaustive.log"), "w") as fh:
@@ -586,7 +607,9 @@ def run_int8(args) -> int:
     part = lambda a, k, n: f"{a} {n - bad[a][k]}/{n}" if ran(a) else f"{a} no result"
     print(hdr("      true-function gate (truth.py) on the RTL's words, every input of every set:"))
     t_res, t_lines = truth_int8(sets, {act: rtl_words(act, batches * per) for act, _ in INT8_ACTS})
-    t_line, t_bad = truth_verdict("int8", {act: [r] for act, r in t_res.items()})
+    s_res, s_lines = truth_stream(stream, rtl_words("stream", stream["elements"]))
+    t_lines += s_lines
+    t_line, t_bad = truth_verdict("int8", {act: [r, s_res[act]] for act, r in t_res.items()})  # the sets and the stream
     L = [f"GPNAE int8 lane, seed {args.seed}: the true-function gate on the RTL's words; bit-exact against gpnae_model is a diagnostic "
          f"that is also required (SIENNA's int8 golden composes the model); the model's words against exact_int8 are a diagnostic",
          t_line, *t_lines,

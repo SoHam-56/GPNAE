@@ -173,7 +173,23 @@ def test_int8_sets():
     assert np.array_equal(x, reg.fp32_dense_inputs(1)) and not np.array_equal(x, reg.fp32_dense_inputs(2))
 
 
-MIN_TESTS = 7  # tests this file holds; fewer run means one was lost, which is a failure
+def test_stream_gate():
+    """The protocol stream's words are gated per function with their segment's scales: the model's words pass where the sets do, a word 15 LSB off fails."""
+    import gpnae_model as gm
+    lane = gm.Lane(gm.INT8, gm.read_rom(os.path.join(reg.ROOT, gm.coeff_file(gm.INT8))))
+    with scratch_dirs():
+        st = reg.write_stream_int8(lane, np.random.default_rng([1, 13]))
+        y = reg.read_words(os.path.join(reg.STIM_DIR, "stream_exp.mem"))
+    assert st["q"].size == st["func"].size == y.size == st["elements"] and set(st["func"]) == {a for a, _ in reg.INT8_ACTS}
+    with contextlib.redirect_stdout(io.StringIO()):
+        res, _ = reg.truth_stream(st, y)
+        lin = np.flatnonzero(st["func"] == "linear")[3]
+        bad, _ = reg.truth_stream(st, np.where(np.arange(y.size) == lin, (y + 15 + 128) % 256 - 128, y))
+        none, _ = reg.truth_stream(st, None)
+    assert res["linear"].ok and res["tanh"].ok and not bad["linear"].ok and bad["linear"].over == 1 and none["selu"] is None
+
+
+MIN_TESTS = 8  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]

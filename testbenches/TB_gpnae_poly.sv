@@ -534,6 +534,14 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
           end
         end
       s_on = 0;
+      // +dump_got: the stream's outputs go to stream_got.mem, so regression.py gates them on the true function.
+      if ($test$plusargs("dump_got")) begin
+        int dump_h;
+        dump_h = $fopen({STIM_DIR, "stream_got.mem"}, "w");
+        if (dump_h == 0) $fatal(1, "cannot write stream_got.mem");
+        for (int i = 0; i < s_n && i < S_EL; i++) $fwrite(dump_h, "%h\n", s_got[i]);
+        $fclose(dump_h);
+      end
       $display("  ----------------------------------------------");
       $display("  STREAM : elements %0d  exact %0d  failed %0d  missing %0d  extra %0d", n_el, n_el - fails - missing, fails,
                missing, extra);
