@@ -146,6 +146,14 @@ def test_truth_wiring():
         reg.run_make = lambda lane="gpnae", sim_args="": fake_tb(rnd)(lane, "")  # the TB wrote no dump
         code, out = main_exit(["--lane", "poly", "--format", "bf16", "--model", "exact", "--test", "act_sweep"])
         assert code == 1 and "no RTL words" in out and "ACCURACY: FAIL" in out and "NO RTL WORDS" in out, out[-600:]
+        keep = reg.truth_verdict
+        reg.truth_verdict = lambda f, runs: ("ACCURACY: FAIL (planted)", True)  # every pattern passes, the verdict alone fails
+        reg.run_make = fake_tb(rnd)
+        try:
+            code, out = main_exit(["--lane", "poly", "--format", "bf16", "--model", "hw", "--test", "act_sweep"])
+        finally:
+            reg.truth_verdict = keep
+        assert code == 1 and "ACCURACY: FAIL (planted)" in out and "Verdict : All patterns passed" in out, out[-400:]
     v, n = reg.truth_verdict("bf16", {})
     assert n and v.startswith("ACCURACY: FAIL") and "no gated run" in v  # nothing gated is not a pass
 

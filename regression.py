@@ -890,6 +890,7 @@ def main() -> None:
         print(f"  {sym}  {r['name']}")
     print(f"\n  Element checks : {total_checks}")
     print(f"  Worst rel error: {worst:.4f}%   (tolerance {rel_tol*100:.4f}%)" + ("  the TB's check against its golden, a diagnostic" if poly else ""))
+    acc_bad = False
     if poly:
         acc, acc_bad = truth_verdict(fmt.name, truth_runs)
         print(err(acc) if acc_bad else ok(acc))
@@ -903,7 +904,7 @@ def main() -> None:
     print(f"  Report  : {write_report(results, fmt, args.batches, args.per_batch, args.model, ranges, args.seed, args.abs_tol)}")
     print(hdr(f"{'='*78}\n"))
 
-    sys.exit(0 if n_pass == len(results) else 1)
+    sys.exit(0 if n_pass == len(results) and not acc_bad else 1)  # a failed ACCURACY verdict fails the run on its own
 
 
 # ── make regression: the model checks, gpnae_poly's lane in fp32, bf16 and int8 ──
