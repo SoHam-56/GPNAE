@@ -245,6 +245,9 @@ def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol)
 INT8_ACTS = (("selu", 1), ("sigmoid", 2), ("tanh", 3), ("relu", 4), ("linear", 5))  # TB_gpnae_poly's order in int8
 N_RAND_INT8, N_SAT_INT8 = 32, 8  # random lane parameter sets per activation, and how many saturate the rescale; bit-exact only
 N_POS_INT8 = 64  # positive SELU sets per activation, x from 0 past the int32 limit; the last two hit it exactly; bit-exact only
+N_LAD_INT8 = 41  # sigmoid ladder edge sets: t_i - 1 and t_i for the 19 thresholds, the hand-over 5119 and 5120, a rescale saturating at -32768
+N_SWEEP_INT8 = 64  # the scale sweep: s_in log-spaced 1/128 to 1/8, every int8 input; bit-exact only
+GATED_INT8 = ("sigmoid",)  # activations whose gated accuracy fails the run; tanh and SELU stay reported
 STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2),
                (0, 16), (2, 1))  # (mode, elements): 0 puts with last on the final one, 1 the final put held back, 2 puts while busy
 STREAM_BYP = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 8), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2), (0, 16),
@@ -285,6 +288,35 @@ def pos_hit(x):
             if mx <= 32767 and ((d * mx + ((1 << shx) >> 1)) >> shx) == x:
                 return mx, shx
     raise ValueError(f"no int8 input rescales to {x}")
+
+
+def ladder_hit(x):
+    """(mx, shx, d): with z_in = 0, input d rescales to x and input -d to -x exactly, d in 1..127."""
+    for shx in range(15, -1, -1):
+        h = (1 << shx) >> 1
+        for d in range(127, 0, -1):
+            mx = -(-(x * (1 << shx) - h) // d)  # the smallest mx whose rounded rescale of d reaches x
+            if mx <= 32767 and (d * mx + h) >> shx == x and (-d * mx + h) >> shx == -x:
+                return mx, shx, d
+    raise ValueError(f"no int8 input pair rescales to +-{x}")
+
+
+def ladder_xs():
+    """The Q4.11 value each ladder edge set lands a code on (and its negation), then -32768 for the saturating set."""
+    import gpnae_model as gm
+    return [v for t in gm.SIG_LAD_T for v in (t - 1, t)] + [gm.SIG_LAD_X0 - 1, gm.SIG_LAD_X0, -32768]
+
+
+def ladder_sets():
+    """Two rescales per threshold (codes t_i - 1 and t_i, both signs), the hand-over 5119 and 5120, and q = -128 at x = -32768."""
+    import gpnae_model as gm
+    return [gm.Int8Params(*ladder_hit(x)[:2], 0, 0, 0, 0) for x in ladder_xs()[:-1]] + [gm.Int8Params(32767, 0, 0, 0, 0, 0)]
+
+
+def sweep_sets(rng):
+    """The scale sweep: 64 rescales, s_in log-spaced from 1/128 to 1/8, z_in random in [-64, 64]."""
+    import gpnae_model as gm
+    return [gm.Int8Params(*gm.rescale_params(float(s)), int(rng.integers(-64, 65)), 0, 0, 0) for s in np.geomspace(1 / 128, 1 / 8, N_SWEEP_INT8)]
 
 
 def rescale_saturates(p) -> bool:
@@ -353,7 +385,13 @@ def run_int8(args) -> int:
     assert all(len(gm.INT8_CASES[a]) == n_cases for a, _ in INT8_ACTS), "every activation needs the same number of cases"
     case_batches = n_cases * 256 // per
     rand_batches = (n_cases + N_RAND_INT8) * 256 // per
-    batches = (n_cases + N_RAND_INT8 + N_POS_INT8) * 256 // per  # the cases first, then the random sets, then the positive SELU sets
+    pos_batches = (n_cases + N_RAND_INT8 + N_POS_INT8) * 256 // per
+    lad_batches = pos_batches + N_LAD_INT8 * 256 // per
+    batches = lad_batches + N_SWEEP_INT8 * 256 // per  # cases, random, positive SELU, ladder edges, the scale sweep
+    lad_sets, sweep = ladder_sets(), sweep_sets(np.random.default_rng([args.seed, 16]))
+    assert len(lad_sets) == N_LAD_INT8
+    rl = np.random.default_rng([args.seed, 15])  # their input order: a new stream, so the earlier sets' stimulus is unchanged
+    extra_q = [rl.permutation(256).astype(np.int64) - 128 for _ in range(N_LAD_INT8 + N_SWEEP_INT8)]
     fmt = types.SimpleNamespace(name="int8", width=8, exp_bits=0, man_bits=7)
     coeff = gm.coeff_file(gm.INT8)
     lane = gm.Lane(gm.INT8, gm.read_rom(os.path.join(ROOT, coeff)))
@@ -388,6 +426,10 @@ def run_int8(args) -> int:
             stim += [int(v) for v in q]
             gold += [int(v) for v in lane.run(q, code, p)]
             par += [p] * (256 // per)
+        for p, q in zip(lad_sets + sweep, extra_q):
+            stim += [int(v) for v in q]
+            gold += [int(v) for v in lane.run(q, code, p)]
+            par += [p] * (256 // per)
         with open(os.path.join(STIM_DIR, f"{act}_in.mem"), "w") as fh:
             fh.write("".join(f"{v & 0xFF:02x}\n" for v in stim))
         with open(os.path.join(STIM_DIR, f"{act}_exp.mem"), "w") as fh:
@@ -397,7 +439,7 @@ def run_int8(args) -> int:
                              for p in par))
     n_sat = {act: sum(rescale_saturates(p) for p in s) for act, s in rand_sets.items()}
     stream = write_stream_int8(lane, np.random.default_rng([args.seed, 13]))
-    print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases, {N_RAND_INT8} random and {N_POS_INT8} positive SELU sets x 256 inputs per activation, "
+    print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases, {N_RAND_INT8} random, {N_POS_INT8} positive SELU, {N_LAD_INT8} ladder edge and {N_SWEEP_INT8} scale sweep sets x 256 inputs per activation, "
               f"a {stream['elements']}-element protocol stream, seed {args.seed}\n{'='*78}"))
     raw, wall = run_make("poly")
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -406,10 +448,10 @@ def run_int8(args) -> int:
     parsed = parse_log(raw, expect_total=batches * per, expect_acts=len(INT8_ACTS))
     for act, a in parsed["per_act"].items():
         print_activation(act, a)
-    bad = {act: [0, 0, 0] for act, _ in INT8_ACTS}  # wrong or missing outputs: cases, random sets, positive SELU sets
+    bad = {act: [0] * 5 for act, _ in INT8_ACTS}  # wrong or missing outputs: cases, random, positive SELU, ladder edge, scale sweep
     for m in re.finditer(r"BATCHFAIL (\w+) b(\d+) : (\d+)", raw):
         if m.group(1) in bad:
-            bad[m.group(1)][(int(m.group(2)) >= case_batches) + (int(m.group(2)) >= rand_batches)] += int(m.group(3))
+            bad[m.group(1)][sum(int(m.group(2)) >= b for b in (case_batches, rand_batches, pos_batches, lad_batches))] += int(m.group(3))
     se = re.search(r"STREAM : elements (\d+)\s+exact (\d+)\s+failed (\d+)\s+missing (\d+)\s+extra (\d+)", raw)
     sb = re.search(r"STREAM boundaries : expected (\d+)\s+observed (\d+)\s+wrong (\d+)\s+edge errors (\d+)", raw)
     stream_ok = bool(se and sb) and int(se.group(1)) == stream["elements"] and int(se.group(2)) == stream["elements"] \
@@ -434,6 +476,10 @@ def run_int8(args) -> int:
          f"{int(gm.selu_pos_saturates(pos_x).sum())} (x = SELU_POS_SAT - 1 hit {int((pos_x == gm.SELU_POS_SAT - 1).sum())}, "
          f"x = SELU_POS_SAT hit {int((pos_x == gm.SELU_POS_SAT).sum())}); the other activations "
          + "  ".join(part(a, 2, n_p) for a, _ in INT8_ACTS[1:]),
+         f"  sigmoid ladder edge sets ({N_LAD_INT8} per activation: t_i - 1 and t_i for each threshold, 5119 and 5120, both signs, and a "
+         f"rescale saturating at -32768; bit-exact only): " + "  ".join(part(a, 3, N_LAD_INT8 * 256) for a, _ in INT8_ACTS),
+         f"  scale sweep ({N_SWEEP_INT8} per activation, s_in 1/128 to 1/8; bit-exact only): "
+         + "  ".join(part(a, 4, N_SWEEP_INT8 * 256) for a, _ in INT8_ACTS),
          f"  protocol stream ({stream['segments']} segments, {stream['groups']} groups, no reset between groups): "
          + (f"exact {se.group(2)}/{se.group(1)}, failed {se.group(3)}, missing {se.group(4)}, extra {se.group(5)}; group starts "
             f"{sb.group(2)} observed of {sb.group(1)} expected, {sb.group(3)} wrong, {sb.group(4)} edge errors"
@@ -449,14 +495,21 @@ def run_int8(args) -> int:
                  f"{100 * a.worst_rel:.2f}% where |d| > 1 LSB, worst {a.worst_lsb} LSB, {a.real_lsb:.2f} LSB against the "
                  f"unquantized function")
     missed = [act for act, a in tot.items() if not a.ok]
-    L.append(f"ACCURACY: {'PASS' if not missed else 'MISSED'} ({tol} on every gated output"
-             + (f"; outside: {', '.join(missed)}, an open accuracy item" if missed else "") + "; reported, not gated)")
+    n_gated = {act: 256 * sum(c.gated for c in gm.INT8_CASES[act]) for act in tot}
+    gated_miss = [a for a in GATED_INT8 if a in missed]
+    L.append(f"ACCURACY: {'FAIL' if gated_miss else 'PASS' if not missed else 'MISSED'} ({tol}; gated: "
+             + ", ".join(f"{a} {tot[a].fail} of {n_gated[a]} outside" for a in GATED_INT8) + "; reported, not gated: "
+             + ", ".join(f"{a} {tot[a].fail} of {n_gated[a]} outside" for a in tot if a not in GATED_INT8) + ")")
     k_rand = len(L)
     L.append("random sets (mx shx z_in mout shout z_out), in stimulus order after the cases:")
     for act, s in rand_sets.items():
         L.append(f"  {act}: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in s))
     L.append("positive SELU sets (mx shx z_in mout shout z_out), in stimulus order after the random sets:")
     L.append("  selu: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in pos_sets))
+    L.append("sigmoid ladder edge sets (mx shx x; z_in = 0, mout = shout = z_out = 0), in stimulus order after the positive SELU sets:")
+    L.append("  " + " ".join(f"({p.mx} {p.shx} {x})" for p, x in zip(lad_sets, ladder_xs())))
+    L.append("scale sweep sets (s_in mx shx z_in; mout = shout = z_out = 0), in stimulus order after the ladder edge sets:")
+    L.append("  " + " ".join(f"({s:.6f} {p.mx} {p.shx} {p.zin})" for p, s in zip(sweep, np.geomspace(1 / 128, 1 / 8, N_SWEEP_INT8))))
     with open(os.path.join(RESULTS_DIR, "gpnae_int8_report.log"), "w") as fh:
         fh.write("\n".join(L) + "\n")
     fields = lambda a: {"pass": a.ok, "fail": a.fail, "worst_rel": a.worst_rel, "worst_lsb": a.worst_lsb,
@@ -467,10 +520,10 @@ def run_int8(args) -> int:
         summary[act]["cases"].append({"s_in": float(case.s_in), "z_in": int(case.z_in), "s_out": float(case.s_out),
                                       "z_out": int(case.z_out), "gated": bool(case.gated), **fields(a)})
     with open(os.path.join(RESULTS_DIR, "gpnae_int8_accuracy.json"), "w") as fh:
-        json.dump({"seed": args.seed, "bitexact": exact_ok, "activations": summary}, fh, indent=1)
+        json.dump({"seed": args.seed, "bitexact": exact_ok, "gated": list(GATED_INT8), "activations": summary}, fh, indent=1)
     print("\n".join(L[1:k_rand]))
     print(f"  {_D}{wall:.1f}s{_X}")
-    return 0 if exact_ok else 1
+    return 0 if exact_ok and not gated_miss else 1
 
 
 def main() -> None:
