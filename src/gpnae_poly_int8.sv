@@ -36,7 +36,11 @@ module gpnae_poly_int8 #(
   localparam int PS_LAT = MUL_LAT + RQ_LAT;  // SELU post stage: multiply, then requantize
 
   localparam logic signed [W-1:0] T_SELU = -16'sd8192;  // saturation in Q4.11, the float lane's thresholds: SELU x < -4
-  localparam logic signed [W-1:0] T_SIG = 16'sd7168;  // sigmoid |x| > 3.5
+  localparam logic signed [W-1:0] SIG_LAD_X0 = 16'sd5120;  // sigmoid |x| >= 2.5: the exact ladder below, no polynomial (gpnae_model.SIG_LAD_X0)
+  localparam int SIG_LAD_N = 19;
+  localparam logic [SIG_LAD_N*W-1:0] SIG_LAD_T = {16'd12773, 16'd10515, 16'd9460, 16'd8763, 16'd8240, 16'd7821, 16'd7471,
+                                                  16'd7170, 16'd6905, 16'd6669, 16'd6456, 16'd6261, 16'd6082, 16'd5916,
+                                                  16'd5761, 16'd5616, 16'd5479, 16'd5350, 16'd5228};  // where round(256 sigmoid(-|x|)) steps (fit_poly_coeffs); flat, t_i at [i*W +: W]
   localparam logic signed [W-1:0] T_TANH = 16'sd8192;  // tanh |x| > 4
   localparam logic signed [W-1:0] SELU_SAT = -16'sd3601;  // -lambda*alpha in Q4.11
   localparam logic signed [W-1:0] ONE_Q11 = 16'sd2048;  // 1.0 in Q4.11
@@ -83,6 +87,17 @@ module gpnae_poly_int8 #(
     if (r > 17'sd127) return 8'h7F;
     if (r < -17'sd128) return 8'h80;
     return r[7:0];
+  endfunction
+
+  // sigmoid for |x| >= 2.5: k = 19 - #{t <= |x|} is round(256 sigmoid(-|x|)); k - 128 for x < 0, min(127, 128 - k) for x > 0.
+  function automatic logic [7:0] sig_ladder(input logic [W-1:0] x);
+    logic [W-1:0] ax;
+    logic [4:0] k;
+    ax = abs_sat(x);
+    k  = 5'(SIG_LAD_N);
+    for (int i = 0; i < SIG_LAD_N; i++) if (ax >= SIG_LAD_T[i*W+:W]) k = k - 5'd1;
+    if (x[W-1]) return {3'b000, k} - 8'd128;
+    return (k == 5'd0) ? 8'h7F : 8'd128 - {3'b000, k};
   endfunction
 
   // tanh output from x * P in units of 2^-22: round(128 y) = (p + 2^14) >> 15, clamped to int8.
@@ -219,7 +234,7 @@ module gpnae_poly_int8 #(
   assign x_raw = rescale_raw(rm_res, gp_shx_i);
   assign x_new = rescale(x_raw);
   assign x_sat = is_selu ? ($signed(x_new) < T_SELU)
-               : is_sig  ? (($signed(x_new) > T_SIG) || ($signed(x_new) < -T_SIG))
+               : is_sig  ? (($signed(x_new) >= SIG_LAD_X0) || ($signed(x_new) <= -SIG_LAD_X0))
                          : (($signed(x_new) > T_TANH) || ($signed(x_new) < -T_TANH));
   assign p_cur = pol_buf[iss_idx[SW-1:0]];
   assign x_cur = x_buf[iss_idx[SW-1:0]];
@@ -472,7 +487,7 @@ module gpnae_poly_int8 #(
 
       G_POST:
         if (is_sig || (is_tanh && sat_buf[iss_idx[SW-1:0]])) begin
-          res_buf[iss_idx[SW-1:0]] <= sat_buf[iss_idx[SW-1:0]] ? (neg_buf[iss_idx[SW-1:0]] ? 8'h80 : 8'h7F)
+          res_buf[iss_idx[SW-1:0]] <= sat_buf[iss_idx[SW-1:0]] ? (is_sig ? sig_ladder(x_cur) : (neg_buf[iss_idx[SW-1:0]] ? 8'h80 : 8'h7F))
                                                                : quant_sig(y_s);
         end else begin
           pm_a <= (is_selu && !neg_buf[iss_idx[SW-1:0]]) ? xw_buf[iss_idx[SW-1:0]]
