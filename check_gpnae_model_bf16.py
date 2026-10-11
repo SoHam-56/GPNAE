@@ -66,8 +66,10 @@ for code, name in ((3, "tanh"), (1, "SELU")):
     t = np.asarray(lane.in_tail(X, code))
     new_o, old_o = lane.run(X, code), old.run(X, code)
     w_new, w_old = rel_worst(code, X, new_o, t), rel_worst(code, X, old_o, t)
+    rest = np.abs(gm.to_float(BF16, X)) >= 2.0 ** -120 if code == 3 else np.ones(X.shape, dtype=bool)  # tiny tanh: 0.93 x flushes to 0, as built
     print(f"{name:<6} tail inputs {int(t.sum())}: {int((new_o != old_o).sum())} words change, tail worst {100 * w_old:.3f}% -> {100 * w_new:.3f}%; "
-          f"overall {100 * rel_worst(code, X, old_o, t | ~t):.3f}% -> {100 * rel_worst(code, X, new_o, t | ~t):.3f}%")
+          f"overall{' (|x| >= 2^-120 as the study judges; below, 0.93 x flushes to 0 as built)' if code == 3 else ''} "
+          f"{100 * rel_worst(code, X, old_o, rest):.3f}% -> {100 * rel_worst(code, X, new_o, rest):.3f}%")
     eq(f"{name}: the poly path is unchanged", bool((new_o[~t] == old_o[~t]).all()), True)
     eq(f"{name}: the fp32 tail is no worse", w_new <= w_old, True)
 
