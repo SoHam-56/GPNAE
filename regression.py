@@ -587,10 +587,10 @@ def run_int8(args) -> int:
     print(hdr("      true-function gate (truth.py) on the RTL's words, every input of every set:"))
     t_res, t_lines = truth_int8(sets, {act: rtl_words(act, batches * per) for act, _ in INT8_ACTS})
     t_line, t_bad = truth_verdict("int8", {act: [r] for act, r in t_res.items()})
-    L = [f"GPNAE int8 lane, seed {args.seed}: the true-function gate on the RTL's words; bit-exact against gpnae_model and the model's "
-         f"words against exact_int8 with GPNAE's tolerance are diagnostics",
+    L = [f"GPNAE int8 lane, seed {args.seed}: the true-function gate on the RTL's words; bit-exact against gpnae_model is a diagnostic "
+         f"that is also required (SIENNA's int8 golden composes the model); the model's words against exact_int8 are a diagnostic",
          t_line, *t_lines,
-         f"BITEXACT: {'PASS' if exact_ok else (parsed['status'] if parsed['status'] != 'PASS' else 'FAIL')} (a diagnostic)  "
+         f"BITEXACT: {'PASS' if exact_ok else (parsed['status'] if parsed['status'] != 'PASS' else 'FAIL')} (diagnostic; also required)  "
          + "  ".join(f"{a} {v['exact']}/{v['total']}" for a, v in parsed["per_act"].items())
          + (f"  stream {se.group(2)}/{se.group(1)}" if se else "  stream NO-RESULT"),
          "  INT8_CASES, every int8 input: " + "  ".join(part(a, 0, n_c) for a, _ in INT8_ACTS),
@@ -933,7 +933,7 @@ class LaneSpec(regress.Spec):
             return regress.marker_verdict(text, rc, (r"^ALL \d+ PASSED$",))
         if name in MODEL_CHECKS:
             return regress.marker_verdict(text, rc, (r"^RESULT: PASSED$", r": 0 errors$"), (r"RESULT: FAILED",))
-        if name.startswith("int8/"):
+        if name.startswith("int8/"):  # BITEXACT is a diagnostic but also required: SIENNA's int8 golden composes gpnae_model
             return regress.marker_verdict(text, rc, (r"^BITEXACT: PASS", r"^ACCURACY: PASS"), (r"^ACCURACY: FAIL",))
         gate = () if name == "fp32/taylor" else (r"^ACCURACY: PASS",)  # every gpnae_poly point carries the true-function gate
         v = regress.marker_verdict(text, rc, (r"Verdict : All patterns passed",) + gate, (r"^ACCURACY: FAIL",))
