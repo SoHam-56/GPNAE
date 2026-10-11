@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""gpnae_model's bf16 lane: the sigmoid gate over every finite bf16 input (spec Decision 5), the lanes it must fail on, the vectorized tail, the RTL's literals."""
+"""gpnae_model's bf16 lane: the sigmoid gate over every finite bf16 input (spec Decision 5), the lanes it must fail on, the study's d3 words, 3efe6f6's outputs, the vectorized tail, the RTL's literals."""
+import hashlib
 import os
 import re
 import sys
@@ -78,6 +79,20 @@ for ln, xs, tag in ((lane, X, "bf16"), (old, X, "bf16 as built"), (l32, x32, "fp
         i = np.flatnonzero(np.asarray(ln.in_tail(xs, code)))[::16]
         vec, one = ln.tail_v(xs[i], code), np.array([ln.tail(int(v), code) for v in xs[i]])
         eq(f"{tag} code {code}: tail_v equals tail on {i.size} inputs", int((vec != one).sum()), 0)
+
+# x < 0 words equal the study's d3 bit for bit: its cand_d.py (s_fp32_newton, narrowed) wrote check_gpnae_model_bf16_d3.mem.
+neg = (((X >> 15) & 1) == 1) & ((X & 0x7FFF) != 0)
+d3 = np.array([int(v, 16) for v in open(os.path.join(gm.ROOT, "check_gpnae_model_bf16_d3.mem")) if v.strip()], dtype=np.int64)
+eq("the study's d3 words: one per x < 0 input", (d3.size, int(neg.sum())), (32639, 32639))
+eq("x < 0 sigmoid words equal the study's d3", int((out[neg] != d3).sum()), 0)
+
+# fp32 and the as-built bf16 lane equal 3efe6f6's gpnae_model: digests of its outputs on the same inputs.
+OLD = {("bf16", 1): "1e4e3426ffc8616d", ("bf16", 2): "352049b8db595585", ("bf16", 3): "3c0feb455c9459c0", ("bf16", 4): "2bdacb7c6abe05e6",
+       ("bf16", 5): "1dc1e23df86425b9", ("fp32", 1): "0373827d49a64d0b", ("fp32", 2): "b77b0fdc7958ac0f", ("fp32", 3): "8809e320cfb6bb98"}
+digest = lambda a: hashlib.sha256(np.asarray(a, dtype="<i8").tobytes()).hexdigest()[:16]
+for (tag, code), want in OLD.items():
+    ln, xs = (old, X) if tag == "bf16" else (l32, x32)
+    eq(f"{tag}{' as built' if tag == 'bf16' else ''} code {code} on {xs.size} inputs equals 3efe6f6's model", digest(ln.run(xs, code)), want)
 
 # fp32 is untouched: no Newton, its own tail, sigmoid x < 0 inside 3.5 on the polynomial.
 eq("fp32 lane: no Newton, no wide tail, x = -1 not a tail input", (l32.newton, l32.wide, l32.in_tail(0xBF800000, 2)), (0, False, False))
