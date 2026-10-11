@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Known values for gpnae_model's int8 lane: rounding and saturation of each step, the fixed output quantizations, SELU through the requantizer."""
+import os
+import re
 import sys
 
 import numpy as np
@@ -36,7 +38,9 @@ eq("16-bit ROM words read as two's complement", gm.Lane(gm.INT8, [0xFFFF] + [0] 
 zero = gm.Lane(gm.INT8, [0] * 32)  # P = 0 everywhere, so only the non-polynomial paths show
 p = gm.Int8Params(mx=26214, shx=8, zin=0, mout=0, shout=0, zout=0)  # s_in = 0.05: x = 102.4 q in Q4.11
 eq("tanh, zero table: x * 0 inside +/-4, saturated outside", zero.run(np.array([0, 80, 81, -80, -81]), 3, p), [0, 0, 127, 0, -128])
-eq("sigmoid, zero table: P = 0, 1 - P = 1 inside +/-3.5, saturated outside", zero.run(np.array([70, 71, -70, -71]), 2, p), [-128, 127, 127, -128])
+zero_2a = gm.Lane(gm.INT8, [0] * 32, ladder=False)  # 2a's sigmoid, which saturates past 3.5 (the ladder takes over from 2.5)
+eq("sigmoid, zero table, ladder off: P = 0, 1 - P = 1 inside +/-3.5, saturated outside", zero_2a.run(np.array([70, 71, -70, -71]), 2, p), [-128, 127, 127, -128])
+eq("sigmoid, zero table, ladder on: the ladder at x = +-7168, +-7270 whatever the table", zero.run(np.array([70, 71, -70, -71]), 2, p), [120, 121, -120, -121])
 p2 = gm.Int8Params(mx=26214, shx=8, zin=0, mout=1 << 30, shout=-17, zout=3)  # output multiplier 2^-18: 1/16 per LSB in 2^-22
 eq("SELU x >= 0: lambda x, requantized", zero.run(np.array([10, 0]), 1, p2), [11, 3])
 eq("SELU -4 <= x < 0: x * P = 0 with a zero table", zero.run(np.array([-5]), 1, p2), [3])
@@ -62,6 +66,54 @@ eq("merge_acc sums counts, keeps the worst", (m.ok, m.fail, m.worst_rel, m.worst
 cs = gm.Case(1 / 32, 0, 1 / 256, -128, True)  # sigmoid golden at q = 0: 0, i.e. 128 LSB above the zero point -128
 a = gm.accuracy_int8(np.array([4, 9]), np.array([0, 0]), 2, cs)
 eq("tolerance measured from the output zero point", (a.ok, a.fail, a.worst_rel, a.worst_lsb), (False, 1, 0.0703125, 9))
+
+ROM = gm.read_rom(os.path.join(gm.ROOT, gm.coeff_file(gm.INT8)))
+lad, off = gm.Lane(gm.INT8, ROM), gm.Lane(gm.INT8, ROM, ladder=False)  # the lane as built, and 2a's
+eq("ladder constants: 19 rising codes from 5228 to 12773, from x = 5120",
+   (gm.SIG_LAD_X0, len(gm.SIG_LAD_T), gm.SIG_LAD_T[0], gm.SIG_LAD_T[-1], int(all(np.diff(gm.SIG_LAD_T) > 0))), (5120, 19, 5228, 12773, 1))
+eq("sig_ladder at its edges and the Q4.11 rail",
+   gm.sig_ladder(np.array([5120, 5227, 5228, 12772, 12773, 32767, -5120, -5227, -5228, -12772, -12773, -32768])),
+   [109, 109, 110, 127, 127, 127, -109, -109, -110, -127, -128, -128])
+dense = gm.Case(1 / 2048, 0, 1 / 256, -128, True)  # identity rescale, sigmoid's fixed output quantization
+X = np.arange(-32768, 32768, dtype=np.int64)
+p_id = gm.int8_params(dense, 2)
+eq("the dense sweep's rescale is the identity", int(np.sum(gm.rescale(X, 0, p_id.mx, p_id.shx) != X)), [0])
+ax = np.abs(X) >= gm.SIG_LAD_X0
+eq("ladder = exact_int8 at every |x| >= 2.5", int(np.sum(gm.sig_ladder(X[ax]) != gm.exact_int8(X[ax], 2, dense))), [0])
+y_lad, y_off = lad.run(X, 2, p_id), off.run(X, 2, p_id)
+eq("continuity at the hand-over: the ladder at +-5120 and the polynomial at +-5119 agree with the lane",
+   [int(y_lad[X == v][0] == gm.sig_ladder(np.array([v]))[0]) for v in (5120, -5120)] + [int(y_lad[X == v][0] == y_off[X == v][0]) for v in (5119, -5119)],
+   [1, 1, 1, 1])
+eq("the lane is the ladder at every |x| >= 2.5", int(np.sum(y_lad[ax] != gm.sig_ladder(X[ax]))), [0])
+eq("below 2.5 the lane is 2a's polynomial, unchanged", int(np.sum(y_lad[~ax] != y_off[~ax])), [0])
+a = gm.accuracy_int8(y_lad, X, 2, dense)
+eq("sigmoid dense with the ladder: 0 of 65536 outside, worst 2 LSB", (a.fail, a.worst_lsb), (0, 2))
+eq("sigmoid dense without it: 2a's 3370 outside", (gm.accuracy_int8(y_off, X, 2, dense).fail,), (3370,))
+q = np.arange(-128, 128, dtype=np.int64)
+gated = [c for c in gm.INT8_CASES["sigmoid"] if c.gated]
+g = gm.merge_acc(gm.accuracy_int8(lad.run(q, 2, gm.int8_params(c, 2)), q, 2, c) for c in gated)
+eq("sigmoid gated with the ladder: 0 of 1280 outside", (g.fail, 256 * len(gated)), (0, 1280))
+late = gm.Lane(gm.INT8, ROM, lad_x0=7168)  # the spec's rejected start at 3.5
+eq("a ladder from 3.5 leaves 24 dense misses (spec)", (gm.accuracy_int8(late.run(X, 2, p_id), X, 2, dense).fail,), (24,))
+for code, name in ((1, "selu"), (3, "tanh")):
+    for c in gm.INT8_CASES[name]:
+        eq(f"{name} unchanged by the ladder ({c.s_in:.4f}, {c.z_in})",
+           int(np.sum(lad.run(q, code, gm.int8_params(c, code)) != off.run(q, code, gm.int8_params(c, code)))), [0])
+
+
+def rtl_ladder(path=os.path.join(gm.ROOT, "src", "gpnae_poly_int8.sv")):
+    """gpnae_poly_int8's SIG_LAD_X0, SIG_LAD_T (in index order; a flat vector, t_0 rightmost) and SIG_LAD_N literals."""
+    s = open(path).read()
+    x0 = re.findall(r"localparam\s+logic\s+signed\s+\[W-1:0\]\s+SIG_LAD_X0\s*=\s*16'sd(\d+);", s)
+    n = re.findall(r"localparam\s+int\s+SIG_LAD_N\s*=\s*(\d+);", s)
+    m = re.findall(r"localparam\s+logic\s+\[SIG_LAD_N\s*\*\s*W\s*-\s*1:0\]\s+SIG_LAD_T\s*=\s*\{([^}]*)\}\s*;", s)
+    t = tuple(int(v) for v in reversed(re.findall(r"16'd(\d+)", m[0]))) if len(m) == 1 else None
+    return (int(x0[0]) if len(x0) == 1 else None, t, int(n[0]) if len(n) == 1 else None)
+
+
+# SIG_LAD_T equal to the model's fixes the literal count, so SIG_LAD_N = len(gm.SIG_LAD_T) pins it to both.
+eq("gpnae_poly_int8's ladder literals are gpnae_model's (SIG_LAD_X0, SIG_LAD_T, SIG_LAD_N)", rtl_ladder(),
+   (gm.SIG_LAD_X0, gm.SIG_LAD_T, len(gm.SIG_LAD_T)))
 
 print(f"check_gpnae_model_int8: {errs} errors")
 print(f"RESULT: {'PASSED' if errs == 0 else 'FAILED'}")

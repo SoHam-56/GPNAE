@@ -194,6 +194,9 @@ Q = 11  # Q4.11
 SETS_INT8 = {1: (0, 2), 2: (9, 3), 3: (16, 3)}  # (ROM base, degree) per control word; Task 10's fit sets it
 T_SELU, T_SIG, T_TANH = -8192, 7168, 8192  # the float lane's thresholds in Q4.11: SELU x < -4, sigmoid |x| > 3.5, tanh |x| > 4
 THRESH = {1: T_SELU, 2: T_SIG, 3: T_TANH}
+SIG_LAD_X0 = 5120  # sigmoid from |x| >= 2.5 (Q4.11) is the exact ladder below, not the polynomial
+SIG_LAD_T = (5228, 5350, 5479, 5616, 5761, 5916, 6082, 6261, 6456, 6669, 6905, 7170, 7471, 7821, 8240, 8763, 9460, 10515,
+             12773)  # where round(256 sigmoid(-|x|)) steps; fit_poly_coeffs.sig_ladder_thresholds() derives them
 SELU_SAT, ONE_Q11, LAMBDA_Q14 = -3601, 2048, 17215  # -lambda*alpha and 1.0 in Q4.11, lambda in Q1.14
 XW = 24  # gpnae_poly_int8's unsaturated x: |q - z_in| <= 255 and mx < 2^15 keep |(q - z_in) * mx| below 2^23
 SELU_POS_SAT = -(-(1 << 34) // LAMBDA_Q14)  # the smallest unsaturated x where floor(lambda * x / 2^3) leaves int32
@@ -268,6 +271,14 @@ def quant_sig(y):
 def quant_tanh(p):
     """tanh output from the product x * P in units of 2^-22: round(128 y) = (p + 2^14) >> 15, clamped to int8."""
     return np.clip((np.asarray(p, dtype=np.int64) + (1 << 14)) >> 15, -128, 127)
+
+
+def sig_ladder(x, t=SIG_LAD_T):
+    """sigmoid for |x| >= SIG_LAD_X0: k = len(t) - #{t_i <= |x|} = round(256 sigmoid(-|x|)); k - 128 for x < 0, min(127, 128 - k) for x > 0."""
+    x = np.asarray(x, dtype=np.int64)
+    ax = np.minimum(np.abs(x), 32767)
+    k = len(t) - (ax[..., None] >= np.asarray(t, dtype=np.int64)).sum(axis=-1)
+    return np.where(x < 0, k - 128, np.minimum(127, 128 - k))
 
 
 def rescale_params(s_in):
@@ -361,13 +372,15 @@ def merge_acc(accs):
 
 
 class LaneInt8(Lane):
-    """Bit-exact model of gpnae_poly_int8."""
+    """Bit-exact model of gpnae_poly_int8; ladder=False is the 2a lane (sigmoid saturated past 3.5), which fit_poly_coeffs scores tables on."""
 
-    def __init__(self, f, rom, sets=None, thresh=None):
+    def __init__(self, f, rom, sets=None, thresh=None, ladder=True, lad_x0=SIG_LAD_X0):
+        assert lad_x0 >= SIG_LAD_X0, "the ladder's thresholds start at x = 2.5"
         self.f = f
         self.rom = [v - (1 << 16) if v >= (1 << 15) else v for v in rom]
         self.sets = {**SETS_INT8, **(sets or {})}
         self.thresh = {**THRESH, **(thresh or {})}
+        self.ladder, self.lad_x0 = ladder, lad_x0
 
     def poly(self, x, code):
         """P at the float lane's MAC operand."""
@@ -391,8 +404,11 @@ class LaneInt8(Lane):
         neg = x < 0
         p = self.poly(x, code)
         if code == 2:
+            y = quant_sig(np.where(neg, ONE_Q11 - p, p))
+            if self.ladder:  # |x| >= 2.5: the exact ladder, gpnae_poly_int8's sat_buf for sigmoid; thresh[2] is ignored here
+                return np.where(np.abs(x) >= self.lad_x0, sig_ladder(x), y)
             sat = np.abs(x) > self.thresh[2]
-            return np.where(sat, np.where(neg, -128, 127), quant_sig(np.where(neg, ONE_Q11 - p, p)))
+            return np.where(sat, np.where(neg, -128, 127), y)
         if code == 3:
             sat = np.abs(x) > self.thresh[3]
             return np.where(sat, np.where(neg, -128, 127), quant_tanh(ipu.int_mul(x, p, w=16)))
