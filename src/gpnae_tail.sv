@@ -46,7 +46,7 @@ module gpnae_tail #(
   localparam logic [W-1:0] BIG_W = K_(32'h42D00000);
   localparam logic [W-2:0] BIG = BIG_W[W-2:0];  // |a| > 104: e^a is below every normal value
   localparam logic [W-1:0] SIGN = {1'b1, {(W - 1) {1'b0}}};
-  localparam bit NWT = (NEWTON > 0);  // the Newton states act only then, so a NEWTON = 0 build is today's
+  localparam bit NWT = (NEWTON > 0);  // the Newton states act only then; with NEWTON = 0 they fall to T_IDLE, as the default did
 
   // 1/(k+1)! for k = 0..10
   logic [W-1:0] cinv[11];
@@ -362,30 +362,36 @@ module gpnae_tail #(
             res[c] <= {x[c][W-1], add_res[W-2:0]}; issued[c] <= 1'b0; st[c] <= T_DONE;
           end
 
-          T_ND: if (NWT && ares) begin
+          T_ND: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
+          else if (ares) begin
             d[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NY0;
           end
 
-          T_NY0: if (NWT && ares) begin
+          T_NY0: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
+          else if (ares) begin
             acc[c] <= add_res; k[c] <= 4'(NEWTON); issued[c] <= 1'b0; st[c] <= T_NDY;
           end
 
-          T_NDY: if (NWT && mres) begin
+          T_NDY: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
+          else if (mres) begin
             tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_NT;
           end
 
-          T_NT: if (NWT && ares) begin
+          T_NT: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
+          else if (ares) begin
             tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NYT;
           end
 
-          T_NYT: if (NWT && mres) begin
+          T_NYT: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
+          else if (mres) begin
             acc[c] <= mul_res;
             issued[c] <= 1'b0;
             k[c] <= k[c] - 1'b1;
             st[c] <= (k[c] == 4'd1) ? T_NS : T_NDY;
           end
 
-          T_NS: if (NWT && mres) begin
+          T_NS: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
+          else if (mres) begin
             res[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_DONE;
           end
 
