@@ -105,6 +105,24 @@ def measure_poly(f, code, coeffs):
 
 
 NAME_INT8 = {1: "selu", 2: "sigmoid", 3: "tanh"}
+
+
+def sig_ladder_thresholds(x0=gpnae_model.SIG_LAD_X0):
+    """The Q4.11 codes above x0 where round(256 sigmoid(-|x|)) (exact_int8's half-up rounding) steps down; each step 1, no input a tie."""
+    if x0 > 32766:
+        raise RuntimeError(f"sigmoid ladder from {x0}: fewer than two Q4.11 codes up to 32767")
+    c = np.arange(x0, 32768, dtype=np.int64)
+    y = 256.0 / (1.0 + np.exp(c / 2048.0))
+    v = np.floor(y + 0.5).astype(np.int64)
+    steps = v[:-1] - v[1:]
+    t = tuple(int(x) for x in c[1:][steps == 1])
+    tie = float(np.abs(y - np.floor(y) - 0.5).min())
+    if steps.max() > 1 or steps.min() < 0 or v[0] != len(t) or v[-1] != 0 or tie < 1e-9:
+        raise RuntimeError(f"sigmoid ladder from {x0}: steps {steps.min()}..{steps.max()}, k(x0) {v[0]} for {len(t)} thresholds, "
+                           f"k(32767) {v[-1]}, nearest tie {tie:.3g} LSB")
+    return t
+
+
 RANGE_INT8 = {c: abs(gpnae_model.THRESH[c]) / 2048 for c in (1, 2, 3)}  # the float lane's thresholds: SELU 4, sigmoid 3.5, tanh 4
 DEGREES_INT8 = range(2, 13)
 OPTIONS_INT8 = [
@@ -140,10 +158,10 @@ def fit_form(code, r, deg):
 
 
 def lane_for(code, coeffs):
-    """The bit-exact lane with one coefficient set at base 0 and the model's saturation thresholds (THRESH)."""
+    """The 2a lane (no sigmoid ladder, P-4 of the residual plan) with one coefficient set at base 0 and the model's thresholds."""
     rom = [0] * 32
     rom[:len(coeffs)] = coeffs
-    return gpnae_model.Lane(gpnae_model.INT8, [v & 0xFFFF for v in rom], sets={code: (0, len(coeffs) - 1)})
+    return gpnae_model.Lane(gpnae_model.INT8, [v & 0xFFFF for v in rom], sets={code: (0, len(coeffs) - 1)}, ladder=False)
 
 
 def lsb(code):
@@ -283,7 +301,7 @@ def main_int8(a):
     n_grid = {c: 256 * sum(k.gated for k in gpnae_model.INT8_CASES[NAME_INT8[c]]) for c in (1, 2, 3)}
     L.append("gpnae_poly int8: the float lanes' forms in Q4.11 (fxMac Horner, floor; integer post products), bit-exact model;")
     L.append("the float lane's ranges (SELU x >= -4, sigmoid |x| <= 3.5, tanh |x| <= 4), the saturated value beyond them.")
-    L.append(f"GPNAE's tolerance ({tol}) on the DENSE sweep decides the choice and the verdict: every Q4.11 input x in")
+    L.append(f"GPNAE's tolerance ({tol}) on the DENSE sweep, scored on the 2a lane (sigmoid ladder off), decides the choice; the verdict takes sigmoid from the lane as built (ladder on): every Q4.11 input x in")
     L.append("[-32768, 32767] (the full Q4.11 range) as the lane sees it after its rescale; tanh and sigmoid at their fixed output quantization, SELU at every")
     L.append(f"gated case's (inputs: SELU {n_dense[1]}, sigmoid {n_dense[2]}, tanh {n_dense[3]}). GRID: the int8 inputs of every gated")
     L.append(f"case (Task 12's measure; SELU {n_grid[1]}, sigmoid {n_grid[2]}, tanh {n_grid[3]} inputs), kept alongside. Each degree is")
@@ -322,7 +340,6 @@ def main_int8(a):
         assert lower, "degree 2 everywhere fits the ROM"
         L.append(f"{NAME_INT8[k]:<10} degree {chosen[k][0]} does not fit the 32-entry ROM beside the others: lowered")
         cands[k], chosen[k] = lower, pick_int8(lower)
-    missed = [NAME_INT8[c] for c in (1, 2, 3) if not chosen[c].dense.ok]
     for code in (1, 2, 3):
         k = chosen[code]
         dn, gr = k.dense, k.grid
@@ -330,17 +347,17 @@ def main_int8(a):
                f" {dn.real_lsb:.2f} LSB against the unquantized function; grid {gr.fail} of {n_grid[code]} outside, worst"
                f" {100 * gr.worst_rel:.2f}%, worst {gr.worst_lsb} LSB")
         if dn.ok:
-            L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the lowest within the tolerance: MEETS TOLERANCE ({fig})")
+            L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the lowest within the tolerance: MEETS TOLERANCE on the 2a lane, ladder off ({fig})")
         else:
-            L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the best by dense misses: MISSES TOLERANCE ({fig}):"
-                     " open accuracy item")
+            L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the best by dense misses: MISSES TOLERANCE on the 2a lane, ladder off ({fig}):"
+                     " the verdict decides from the lane as built")
     lay = layout_int8({k: v[0] for k, v in chosen.items()})
     table = [0] * 32
     for code, (base, d) in lay.items():
         table[base:base + d + 1] = chosen[code].c
-    lane = gpnae_model.Lane(gpnae_model.INT8, [v & 0xFFFF for v in table], sets=lay)
+    lane = gpnae_model.Lane(gpnae_model.INT8, [v & 0xFFFF for v in table], sets=lay, ladder=False)  # 2a lane: the candidates' figures
     L.append("")
-    L.append(f"whole table, SETS_INT8 = {lay}, dense sweep (the verdict's figures): every Q4.11 input in [-32768, 32767]")
+    L.append(f"whole table, SETS_INT8 = {lay}, dense sweep, 2a lane (ladder off; the table's choice figures, the verdict takes sigmoid from the lane as built below): every Q4.11 input in [-32768, 32767]")
     L.append(f"{'activation':<10}{'inputs':>8}{'fail':>6}{'rel %':>8}{'LSB':>5}{'real':>8}{'differ':>7}{'hsat':>6}{'lane rail':>10}"
              f"{'exact rail':>11}")
     for code in (1, 2, 3):
@@ -364,8 +381,19 @@ def main_int8(a):
             if case.gated:
                 gated.append(acc)
         assert gpnae_model.merge_acc(gated) == chosen[code].grid, "the packed table must reproduce each activation's grid measurement"
-    L.append("VERDICT: TOLERANCE MET for every activation on the dense sweep" if not missed else
-             f"VERDICT: TOLERANCE MISSED for {', '.join(missed)} on the dense sweep: best degrees kept; open accuracy item for Soham, not a stop")
+    built = gpnae_model.Lane(gpnae_model.INT8, [v & 0xFFFF for v in table], sets=lay)  # the lane as built: sigmoid's ladder on
+    t = sig_ladder_thresholds()
+    L.append("")
+    L.append(f"sigmoid for |x| >= {gpnae_model.SIG_LAD_X0 / 2048:.1f}: the exact ladder, thresholds from sigmoid "
+             f"({'equal to' if t == gpnae_model.SIG_LAD_T else 'DIFFERENT FROM'} gpnae_model.SIG_LAD_T): {list(t)}")
+    dn = measure_dense(built, 2)
+    gr = measure_cases(built, 2)
+    L.append(f"sigmoid as built: dense {dn.fail} of {n_dense[2]} outside, worst {dn.worst_lsb} LSB; grid {gr.fail} of {n_grid[2]} outside")
+    missed = [NAME_INT8[c] for c in (1, 3) if not chosen[c].dense.ok] + (["sigmoid"] if not dn.ok or gr.fail else [])
+    if t != gpnae_model.SIG_LAD_T:
+        missed.append("sigmoid (ladder thresholds)")
+    L.append("VERDICT: TOLERANCE MET for every activation on the dense sweep (sigmoid also on the grid, as built)" if not missed else
+             f"VERDICT: TOLERANCE MISSED for {', '.join(missed)} on the dense sweep (sigmoid also on the grid, as built): best degrees kept; open accuracy item for Soham, not a stop")
     if missed:
         L += OPTIONS_INT8
     for path in (os.path.join(ROOT, out), os.path.join(ROOT, "src", "TYTAN", "Memory", out)):

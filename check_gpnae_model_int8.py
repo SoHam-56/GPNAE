@@ -7,6 +7,7 @@ import sys
 import numpy as np
 
 import gpnae_model as gm
+import fit_poly_coeffs as fpc
 
 errs = 0
 
@@ -71,6 +72,24 @@ ROM = gm.read_rom(os.path.join(gm.ROOT, gm.coeff_file(gm.INT8)))
 lad, off = gm.Lane(gm.INT8, ROM), gm.Lane(gm.INT8, ROM, ladder=False)  # the lane as built, and 2a's
 eq("ladder constants: 19 rising codes from 5228 to 12773, from x = 5120",
    (gm.SIG_LAD_X0, len(gm.SIG_LAD_T), gm.SIG_LAD_T[0], gm.SIG_LAD_T[-1], int(all(np.diff(gm.SIG_LAD_T) > 0))), (5120, 19, 5228, 12773, 1))
+eq("the ladder's thresholds, computed from sigmoid, are gpnae_model's", fpc.sig_ladder_thresholds(), gm.SIG_LAD_T)
+def raises(f):
+    try:
+        f()
+    except RuntimeError as e:
+        return str(e)
+    return None
+
+
+np_exp = fpc.np.exp
+try:
+    fpc.np.exp = lambda a, e=np_exp: e(100 * a)  # a wrong sigmoid: steps larger than 1
+    with np.errstate(over="ignore"):  # exp(100 x) overflows to inf, as a wrong sigmoid would
+        bad = raises(lambda: fpc.sig_ladder_thresholds(0))
+finally:
+    fpc.np.exp = np_exp
+eq("sig_ladder_thresholds raises on a step larger than 1, and np.exp is restored", (bad is not None and "steps" in bad, fpc.np.exp is np_exp), (True, True))
+eq("sig_ladder_thresholds raises RuntimeError for x0 > 32766", (raises(lambda: fpc.sig_ladder_thresholds(32767)) is not None,), (True,))
 eq("sig_ladder at its edges and the Q4.11 rail",
    gm.sig_ladder(np.array([5120, 5227, 5228, 12772, 12773, 32767, -5120, -5227, -5228, -12772, -12773, -32768])),
    [109, 109, 110, 127, 127, 127, -109, -109, -110, -127, -128, -128])
