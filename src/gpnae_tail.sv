@@ -4,13 +4,15 @@
 // Computes e^a for a <= 0 without cancellation: halve to |z| <= 1, Taylor e^z - 1, then double back.
 // SELU x < -4: lambda*alpha*(e^x - 1).  sigmoid |x| > 3.5: E(1 - E(1 - E)), E = e^-|x|.
 // tanh |x| > 4: 1 - 2*E(1 - E(1 - E)), E = e^-2|x|, with the sign of x.
+// NEWTON > 0, sigmoid x < 0: E*y instead, y -> 1/(1 + E) by NEWTON Newton steps from 1.5 - (1 + E)/2.
 // CONTEXTS elements run at once, each with its own registers, sharing one multiplier and one adder.
 // Every element sees the same operations on the same operands as when they ran one at a time; only the timing differs.
 module gpnae_tail #(
     parameter int EXP_W    = 8,   // the build's number format: fp32 8/23, bf16 8/7
     parameter int MAN_W    = 23,
     parameter int CONTEXTS = 4,
-    parameter int IW       = 4   // width of the caller's element index
+    parameter int IW       = 4,  // width of the caller's element index
+    parameter int NEWTON   = 0   // Newton steps for sigmoid x < 0; 0 keeps the series
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -39,10 +41,12 @@ module gpnae_tail #(
 
   localparam logic [W-1:0] ONE = K_(32'h3F800000);
   localparam logic [W-1:0] TWO = K_(32'h40000000);
+  localparam logic [W-1:0] Y0 = K_(32'h3FC00000);  // 1.5, the Newton seed's constant
   localparam logic [W-1:0] LA = K_(32'h3FE10966);  // lambda * alpha
   localparam logic [W-1:0] BIG_W = K_(32'h42D00000);
   localparam logic [W-2:0] BIG = BIG_W[W-2:0];  // |a| > 104: e^a is below every normal value
   localparam logic [W-1:0] SIGN = {1'b1, {(W - 1) {1'b0}}};
+  localparam bit NWT = (NEWTON > 0);  // the Newton states act only then, so a NEWTON = 0 build is today's
 
   // 1/(k+1)! for k = 0..10
   logic [W-1:0] cinv[11];
@@ -74,7 +78,13 @@ module gpnae_tail #(
     T_S,         // s = E * w
     T_SIG_OUT,   // 1 - s
     T_TANH_OUT,  // 1 - 2 s
-    T_DONE
+    T_DONE,
+    T_ND,        // D = 1 + E
+    T_NY0,       // y = 1.5 - D/2
+    T_NDY,       // t = D * y
+    T_NT,        // t = 2 - t
+    T_NYT,       // y = y * t
+    T_NS         // s = E * y
   } tstate_t;
 
   tstate_t st[C];
@@ -87,6 +97,11 @@ module gpnae_tail #(
   // Negate for subtraction.
   function automatic logic [W-1:0] neg(input logic [W-1:0] v);
     return {~v[W-1], v[W-2:0]};
+  endfunction
+
+  // Where a sigmoid/tanh element goes once E is known: the Newton states for sigmoid x < 0, else the series.
+  function automatic tstate_t after_e(input logic [1:0] f, input logic sgn);
+    return (NWT && f == 2'b10 && sgn) ? T_ND : T_U;
   endfunction
 
   // What each context wants from the shared units this cycle, exactly the operands the one-context version issued.
@@ -120,6 +135,12 @@ module gpnae_tail #(
             aa[c] = ONE;
             ab[c] = (s[c][W-2:0] == '0) ? SIGN : {1'b1, s[c][W-2:MAN_W] + EXP_W'(1), s[c][MAN_W-1:0]};  // 2s as an exponent increment
           end
+          T_ND:       if (NWT) begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = e[c]; end
+          T_NY0:      if (NWT) begin areq[c] = 1'b1; aa[c] = Y0; ab[c] = {1'b1, d[c][W-2:MAN_W] - EXP_W'(1), d[c][MAN_W-1:0]}; end  // -D/2, D >= 1
+          T_NDY:      if (NWT) begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = acc[c]; end
+          T_NT:       if (NWT) begin areq[c] = 1'b1; aa[c] = TWO; ab[c] = neg(tmp[c]); end
+          T_NYT:      if (NWT) begin mreq[c] = 1'b1; ma[c] = acc[c]; mb[c] = tmp[c]; end
+          T_NS:       if (NWT) begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = acc[c]; end
           default: ;
         endcase
       end
@@ -239,7 +260,7 @@ module gpnae_tail #(
                 // e^a underflows: e^a - 1 = -1 and e^a = 0
                 d[c]  <= {1'b1, ONE[W-2:0]};
                 e[c]  <= '0;
-                st[c] <= (func_i == 2'b01) ? T_SELU_OUT : T_U;
+                st[c] <= (func_i == 2'b01) ? T_SELU_OUT : after_e(func_i, x_i[W-1]);
               end else begin
                 if (a[W-2:MAN_W] < EXP_W'(BIAS)) begin
                   z[c] <= a;
@@ -293,7 +314,7 @@ module gpnae_tail #(
           end
 
           T_E1: if (ares) begin
-            e[c] <= add_res; issued[c] <= 1'b0; st[c] <= (m[c] == 0) ? T_U : T_SQ;
+            e[c] <= add_res; issued[c] <= 1'b0; st[c] <= (m[c] == 0) ? after_e(fn[c], x[c][W-1]) : T_SQ;
           end
 
           T_SQ: begin
@@ -301,12 +322,12 @@ module gpnae_tail #(
               // E^2 would fall below the normal range, and the chain is exact at 0
               e[c]  <= '0;
               m[c]  <= '0;
-              st[c] <= T_U;
+              st[c] <= after_e(fn[c], x[c][W-1]);
             end else if (mres) begin
               e[c] <= mul_res;
               issued[c] <= 1'b0;
               m[c] <= m[c] - 1'b1;
-              st[c] <= (m[c] == 4'd1) ? T_U : T_SQ;
+              st[c] <= (m[c] == 4'd1) ? after_e(fn[c], x[c][W-1]) : T_SQ;
             end
           end
 
@@ -341,6 +362,33 @@ module gpnae_tail #(
             res[c] <= {x[c][W-1], add_res[W-2:0]}; issued[c] <= 1'b0; st[c] <= T_DONE;
           end
 
+          T_ND: if (NWT && ares) begin
+            d[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NY0;
+          end
+
+          T_NY0: if (NWT && ares) begin
+            acc[c] <= add_res; k[c] <= 4'(NEWTON); issued[c] <= 1'b0; st[c] <= T_NDY;
+          end
+
+          T_NDY: if (NWT && mres) begin
+            tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_NT;
+          end
+
+          T_NT: if (NWT && ares) begin
+            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NYT;
+          end
+
+          T_NYT: if (NWT && mres) begin
+            acc[c] <= mul_res;
+            issued[c] <= 1'b0;
+            k[c] <= k[c] - 1'b1;
+            st[c] <= (k[c] == 4'd1) ? T_NS : T_NDY;
+          end
+
+          T_NS: if (NWT && mres) begin
+            res[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_DONE;
+          end
+
           // One result leaves per cycle, lowest context first.
           T_DONE: if (out_v && out_c == CW'(c)) st[c] <= T_IDLE;
 
@@ -355,9 +403,21 @@ module gpnae_tail #(
     for (int c = 0; c < C; c++) if (st[c] != T_IDLE) busy_o = 1'b1;
   end
 
+  if (NEWTON < 0 || NEWTON > 15) begin : G_BAD_NEWTON
+    $fatal(1, "gpnae_tail: NEWTON=%0d, must be 0..15 (a 4-bit step count)", NEWTON);
+  end
+
 `ifndef SYNTHESIS
   a_start_free: assert property (@(posedge clk_i) disable iff (!rstn_i) start_i |-> ready_o)
     else $error("gpnae_tail: start with no free context");
+  // A busy context keeps its element's x, function and index through every state, the Newton states included.
+  if (NWT) begin : G_HOLD
+    for (genvar c = 0; c < C; c++) begin : G_CTX
+      a_ctx_hold: assert property (@(posedge clk_i) disable iff (!rstn_i)
+          (st[c] != T_IDLE && $past(st[c]) != T_IDLE) |-> ($stable(x[c]) && $stable(fn[c]) && $stable(id[c])))
+        else $error("gpnae_tail: context %0d changed its element while busy", c);
+    end
+  end
 `endif
 
 endmodule

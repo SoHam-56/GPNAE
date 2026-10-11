@@ -29,6 +29,7 @@ DESIGN_FILES = \
 	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
 	../ArithmeticLibrary/Multipliers/FP/src/fpMultiplier.sv \
 	../ArithmeticLibrary/Adders/FP/src/fpAdder.sv \
+	../ArithmeticLibrary/Converters/FPNarrow/src/fpNarrow.sv \
 	../ArithmeticLibrary/Multipliers/Int/src/intMultiplier.sv \
 	../ArithmeticLibrary/Multipliers/Fx/src/fxMac.sv \
 	../ArithmeticLibrary/Requant/src/tfliteRequant.sv \

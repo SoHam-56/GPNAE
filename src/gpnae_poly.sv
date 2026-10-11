@@ -212,12 +212,15 @@ module gpnae_poly #(
   logic sig_is_pos;
   assign sig_is_pos = ~fifo_data_o[DATA_WIDTH-1] || (fifo_data_o[DATA_WIDTH-2:0] == '0);
 
+  // bf16 sends every sigmoid x < 0 to the fp32 tail: 1 - P in 8 bits cannot reach 1% there.
+  localparam bit NEG_TAIL = !FP32;
+
   // Past these bounds the fitted polynomials diverge, so gpnae_tail computes the element instead.
   logic sig_in_tail;
   always_comb begin
     case (control_word_i)
       3'b001:         sig_in_tail = fifo_data_o[DATA_WIDTH-1] && (fifo_data_o[DATA_WIDTH-2:0] > T4);  // SELU x < -4
-      3'b010:         sig_in_tail = (fifo_data_o[DATA_WIDTH-2:0] > T35);  // sigmoid |x| > 3.5
+      3'b010:         sig_in_tail = (fifo_data_o[DATA_WIDTH-2:0] > T35) || (NEG_TAIL && !sig_is_pos);  // sigmoid |x| > 3.5, bf16 x < 0 too
       3'b100, 3'b101: sig_in_tail = 1'b0;  // ReLU and linear are exact
       default:        sig_in_tail = (fifo_data_o[DATA_WIDTH-2:0] > T4);  // tanh |x| > 4
     endcase
@@ -239,24 +242,39 @@ module gpnae_poly #(
   // A pending element starts whenever a tail context is free, lowest index first.
   assign tail_start = tail_ready && (|tail_pend);
 
+  // bf16 runs the tail in fp32 with two Newton steps for sigmoid x < 0, x widened exactly and the result narrowed to nearest; fp32 is unchanged.
+  localparam int TAIL_MAN = FP32 ? MAN_W : 23;
+  localparam int TAIL_NEWTON = FP32 ? 0 : 2;
+  logic [31:0] tail_res32;
   gpnae_tail #(
       .EXP_W   (EXP_W),
-      .MAN_W   (MAN_W),
+      .MAN_W   (TAIL_MAN),
       .CONTEXTS(TAIL_CONTEXTS),
-      .IW      (SW)
+      .IW      (SW),
+      .NEWTON  (TAIL_NEWTON)
   ) TAIL (
       .clk_i   (clk_i),
       .rstn_i  (rstn_i),
       .start_i (tail_start),
-      .x_i     (sig_buf[tail_next]),
+      .x_i     (sienna_fmt_pkg::widen(32'(sig_buf[tail_next]), MAN_W)),
       .func_i  (control_word_i[1:0]),
       .idx_i   (tail_next),
       .ready_o (tail_ready),
-      .result_o(tail_res),
+      .result_o(tail_res32),
       .idx_o   (tail_idx),
       .done_o  (tail_done),
       .busy_o  ()
   );
+  fpNarrow #(.EXP_W(EXP_W), .MAN_W(MAN_W)) TNARROW (.x_i(tail_res32), .y_o(tail_res));  // fp32: the identity
+
+`ifndef SYNTHESIS
+  // bf16: a tail result returns only for an element of this group that went to the tail and is still waiting for it.
+  if (!FP32) begin : G_TAIL_CHK
+    a_tail_pair: assert property (@(posedge clk_i) disable iff (!rstn_i)
+        tail_done |-> (tail_buf[tail_idx] && !tail_pend[tail_idx] && !trdy[tail_idx]))
+      else $error("gpnae_poly: tail result for element %0d, which is not waiting for one", tail_idx);
+  end
+`endif
 
   // Post stage: one multiply, or P - 1 (fp32_down, or an adder with -1) plus a sign flip. No divider.
   logic [DATA_WIDTH-1:0] mul_a, mul_b, mul_res, dn_a, dn_res;
