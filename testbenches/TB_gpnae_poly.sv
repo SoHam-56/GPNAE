@@ -715,8 +715,10 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
   assert property (valid_done_signal)
   else $error("Final result changed without a done pulse!");
 
+  // 0.5 s, or 4 us (400 cycles) per input when that is longer: fp32_dense's 1180320 inputs need about 230 cycles each over five activations.
+  localparam longint TB_TIMEOUT_NS = (longint'(TOTAL) * 4000 > 500000000) ? longint'(TOTAL) * 4000 : 500000000;
   initial begin
-    #500000000 $error("Testbench timeout!");
+    #(TB_TIMEOUT_NS) $error("Testbench timeout!");
     $finish;
   end
 
