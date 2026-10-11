@@ -102,6 +102,7 @@ You need Verilator 5 with a C++20 compiler (its `--timing` mode needs coroutines
 git clone --recursive https://github.com/SoHam-56/GPNAE.git
 cd GPNAE
 
+make regression                                          # today's lane in fp32, bf16 and int8, then one table (FMT=bf16: one format)
 python3 regression.py                                    # the published Taylor lane, fp32
 python3 regression.py --lane poly --format bf16          # today's lane, against the exact functions
 python3 regression.py --lane poly --format bf16 --model hw   # bit for bit against the hardware model (fp32 too)
@@ -109,6 +110,8 @@ python3 regression.py --lane poly --format int8          # the int8 lane
 ```
 
 `regression.py` generates the stimulus, builds the testbench and checks every output. `gpnae_model.py` is the bit-exact model of the hardware, and `fit_poly_coeffs.py` fits the coefficient tables. Results go to `testbenches/results/`.
+
+`make regression` runs the model checks (`check_gpnae_model_fp32.py`, `check_gpnae_model_int8.py`) and each format's lane as points of their own (`make regression/bf16/lane`; `make -j4` runs four at once), each in a private copy of the tree, and passes only on each point's own verdict: every lane bit for bit against the hardware model, and in fp32 also every pattern within 1% of the exact functions (`fp32/lane-accuracy`). bf16's accuracy against the exact functions (`bf16/lane-accuracy`) is shown but not counted, since sigmoid and tanh exceed the 6.25% bound (above). The table is `testbenches/results/regression/regression.log`; `make regression-summary` prints it again.
 
 ---
 

@@ -591,5 +591,65 @@ def main() -> None:
     sys.exit(0 if n_pass == len(results) else 1)
 
 
+# ── make regression: the model checks, gpnae_poly's lane in fp32, bf16 and int8 ──
+
+
+def _engine():
+    """The library's make regression engine, under its own name (SIENNA and SystolicMesh each have a regression.py too)."""
+    import importlib.util
+    s = importlib.util.spec_from_file_location("aril_regress", os.path.join(ROOT, "ArithmeticLibrary", "Common", "regress.py"))
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
+regress = _engine()
+LANE_FORMATS = ("fp32", "bf16", "int8")  # the formats gpnae_poly is built in
+LANE_MODEL = {"fp32": "hw", "bf16": "hw", "int8": "exact"}  # floats: bit-exact against the lane model, accuracy a point of its own; int8 runs both
+MODEL_CHECKS = ("check-model-fp32", "check-model-int8")  # gpnae_model against RTL words and fp32_down / the int8 references, no simulator
+
+
+class LaneSpec(regress.Spec):
+    title = "GPNAE REGRESSION"
+    formats = LANE_FORMATS
+    reported = frozenset({"bf16/lane-accuracy"})  # bf16 accuracy against the functions: an open item, shown, not gated; fp32's is gated at 1%
+    drop = ("GPNAE_MODEL",)
+
+    def points(self, small, formats):
+        if not formats:
+            return []
+        return ["selftest", *MODEL_CHECKS] + [p for f in formats for p in ([f"{f}/lane"] + ([f"{f}/lane-accuracy"] if f != "int8" else []))]
+
+    def parse(self, name):
+        if name in ("selftest", *MODEL_CHECKS) or name in [f"{f}/lane" for f in LANE_FORMATS] + ["fp32/lane-accuracy", "bf16/lane-accuracy"]:
+            return {"n": 0, "fmt": name.split("/")[0] if "/" in name else None}
+        raise ValueError(f"{name}: points are selftest, {', '.join(MODEL_CHECKS)}, <fmt>/lane (fmt one of {', '.join(LANE_FORMATS)}) and fp32/, bf16/lane-accuracy")
+
+    def argv(self, name, opts):
+        if name == "selftest":
+            return [sys.executable, "test_regression_sweep.py"]
+        if name in MODEL_CHECKS:
+            return [sys.executable, f"check_gpnae_model_{name.rsplit('-', 1)[1]}.py"]
+        f = name.split("/")[0]
+        return [sys.executable, "regression.py", "--lane", "poly", "--format", f, "--model", "exact" if name.endswith("-accuracy") else LANE_MODEL[f]]
+
+    def verdict(self, name, text, rc):
+        if name == "selftest":
+            return regress.marker_verdict(text, rc, (r"^ALL \d+ PASSED$",))
+        if name in MODEL_CHECKS:
+            return regress.marker_verdict(text, rc, (r"^RESULT: PASSED$", r": 0 errors$"), (r"RESULT: FAILED",))
+        if name.startswith("int8/"):
+            return regress.marker_verdict(text, rc, (r"^BITEXACT: PASS",))
+        v = regress.marker_verdict(text, rc, (r"Verdict : All patterns passed",))
+        n = re.findall(r"^\s*Element checks\s*:\s*(\d+)", regress.ANSI.sub("", text), re.M)
+        return v if v != "PASS" or (n and int(n[-1]) > 0) else f"FAIL ({n[-1] if n else 'no'} element checks)"
+
+
+SPEC = LaneSpec(ROOT, os.path.join(RESULTS_DIR, "regression"))
+
+
 if __name__ == "__main__":
-    main()
+    if "--action" in sys.argv[1:]:  # make regression's points, one point, the table
+        regress.main(SPEC)
+    else:
+        main()

@@ -9,3 +9,4 @@ __pycache__/
 # Waveform viewer state (Surfer, Vivado)
 *.ron
 *.wcfg
+testbenches/results/regression/

@@ -106,6 +106,8 @@ help:
 	@echo "  make iverilog     - Simulate using Icarus Verilog"
 	@echo "  make vcs          - Simulate using Synopsys VCS"
 	@echo "  make clean        - Remove all simulation artifacts"
+	@echo "  make regression   - The model checks, the lane in fp32, bf16, int8 (FMT=<f>: one), bit-exact and against the functions, then one table"
+	@echo "  make regression/<point>, make regression-summary - one point (regression.py --action points), the table again"
 
 verilator:
 	@echo "-- Verilator simulation for GPNAE"
@@ -155,4 +157,37 @@ lint_fmt:
 	$(VERILATOR) --lint-only -Wno-fatal -Werror-USERFATAL -DSYNTHESIS --top-module $(TOP) $(FMT) -I$(SRC_DIR) -I$(SRC_DIR)/TYTAN/Memory \
 		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES))
 
-.PHONY: default help verilator iverilog vcs view clean lint_fmt
+.PHONY: default help verilator iverilog vcs view clean lint_fmt regression regression-summary
+
+# make regression: the model checks, then gpnae_poly bit-exact in fp32, bf16 and int8 (FMT=<f>: one format) and its accuracy
+# against the functions (fp32 gated at 1%, bf16 reported), each point its own target (make -j runs them side by side), then one table.
+PYTHON  ?= python3
+FORMATS  = fp32 bf16 int8
+ifneq ($(origin FMT),undefined)
+ifneq ($(filter-out $(FORMATS),$(FMT))$(words $(FMT)),1)
+$(error Invalid FMT=$(FMT): must be one of fp32, bf16, int8)
+endif
+endif
+comma := ,
+empty :=
+space := $(empty) $(empty)
+REG_SELECT  = --formats $(subst $(space),$(comma),$(strip $(or $(FMT),$(FORMATS))))
+REG_DIR    ?= $(TB_DIR)/results/regression
+REG_SUMMARY = $(PYTHON) regression.py --action summary --results $(REG_DIR) $(REG_SELECT)
+ifneq ($(filter regression,$(MAKECMDGOALS)),)
+ifeq ($(origin REG_RUN),undefined)
+REG_RUN := $(shell date +%Y%m%d-%H%M%S)-$(shell echo $$PPID)
+endif
+REG_POINTS := $(shell $(PYTHON) regression.py --action points $(REG_SELECT))
+endif
+
+# One point, e.g. make regression/bf16/lane: runs in a private copy of the tree, writes $(REG_DIR)/<point>.log and .json.
+regression/%:
+	@$(PYTHON) regression.py --action point --name $* --results $(REG_DIR)$(if $(REG_RUN), --run $(REG_RUN))$(if $(filter regression,$(MAKECMDGOALS)), --keep-going)
+
+regression: $(addprefix regression/,$(REG_POINTS))
+	@$(REG_SUMMARY) --run $(REG_RUN)
+
+# The table of the results already in REG_DIR; fails on any FAIL or NOT RUN.
+regression-summary:
+	@$(REG_SUMMARY)$(if $(REG_RUN), --run $(REG_RUN))
