@@ -58,6 +58,9 @@ def test_regression_target():
     one = run("regression/int8/lane").stdout.splitlines()
     assert len(one) == 1 and "--keep-going" not in one[0], one
     assert run("regression", "FMT=fp16").returncode != 0
+    assert run("regression/int8/lane", "FMT=fp16").returncode != 0
+    lint = run("lint_fmt", "TOP=barrel_mac", "FMT=-GEXP_W=8 -GMAN_W=7")  # lint_fmt's FMT is Verilator -G overrides, not a regression format
+    assert lint.returncode == 0 and "--top-module barrel_mac -GEXP_W=8 -GMAN_W=7" in lint.stdout, ("lint_fmt", lint.stderr[-200:])
     assert "--threads 3" in run("verilator", "SIM_THREADS=3").stdout
     for fmt in ("int8", "fp16"):  # an exported FMT does not narrow make regression (only FMT= on its command line does)
         r = subprocess.run(["make", "-s", "-n", "regression", f"PYTHON={sys.executable}"], cwd=reg.ROOT, capture_output=True, text=True, env=dict(env, FMT=fmt))

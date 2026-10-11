@@ -164,7 +164,8 @@ PYTHON  ?= python3
 FORMATS  = fp32 bf16 int8
 # Only FMT= on make's command line narrows it, not an exported FMT.
 REG_FMT  = $(if $(filter command line,$(origin FMT)),$(FMT))
-ifneq ($(REG_FMT),)
+# The check holds for the regression targets only: lint_fmt's FMT is Verilator -G overrides.
+ifneq ($(and $(REG_FMT),$(filter regression%,$(MAKECMDGOALS))),)
 ifneq ($(filter-out $(FORMATS),$(REG_FMT))$(words $(REG_FMT)),1)
 $(error Invalid FMT=$(FMT): must be one of fp32, bf16, int8)
 endif
