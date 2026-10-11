@@ -81,7 +81,8 @@ def test_regression_target():
     assert lint.returncode == 0 and "--top-module barrel_mac -GEXP_W=8 -GMAN_W=7" in lint.stdout, ("lint_fmt", lint.stderr[-200:])
     assert "--threads 3" in run("verilator", "SIM_THREADS=3").stdout
     assert "--trace" not in run("verilator").stdout and "--trace -DENABLE_TRACE" in run("verilator", "TRACE=1").stdout  # no waveform by default
-    assert run("verilator", "TRACE=fst").returncode != 0
+    assert "--trace-fst -DENABLE_TRACE -DTRACE_FST" in run("verilator", "TRACE=fst").stdout  # SIENNA's make gpnae-verilator TRACE=fst
+    assert run("verilator", "TRACE=bogus").returncode != 0
     for fmt in ("int8", "fp16"):  # an exported FMT does not narrow make regression (only FMT= on its command line does)
         r = subprocess.run(["make", "-s", "-n", "regression", f"PYTHON={sys.executable}"], cwd=reg.ROOT, capture_output=True, text=True, env=dict(env, FMT=fmt))
         names = [x.split("--name ")[1].split()[0] for x in r.stdout.splitlines() if "--action point " in x]

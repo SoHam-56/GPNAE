@@ -733,7 +733,11 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
   // Waveforms only in a TRACE=1 build (ENABLE_TRACE), scoped to the DUT: dumping the whole TB crashes Verilator's trace_init.
 `ifdef ENABLE_TRACE
   initial begin
+`ifdef TRACE_FST
+    $dumpfile("tb_gpnae.fst");
+`else
     $dumpfile("tb_gpnae.vcd");
+`endif
     $dumpvars(1, dut);
   end
 `endif

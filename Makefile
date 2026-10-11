@@ -58,12 +58,12 @@ VERILATOR_DIR = $(PRJ_DIR)/Verilator
 IVERILOG_DIR = $(PRJ_DIR)/Icarus
 VCS_DIR = $(PRJ_DIR)/VCS
 
-# Waveforms as in SIENNA: TRACE=1 (or vcd) builds with --trace and ENABLE_TRACE; the default 0 writes none.
+# Waveforms as in SIENNA: TRACE=1 or vcd writes tb_gpnae.vcd, fst writes tb_gpnae.fst (Verilator); the default 0 writes none.
 TRACE ?= 0
-ifeq ($(filter $(TRACE),0 1 vcd),)
-$(error Invalid TRACE=$(TRACE): must be one of 0, 1, vcd)
+ifeq ($(filter $(TRACE),0 1 vcd fst),)
+$(error Invalid TRACE=$(TRACE): must be one of 0, 1, vcd, fst)
 endif
-TRACE_ON = $(filter $(TRACE),1 vcd)
+TRACE_ON = $(filter $(TRACE),1 vcd fst)
 
 # Simulation threads: one lane is too small to share, so 1 (a 2^16-input fp32 run: 35.5 s at 1 thread, 151 s at 8; rs1_tf_thr1/8).
 SIM_THREADS ?= 1
@@ -87,7 +87,9 @@ VERILATOR_FLAGS = \
 
 # Hooks as in SIENNA: one-off defines (EXTRA_FLAGS) and simulator arguments (SIM_ARGS).
 VERILATOR_FLAGS += $(EXTRA_FLAGS)
-ifneq ($(TRACE_ON),)
+ifeq ($(TRACE),fst)
+VERILATOR_FLAGS += --trace-fst -DENABLE_TRACE -DTRACE_FST
+else ifneq ($(TRACE_ON),)
 VERILATOR_FLAGS += --trace -DENABLE_TRACE
 endif
 
