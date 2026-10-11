@@ -268,11 +268,13 @@ module gpnae_poly #(
   fpNarrow #(.EXP_W(EXP_W), .MAN_W(MAN_W)) TNARROW (.x_i(tail_res32), .y_o(tail_res));  // fp32: the identity
 
 `ifndef SYNTHESIS
-  // bf16: a tail result returns only for an element of this group that went to the tail and is still waiting for it.
+  // bf16: a tail result returns to an element of this group that is waiting for it, and was computed from that element's x.
   if (!FP32) begin : G_TAIL_CHK
     a_tail_pair: assert property (@(posedge clk_i) disable iff (!rstn_i)
-        tail_done |-> (tail_buf[tail_idx] && !tail_pend[tail_idx] && !trdy[tail_idx]))
-      else $error("gpnae_poly: tail result for element %0d, which is not waiting for one", tail_idx);
+        tail_done |-> (tail_buf[tail_idx] && !tail_pend[tail_idx] && !trdy[tail_idx]
+                       && TAIL.x_out == sienna_fmt_pkg::widen(32'(sig_buf[tail_idx]), MAN_W)))
+      else $error("gpnae_poly: tail result for element %0d (x %h) came from x %h, or it is not waiting for one", tail_idx,
+                  sig_buf[tail_idx], TAIL.x_out);
   end
 `endif
 

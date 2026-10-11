@@ -414,6 +414,10 @@ module gpnae_tail #(
   end
 
 `ifndef SYNTHESIS
+  // x of the element whose result done_o returns, beside idx_o, for the caller's pairing check.
+  logic [W-1:0] x_out;
+  always_ff @(posedge clk_i) if (out_v) x_out <= x[out_c];
+
   a_start_free: assert property (@(posedge clk_i) disable iff (!rstn_i) start_i |-> ready_o)
     else $error("gpnae_tail: start with no free context");
   // A busy context keeps its element's x, function and index through every state, the Newton states included.
