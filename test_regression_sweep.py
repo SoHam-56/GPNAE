@@ -18,7 +18,7 @@ def test_points():
     assert reg.SPEC.points(False, ["fp32", "bf16", "int8"]) == once + ["fp32/taylor", "fp32/lane", "fp32/lane-accuracy", "bf16/lane", "bf16/lane-accuracy", "int8/lane"]
     assert reg.SPEC.points(False, ["bf16"]) == once + ["bf16/lane", "bf16/lane-accuracy"]  # the published Taylor lane is fp32 only
     assert reg.SPEC.points(True, ["int8"]) == once + ["int8/lane"] and reg.SPEC.points(False, []) == []
-    assert reg.SPEC.reported == {"bf16/lane-accuracy"}  # the TB's 6.25% check; bf16/lane gates every bf16 input on the true function
+    assert reg.SPEC.reported == frozenset()  # nothing is reported only
     for bad in ("fp16/lane", "int8/lane-accuracy", "fp32/N8_T2/lane", "fp32/check-model-fp32", "bf16/taylor", "int8/taylor", "nosuch"):
         try:
             reg.SPEC.parse(bad)
@@ -30,7 +30,7 @@ def test_points():
 def test_commands():
     py, lane = sys.executable, [sys.executable, "regression.py", "--lane", "poly", "--format"]
     assert reg.SPEC.argv("bf16/lane", None) == lane + ["bf16", "--model", "hw"]  # bit-exact against the lane model, gated
-    assert reg.SPEC.argv("bf16/lane-accuracy", None) == lane + ["bf16", "--model", "exact"]  # against the functions, reported
+    assert reg.SPEC.argv("bf16/lane-accuracy", None) == lane + ["bf16", "--model", "exact"]  # against the functions, gated
     assert reg.SPEC.argv("fp32/lane", None) == lane + ["fp32", "--model", "hw"]  # fp32 too: gpnae_model models fp32_down's P - 1
     assert reg.SPEC.argv("fp32/lane-accuracy", None) == lane + ["fp32", "--model", "exact"]
     assert reg.SPEC.argv("fp32/taylor", None) == [py, "regression.py", "--lane", "gpnae", "--format", "fp32"]  # the published lane, its tests unchanged

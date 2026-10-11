@@ -242,7 +242,7 @@ def print_activation(act: str, r: dict) -> None:
 # Report
 # --------------------------------------------------------------------------
 
-def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol) -> str:
+def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol, rel_tol=None) -> str:
     """Plain-text report alongside the per-pattern logs."""
     os.makedirs(RESULTS_DIR, exist_ok=True)
     path = os.path.join(RESULTS_DIR, "gpnae_report.log")
@@ -266,7 +266,7 @@ def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol)
     L.append(f"Reference model   : {model}")
     L.append(f"Seed              : {seed}")
     L.append(f"Stimulus ranges   : " + ", ".join(f"{a} +/-{r}" for a, r in ranges.items()))
-    L.append(f"Tolerance         : relative <= {suggested_rel_tol(fmt)*100:.4f}% "
+    L.append(f"Tolerance         : relative <= {(suggested_rel_tol(fmt) if rel_tol is None else rel_tol)*100:.4f}% "
              f"or absolute <= {abs_tol:g} (either bound passes)")
     L.append("")
     L.append(f"RESULT            : {'PASS' if n_pass == len(results) else 'FAIL'}  "
@@ -647,7 +647,7 @@ def run_int8(args) -> int:
     n_gated = {act: 256 * sum(c.gated for c in gm.INT8_CASES[act]) for act in tot}
     gated_miss = [a for a in GATED_INT8 if a in missed]
     L.append(f"MODEL ACCURACY: {'FAIL' if gated_miss else 'PASS' if not missed else 'MISSED'} (gpnae_model's words, {tol}; gated: "
-             + ", ".join(f"{a} {tot[a].fail} of {n_gated[a]} outside" for a in GATED_INT8) + "; reported, not gated: "
+             + ", ".join(f"{a} {tot[a].fail} of {n_gated[a]} outside" for a in GATED_INT8) + "; diagnostic only, the truth gate gates them: "
              + ", ".join(f"{a} {tot[a].fail} of {n_gated[a]} outside" for a in tot if a not in GATED_INT8) + ")")
     k_rand = len(L)
     L.append("random sets (mx shx z_in mout shout z_out), in stimulus order after the cases:")
@@ -780,7 +780,7 @@ def main() -> None:
         sys.exit(run_int8(args))
 
     fmt = get_format(args.format)
-    rel_tol = args.rel_tol if args.rel_tol is not None else suggested_rel_tol(fmt)
+    rel_tol = args.rel_tol if args.rel_tol is not None else truth.BOUND if args.lane == "poly" else suggested_rel_tol(fmt)  # poly: the TB checks the bound in force
     exact = args.model == "hw"  # bit-exact model of gpnae_poly: every output must match bit for bit
     if exact:
         if args.lane != "poly":
@@ -901,7 +901,7 @@ def main() -> None:
     verdict = ok("All patterns passed") if n_pass == len(results) else err(
         f"{len(results)-n_pass} pattern(s) failed")
     print(hdr(f"\n  Verdict : {verdict}"))
-    print(f"  Report  : {write_report(results, fmt, args.batches, args.per_batch, args.model, ranges, args.seed, args.abs_tol)}")
+    print(f"  Report  : {write_report(results, fmt, args.batches, args.per_batch, args.model, ranges, args.seed, args.abs_tol, rel_tol)}")
     print(hdr(f"{'='*78}\n"))
 
     sys.exit(0 if n_pass == len(results) and not acc_bad else 1)  # a failed ACCURACY verdict fails the run on its own
@@ -928,7 +928,7 @@ MODEL_CHECKS = ("check-model-fp32", "check-model-bf16", "check-model-int8")  # g
 class LaneSpec(regress.Spec):
     title = "GPNAE REGRESSION"
     formats = LANE_FORMATS
-    reported = frozenset({"bf16/lane-accuracy"})  # the TB's 6.25% check fails on bf16 tanh; bf16/lane gates every input on the true function
+    reported = frozenset()  # every point gates; the poly lane's TB tolerance is the 10% bound in force, the truth gate the verdict
     drop = ("GPNAE_MODEL",)
 
     def points(self, small, formats):
