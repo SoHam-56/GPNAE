@@ -65,8 +65,8 @@ $(error Invalid TRACE=$(TRACE): must be one of 0, 1, vcd)
 endif
 TRACE_ON = $(filter $(TRACE),1 vcd)
 
-# Simulation threads; several simulations at once each need fewer (Verilator's threads spin, so oversubscribed runs crawl).
-SIM_THREADS ?= $(shell nproc)
+# Simulation threads: one lane is too small to share, so 1 (a 2^16-input fp32 run: 35.5 s at 1 thread, 151 s at 8; rs1_tf_thr1/8).
+SIM_THREADS ?= 1
 
 VERILATOR_FLAGS = \
 	--binary \
