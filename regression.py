@@ -224,7 +224,7 @@ def truth_verdict(fmt_name, runs) -> tuple:
         over, over_t, n = (sum(getattr(r, k) for r in rs) for k in ("over", "over_target", "n"))
         bad |= over > 0
         lsb = f" ({w.worst_lsb} LSB)" if fmt_name == "int8" else ""
-        parts.append(f"{act} worst {100 * w.worst:.3f}%{lsb} at x = {w.at:.6g}, {over} of {n} over {100 * truth.BOUND:g}%, "
+        parts.append(f"{act} worst {truth.worst_text(w.worst)}{lsb} at x = {w.at:.6g}, {over} of {n} over {100 * truth.BOUND:g}%, "
                      f"{over_t} over {100 * truth.TARGET:g}%")
     return (f"ACCURACY: {'FAIL' if bad else 'PASS'} (true function, truth.py, {fmt_name}; bound {100 * truth.BOUND:g}%, "
             f"target {100 * truth.TARGET:g}%: " + ("; ".join(parts) if parts else "no gated run") + ")"), bad
@@ -490,7 +490,7 @@ def int8_quant(code, case, p):
 
 
 def truth_int8(sets, gots) -> tuple:
-    """The gate on each activation's RTL words over every set and input; ReLU only where q >= z_in, the codes the requantize clamp delivers."""
+    """The gate on each activation's RTL words over every set and every input; ReLU below z_in must give the output zero point."""
     res, lines = {}, []
     for act, code in INT8_ACTS:
         got = gots[act]
@@ -501,12 +501,10 @@ def truth_int8(sets, gots) -> tuple:
         q = np.concatenate([r[1] for r in rows])
         quant = [np.repeat([r[2][k] for r in rows], 256) for k in range(4)]
         kinds = np.repeat([r[0] for r in rows], 256)
-        keep = q >= quant[1] if act == "relu" else np.ones(q.size, dtype=bool)
-        r = truth.gate("int8", act, q[keep], got[keep], quant=[v[keep] for v in quant])
-        note = f"; {int((~keep).sum())} inputs below z_in not gated (the requantize clamp applies ReLU)" if act == "relu" else ""
-        lines.append(show_truth(r, note))
+        r = truth.gate("int8", act, q, got, quant=quant)
+        lines.append(show_truth(r))
         for kind in dict.fromkeys(kinds):
-            m = keep & (kinds == kind)
+            m = kinds == kind
             rk = truth.gate("int8", act, q[m], got[m], quant=[v[m] for v in quant])
             lines.append(f"  {kind:<9}{truth.line(rk)}")
             print(f"        {kind:<9}{'PASS' if rk.ok else 'FAIL'}  n {rk.n}  worst {100 * rk.worst:.3f}% ({rk.worst_lsb} LSB)  "
