@@ -268,8 +268,8 @@ def sigmoid_gate(f, x, out, bound=SIG_BOUND):
     ref = np.where(v >= 0, 1 / (1 + a), a / (1 + a))
     got = to_float(f, out)
     big = ref >= MIN_NORMAL
-    rel = np.where(big, np.abs(got - ref) / np.where(big, ref, 1.0), 0.0)
-    flush = ~big & (np.abs(got) > MIN_NORMAL)
+    rel = np.where(np.isfinite(got), np.where(big, np.abs(got - ref) / np.where(big, ref, 1.0), 0.0), np.inf)  # a NaN or infinite word is over
+    flush = ~big & ~(np.abs(got) <= MIN_NORMAL)  # NaN fails this too
     i = int(np.argmax(rel))
     over = int((rel > bound).sum())
     return Gate(over == 0 and not flush.any(), float(rel[i]), float(v[i]), over, int(flush.sum()), int(x.size), int(sub.sum()),

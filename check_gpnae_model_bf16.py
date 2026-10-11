@@ -51,6 +51,14 @@ for name, kw, want in (("sigmoid, as built (no Newton)", dict(newton=0), (106.55
     b = show(name, gm.sigmoid_gate(BF16, X, gm.Lane(BF16, ROM, **kw).run(X, 2)))
     eq(f"{name} fails the gate", (b.ok, round(100 * b.worst, 3), round(b.at, 6), b.over), (False, *want))
 
+# A NaN word fails the gate: every word NaN, and the lane's words with one of them NaN.
+out = lane.run(X, 2)
+one_nan = out.copy()
+one_nan[int(np.flatnonzero(X == 0xBF80)[0])] = BF16.qnan  # x = -1
+for name, o, want in (("sigmoid, every word NaN", np.full_like(out, BF16.qnan), X.size), ("sigmoid, one NaN word (x = -1)", one_nan, 1)):
+    b = show(name, gm.sigmoid_gate(BF16, X, o))
+    eq(f"{name} fails the gate", (b.ok, b.over), (False, want))
+
 # tanh and SELU take the fp32 tail too: their tail outputs may only get better.
 old = gm.Lane(BF16, ROM, newton=0)
 for code, name in ((3, "tanh"), (1, "SELU")):
