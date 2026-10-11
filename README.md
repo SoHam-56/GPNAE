@@ -63,10 +63,10 @@ The published engine computed one input at a time. Today's lane is built for thr
 | Format | SELU | sigmoid | tanh | ReLU, linear |
 |---|---|---|---|---|
 | fp32 | 18–20 cycles · 19–21 ns | 16–39 cycles · 17–41 ns | 20–22 cycles · 21–23 ns | bypass |
-| bf16 | 18 cycles · 19 ns | 13–76 cycles · 14–80 ns | 19 cycles · 20 ns | bypass |
+| bf16 | 15–17 cycles · 16–18 ns | 13–76 cycles · 14–80 ns | 16–19 cycles · 17–20 ns | bypass |
 | int8 | 13 cycles · 14 ns | 14 cycles · 15 ns | 14 cycles · 15 ns | 6 cycles · 6 ns |
 
-The upper end of each range comes from inputs at the edges of the fitted range, which take the tail unit. In bf16 every negative sigmoid input takes it too (below), so all-negative inputs cost about 6x the positive ones (74 against 13 cycles).
+The bf16 row is today's testbench over the eleven patterns; the fp32 and int8 rows are from an earlier measurement. The upper end of each range comes from inputs at the edges of the fitted range, which take the tail unit. In bf16 every negative sigmoid input takes it too (below), so all-negative inputs cost about 6x the positive ones (74 against 13 cycles).
 
 **Accuracy against the exact functions** (worst case over eleven stimulus patterns):
 
@@ -76,7 +76,7 @@ The upper end of each range comes from inputs at the edges of the fitted range, 
 | bf16 | 2.8% | 0.78% | 8.6% |
 | int8 | 9 LSB | 7 LSB | 3 LSB |
 
-In fp32 every output is within the regression's 1% bound. bf16 carries only 8 significant bits. Its sigmoid sends every x < 0 to the tail unit, which runs in fp32 with two Newton steps for 1/(1 + e^-|x|) and rounds the result to nearest bf16, because 1 - P in 8 bits cannot reach 1% there. Over every finite bf16 input (65,280) bf16 sigmoid is within 0.772% (at x = 0.0156), a hard gate in the bf16 regression. bf16 tanh and SELU still exceed the 6.25% bound at their worst points. The fp32, bf16 and int8 lanes match their bit-exact models on every output.
+In fp32 every output is within the regression's 1% bound. bf16 carries only 8 significant bits. Its sigmoid sends every x < 0 to the tail unit, which runs in fp32 with two Newton steps for 1/(1 + e^-|x|) and rounds the result to nearest bf16, because 1 - P in 8 bits cannot reach 1% there. Over every finite bf16 input (65,280) bf16 sigmoid is within 0.772% (at x = 0.0156), a hard gate in the bf16 regression. bf16 tanh still exceeds the 6.25% bound at its worst point. The fp32, bf16 and int8 lanes match their bit-exact models on every output.
 
 ### Compared with other activation hardware
 
