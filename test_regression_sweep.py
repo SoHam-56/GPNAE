@@ -80,6 +80,7 @@ def test_regression_target():
     lint = run("lint_fmt", "TOP=barrel_mac", "FMT=-GEXP_W=8 -GMAN_W=7")  # lint_fmt's FMT is Verilator -G overrides, not a regression format
     assert lint.returncode == 0 and "--top-module barrel_mac -GEXP_W=8 -GMAN_W=7" in lint.stdout, ("lint_fmt", lint.stderr[-200:])
     assert "--threads 3" in run("verilator", "SIM_THREADS=3").stdout
+    assert f"--threads 1 -j {reg.regress._cores()} --build-jobs {reg.regress._cores()} " in run("verilator").stdout  # one simulation thread, every core to Verilator and the C++ build
     assert "--trace" not in run("verilator").stdout and "--trace -DENABLE_TRACE" in run("verilator", "TRACE=1").stdout  # no waveform by default
     assert "--trace-fst -DENABLE_TRACE -DTRACE_FST" in run("verilator", "TRACE=fst").stdout  # SIENNA's make gpnae-verilator TRACE=fst
     assert run("verilator", "TRACE=bogus").returncode != 0

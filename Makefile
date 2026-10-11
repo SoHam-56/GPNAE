@@ -74,6 +74,7 @@ VERILATOR_FLAGS = \
 	--assert \
 	--top-module $(TOP_MODULE) \
 	--threads $(SIM_THREADS) \
+	-j $(shell nproc) \
 	--build-jobs $(shell nproc) \
 	--sv \
 	-I$(SRC_DIR) \
