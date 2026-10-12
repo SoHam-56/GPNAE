@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Known values for gpnae_model's fp32 lane: negative sigmoid words the RTL produced (fp32_down's truncation), and fp32_down against fpAdder."""
+"""Known values for gpnae_model's fp32 lane: negative sigmoid words the RTL produced (fp32_down's truncation), fp32_down against fpAdder, tanh's T_TINY by exhaustive scan."""
 import os
 import sys
 
@@ -36,6 +36,17 @@ val = lambda b: np.asarray(b, dtype=np.int64).astype(np.uint32).view(np.float32)
 odd = (p & 1) == 1
 eq("fp32_down drops P's last bit where it is set: P - 2^-24 - 1", bool((val(dn[odd]) == val(p[odd]) - 2.0 ** -24 - 1.0).all()), True)
 eq("both kinds of P were checked", (int((~odd).sum()) > 100, int(odd.sum()) > 100), (True, True))
+# T_TINY: every fp32 pattern in [2^-14, 2^-10), tanh in float64 rounded to fp32 (nearest even); below 2^-14, x^2/3 < 2^-29 is under half an ulp.
+first, n, n_bad = None, 0, 0  # the scan is ascending, so every pattern before the first mismatch rounds to itself
+for a in range(0x38800000, 0x3A800000, 1 << 22):
+    p = np.arange(a, a + (1 << 22), dtype=np.int64)
+    bad = p[np.tanh(val(p)).astype(np.float32).view(np.uint32).astype(np.int64) != p]
+    n, n_bad = n + p.size, n_bad + bad.size
+    if first is None and bad.size:
+        first = int(bad[0])
+eq("tanh's T_TINY is the first fp32 pattern from 2^-14 where tanh(x) does not round to x (every pattern below it does), in the model and its lane",
+   (None if first is None else f"{first:08x}", f"{gm.TANH_TINY[23]:08x}", f"{lane.tiny:08x}"), ("39b89ba3", "39b89ba3", "39b89ba3"))
+print(f"T_TINY scan: {n} patterns in [2^-14, 2^-10), {n_bad} where tanh(x) does not round to x, the first {first:#010x}")
 print(f"check_gpnae_model_fp32: {errs} errors")
 print(f"RESULT: {'PASSED' if errs == 0 else 'FAILED'}")
 sys.exit(1 if errs else 0)
