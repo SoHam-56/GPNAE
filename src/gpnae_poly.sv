@@ -55,7 +55,8 @@ module gpnae_poly #(
   localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(EXP_W, MAN_W);  // the format's multiplier, valid_i at t, done_o at t+MUL_LAT
   localparam int DN_LAT = FP32 ? 6 : sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // fp32_down: done_o = valid_stage6; else fpAdder
 
-  localparam logic [DATA_WIDTH-1:0] LAMDA = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h3F867D5F, MAN_W));
+  // bf16's lambda is rounded up to 0x3F87: its multiplier truncates, so 0x3F86 x 0x7F73 stayed finite where lambda x overflows.
+  localparam logic [DATA_WIDTH-1:0] LAMDA = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(FP32 ? 32'h3F867D5F : 32'h3F870000, MAN_W));
   localparam logic [DATA_WIDTH-1:0] ONE_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h3F800000, MAN_W));
   // tanh(x) rounds to x below these (fp32 3.5211e-4, bf16 0.0903, gpnae_model.TANH_TINY), so tanh's post multiply takes 1.0 there.
   localparam logic [DATA_WIDTH-1:0] T_TINY_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(FP32 ? 32'h39B89BA3 : 32'h3DB90000, MAN_W));
