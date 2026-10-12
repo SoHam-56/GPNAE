@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gpnae_model's bf16 lane: the sigmoid gate over every finite bf16 input (spec Decision 5), the lanes it must fail on, the study's d3 words, 3efe6f6's outputs, the vectorized tail, the RTL's literals."""
+"""gpnae_model's bf16 lane: the sigmoid gate over every finite bf16 input (spec Decision 5), the lanes it must fail on, the study's d3 words, 3efe6f6's outputs, tanh's tiny |x|, the vectorized tail, the RTL's literals."""
 import hashlib
 import os
 import re
@@ -8,6 +8,7 @@ import sys
 import numpy as np
 
 import gpnae_model as gm
+import truth  # AriL's true-function gate, on the path gpnae_model sets up
 
 fpu = gm.fpu
 BF16 = fpu.BF16
@@ -66,10 +67,9 @@ for code, name in ((3, "tanh"), (1, "SELU")):
     t = np.asarray(lane.in_tail(X, code))
     new_o, old_o = lane.run(X, code), old.run(X, code)
     w_new, w_old = rel_worst(code, X, new_o, t), rel_worst(code, X, old_o, t)
-    rest = np.abs(gm.to_float(BF16, X)) >= 2.0 ** -120 if code == 3 else np.ones(X.shape, dtype=bool)  # tiny tanh: 0.93 x flushes to 0, as built
+    rest = np.ones(X.shape, dtype=bool)
     print(f"{name:<6} tail inputs {int(t.sum())}: {int((new_o != old_o).sum())} words change, tail worst {100 * w_old:.3f}% -> {100 * w_new:.3f}%; "
-          f"overall{' (|x| >= 2^-120 as the study judges; below, 0.93 x flushes to 0 as built)' if code == 3 else ''} "
-          f"{100 * rel_worst(code, X, old_o, rest):.3f}% -> {100 * rel_worst(code, X, new_o, rest):.3f}%")
+          f"overall {100 * rel_worst(code, X, old_o, rest):.3f}% -> {100 * rel_worst(code, X, new_o, rest):.3f}%")
     eq(f"{name}: the poly path is unchanged", bool((new_o[~t] == old_o[~t]).all()), True)
     eq(f"{name}: the fp32 tail is no worse", w_new <= w_old, True)
 
@@ -92,9 +92,28 @@ eq("x < 0 sigmoid words equal the study's d3", int((out[neg] != d3).sum()), 0)
 OLD = {("bf16", 1): "1e4e3426ffc8616d", ("bf16", 2): "352049b8db595585", ("bf16", 3): "3c0feb455c9459c0", ("bf16", 4): "2bdacb7c6abe05e6",
        ("bf16", 5): "1dc1e23df86425b9", ("fp32", 1): "0373827d49a64d0b", ("fp32", 2): "b77b0fdc7958ac0f", ("fp32", 3): "8809e320cfb6bb98"}
 digest = lambda a: hashlib.sha256(np.asarray(a, dtype="<i8").tobytes()).hexdigest()[:16]
+built = {"bf16": gm.Lane(BF16, ROM, newton=0, tiny=False), "fp32": gm.Lane(fpu.FP32, l32.rom, tiny=False)}  # 3efe6f6's lanes: tanh x * P at every |x|
 for (tag, code), want in OLD.items():
-    ln, xs = (old, X) if tag == "bf16" else (l32, x32)
+    ln, xs = (built[tag], X) if tag == "bf16" else (built[tag], x32)
     eq(f"{tag}{' as built' if tag == 'bf16' else ''} code {code} on {xs.size} inputs equals 3efe6f6's model", digest(ln.run(xs, code)), want)
+
+# tanh below T_TINY returns x: the only words it changes are there, and each is x (a subnormal x reads as zero, as before); the gate passes.
+for tag, ln, xs in (("bf16", gm.Lane(BF16, ROM, newton=0), X), ("fp32", l32, x32)):
+    f = ln.f
+    new_o, old_o = ln.run(xs, 3), built[tag].run(xs, 3)
+    tiny = (xs & ln.MAG) < ln.tiny
+    normal = ((xs >> f.m) & f.emax) != 0
+    eq(f"{tag} tanh: T_TINY is the first |x| where tanh(x) does not round to x", (ln.tiny, int(truth.encode(tag, np.tanh(truth.decode(tag, ln.tiny)))) != ln.tiny,
+                                                                                bool((truth.encode(tag, np.tanh(truth.decode(tag, xs[tiny & normal]))) == xs[tiny & normal]).all())),
+       (fpu.from_fp32(gm.TANH_TINY[f.m], f.m), True, True))
+    eq(f"{tag} tanh: words change only below T_TINY, and there each normal x gives x", (bool((new_o[~tiny] == old_o[~tiny]).all()),
+                                                                                       bool((new_o[tiny & normal] == xs[tiny & normal]).all())), (True, True))
+    print(f"{tag} tanh: {int((new_o != old_o).sum())} of {xs.size} words change below T_TINY {truth.decode(tag, ln.tiny):.5g}")
+for tag, ln, xs in (("bf16", lane, X), ("fp32", l32, x32)):
+    r, r_old = truth.gate(tag, "tanh", xs, ln.run(xs, 3)), truth.gate(tag, "tanh", xs, built[tag].run(xs, 3))
+    print(f"{tag} tanh as built before: {truth.line(r_old)}")
+    print(f"{tag} tanh now:             {truth.line(r)}")
+    eq(f"{tag} tanh meets the true-function gate on {xs.size} inputs (it missed {r_old.over} before)", (r.ok, r_old.ok), (True, False))
 
 # fp32 is untouched: no Newton, its own tail, sigmoid x < 0 inside 3.5 on the polynomial.
 eq("fp32 lane: no Newton, no wide tail, x = -1 not a tail input", (l32.newton, l32.wide, l32.in_tail(0xBF800000, 2)), (0, False, False))

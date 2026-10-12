@@ -18,6 +18,7 @@ from number_formats import suggested_rel_tol  # noqa: E402  GPNAE root, the floa
 
 SETS = {1: (0, 8), 2: (9, 6), 3: (16, 8)}  # control word: (ROM base, degree), gpnae_poly's BASE_* and DEG_*
 LAMBDA, LA, ONE, TWO, NEG_ONE = 0x3F867D5F, 0x3FE10966, 0x3F800000, 0x40000000, 0xBF800000
+TANH_TINY = {23: 0x39B89BA3, 7: 0x3DB90000}  # the first |x| where tanh(x) does not round to x (fp32 3.5211e-4, bf16 0.0903); below it the lane returns x
 FOUR, THREE_HALF, BIG = 0x40800000, 0x40600000, 0x42D00000
 NEWTON_Y0, NEWTON_BF16 = 0x3FC00000, 2  # 1.5, the Newton seed's constant; gpnae_poly's bf16 branch sets gpnae_tail's NEWTON to NEWTON_BF16
 CINV = [0x3F800000, 0x3F000000, 0x3E2AAAAB, 0x3D2AAAAB, 0x3C088889, 0x3AB60B61,
@@ -59,8 +60,8 @@ class Lane:
             return super().__new__(LaneInt8)
         return super().__new__(cls)
 
-    def __init__(self, f, rom, newton=None, neg_tail=None):
-        """newton: gpnae_tail's NEWTON (default NEWTON_BF16 in bf16, 0 in fp32); a bf16 lane with newton > 0 runs its tail in fp32; neg_tail sends every sigmoid x < 0 to it."""
+    def __init__(self, f, rom, newton=None, neg_tail=None, tiny=True):
+        """newton: gpnae_tail's NEWTON (default NEWTON_BF16 in bf16, 0 in fp32); a bf16 lane with newton > 0 runs its tail in fp32; neg_tail sends every sigmoid x < 0 to it; tiny=False: tanh x * P at every |x|, as before Task 1.16."""
         self.f, self.rom = f, rom
         self.newton = (NEWTON_BF16 if f.w < 32 else 0) if newton is None else newton
         self.wide = f.w < 32 and self.newton > 0  # gpnae_poly's bf16 branch: gpnae_tail in fp32, x widened, the result narrowed to nearest
@@ -68,6 +69,7 @@ class Lane:
         self.t32 = Lane(fpu.FP32, rom, newton=self.newton) if self.wide else None
         k = lambda v: fpu.from_fp32(v, f.m)
         self.lam, self.la, self.one, self.two, self.neg_one, self.y0 = map(k, (LAMBDA, LA, ONE, TWO, NEG_ONE, NEWTON_Y0))
+        self.tiny = k(TANH_TINY[f.m]) if tiny else 0  # gpnae_poly's T_TINY: tanh's post multiply takes 1.0 in place of P below it
         self.four, self.three_half, self.big = (k(v) & ((1 << (f.w - 1)) - 1) for v in (FOUR, THREE_HALF, BIG))
         self.cinv = [k(v) for v in CINV]
         self.S = 1 << (f.w - 1)
@@ -112,7 +114,7 @@ class Lane:
             return np.where(pos, acc, down ^ S)
         if code == 1:
             return self._mul(x, np.where(pos, self.lam, acc))
-        return self._mul(x, acc)
+        return self._mul(x, np.where((x & MAG) < self.tiny, self.one, acc))  # tanh: x * 1.0 = x where tanh(x) rounds to x
 
     def newton_s(self, e):
         """gpnae_tail's T_ND..T_NS: s = E y with y -> 1/D, D = 1 + E, from y = 1.5 - D/2 (an exponent decrement, D >= 1), each step y = y (2 - D y)."""
