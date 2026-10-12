@@ -84,6 +84,10 @@ eq("SELU at s_in 1e-5, below Q4.11's step: q -25, -24, 24, 25 give 2, 3, 50, 51 
 big = gm.Case(6609 / 2048, -128, 2.801, -128, True)  # the old regression's positive set 99
 eq("SELU past lambda x = 512: set 99's q 48 and 100 give 85 and 127, as exact_int8 (the saturation gave 55)",
    [int(v) for v in lad.run(np.array([48, 100]), 1, gm.int8_params(big, 1))] + [int(v) for v in gm.exact_int8(np.array([48, 100]), 1, big)], [85, 127, 85, 127])
+tiny = [gm.Case(s, 0, s / 200, -128, True) for s in (2e-13, 3.5e-13)]  # mx 1 and 2 at shx 31; QuantizeMultiplier would shift left for both
+eq("the clamp's limit: at mx 1 (s_in 2e-13) q 1 gives 6 where the true code is 82; at mx 2 (3.5e-13) it is exact, 81 against 82",
+   [int(gm.int8_params(c, 1).mx) for c in tiny] + [int(lad.run(np.array([1]), 1, gm.int8_params(c, 1))[0]) for c in tiny] + [int(gm.exact_int8(np.array([1]), 1, tiny[0])[0])],
+   [1, 2, 6, 81, 82])
 eq("ladder constants: 19 rising codes from 5228 to 12773, from x = 5120",
    (gm.SIG_LAD_X0, len(gm.SIG_LAD_T), gm.SIG_LAD_T[0], gm.SIG_LAD_T[-1], int(all(np.diff(gm.SIG_LAD_T) > 0))), (5120, 19, 5228, 12773, 1))
 eq("the ladder's thresholds, computed from sigmoid, are gpnae_model's", fpc.sig_ladder_thresholds(), gm.SIG_LAD_T)

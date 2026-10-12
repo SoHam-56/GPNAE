@@ -347,7 +347,7 @@ def selu_acc(q, zin, mx, shx, p):
 
 
 def selu_out_params(s_in, mx, s_out):
-    """SELU's (mout, shout): the output code is acc s_in / (2^7 mx s_out); (2^31 - 1, 0) where QuantizeMultiplier would shift left (every nonzero acc saturates there)."""
+    """SELU's (mout, shout): the output code is acc s_in / (2^7 mx s_out); (2^31 - 1, 0) where QuantizeMultiplier would shift left, exact for mx >= 2 (every nonzero |acc| >= 268 saturates any z_out), not for mx 1 (s_in < 1.5 * 2^-42, about 3.4e-13)."""
     if mx == 0:
         return 0, 0  # s_in below 2^-43: every r is 0 and every output z_out
     m, sh = quantize_multiplier(s_in / (2.0 ** SELU_SH_LAMBDA * mx * s_out))
