@@ -92,7 +92,7 @@ eq("x < 0 sigmoid words equal the study's d3", int((out[neg] != d3).sum()), 0)
 OLD = {("bf16", 1): "1e4e3426ffc8616d", ("bf16", 2): "352049b8db595585", ("bf16", 3): "3c0feb455c9459c0", ("bf16", 4): "2bdacb7c6abe05e6",
        ("bf16", 5): "1dc1e23df86425b9", ("fp32", 1): "0373827d49a64d0b", ("fp32", 2): "b77b0fdc7958ac0f", ("fp32", 3): "8809e320cfb6bb98"}
 digest = lambda a: hashlib.sha256(np.asarray(a, dtype="<i8").tobytes()).hexdigest()[:16]
-built = {"bf16": gm.Lane(BF16, ROM, newton=0, tiny=False), "fp32": gm.Lane(fpu.FP32, l32.rom, tiny=False)}  # 3efe6f6's lanes: tanh x * P at every |x|
+built = {"bf16": gm.Lane(BF16, ROM, newton=0, tiny=False, lam=gm.LAMBDA), "fp32": gm.Lane(fpu.FP32, l32.rom, tiny=False)}  # 3efe6f6's lanes: tanh x * P at every |x|, bf16 lambda 0x3F86
 for (tag, code), want in OLD.items():
     ln, xs = (built[tag], X) if tag == "bf16" else (built[tag], x32)
     eq(f"{tag}{' as built' if tag == 'bf16' else ''} code {code} on {xs.size} inputs equals 3efe6f6's model", digest(ln.run(xs, code)), want)
@@ -114,6 +114,21 @@ for tag, ln, xs in (("bf16", lane, X), ("fp32", l32, x32)):
     print(f"{tag} tanh as built before: {truth.line(r_old)}")
     print(f"{tag} tanh now:             {truth.line(r)}")
     eq(f"{tag} tanh meets the true-function gate on {xs.size} inputs (it missed {r_old.over} before)", (r.ok, r_old.ok), (True, False))
+
+# bf16 SELU's lambda is 0x3F87, rounded up: x >= 0 words change, 0x7F73 overflows to +Inf (it gave 0x7F7E), and every positive word is within 0.38%.
+old_l = gm.Lane(BF16, ROM, lam=gm.LAMBDA)
+new_o, old_o = lane.run(X, 1), old_l.run(X, 1)
+pos = ((X >> 15) & 1) == 0
+eq("bf16 SELU lambda: 0x3F87, and fp32's is LAMBDA's", (lane.lam, l32.lam), (0x3F87, gm.LAMBDA))
+eq("bf16 SELU: words change only at x >= 0, and 0x7F73 gives +Inf (0x7F7E before)", (bool((new_o[~pos] == old_o[~pos]).all()),
+   int(new_o[X == 0x7F73][0]), int(old_o[X == 0x7F73][0])), (True, 0x7F80, 0x7F7E))
+r, r_old = truth.gate("bf16", "selu", X, new_o), truth.gate("bf16", "selu", X, old_o)
+rp = truth.gate("bf16", "selu", X[pos], new_o[pos])
+print(f"bf16 SELU before: {truth.line(r_old)}")
+print(f"bf16 SELU now:    {truth.line(r)}")
+print(f"bf16 SELU x >= 0: {truth.line(rp)}; {int((new_o != old_o).sum())} words change")
+eq("bf16 SELU meets the true-function gate (1 miss before); x >= 0 within 0.38%, none over 1%", (r.ok, r_old.ok, rp.worst < 0.0038, rp.over_target),
+   (True, False, True, 0))
 
 # fp32 is untouched: no Newton, its own tail, sigmoid x < 0 inside 3.5 on the polynomial.
 eq("fp32 lane: no Newton, no wide tail, x = -1 not a tail input", (l32.newton, l32.wide, l32.in_tail(0xBF800000, 2)), (0, False, False))

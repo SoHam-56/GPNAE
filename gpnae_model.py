@@ -18,6 +18,7 @@ from number_formats import suggested_rel_tol  # noqa: E402  GPNAE root, the floa
 
 SETS = {1: (0, 8), 2: (9, 6), 3: (16, 8)}  # control word: (ROM base, degree), gpnae_poly's BASE_* and DEG_*
 LAMBDA, LA, ONE, TWO, NEG_ONE = 0x3F867D5F, 0x3FE10966, 0x3F800000, 0x40000000, 0xBF800000
+LAMBDA_NARROW = 0x3F870000  # bf16's lambda 1.0546875, rounded up (nearest is 0x3F86): its multiplier truncates, and 0x3F86 x 0x7F73 stays finite where lambda x overflows
 TANH_TINY = {23: 0x39B89BA3, 7: 0x3DB90000}  # the first |x| where tanh(x) does not round to x (fp32 3.5211e-4, bf16 0.0903); below it the lane returns x
 FOUR, THREE_HALF, BIG = 0x40800000, 0x40600000, 0x42D00000
 NEWTON_Y0, NEWTON_BF16 = 0x3FC00000, 2  # 1.5, the Newton seed's constant; gpnae_poly's bf16 branch sets gpnae_tail's NEWTON to NEWTON_BF16
@@ -60,15 +61,15 @@ class Lane:
             return super().__new__(LaneInt8)
         return super().__new__(cls)
 
-    def __init__(self, f, rom, newton=None, neg_tail=None, tiny=True):
-        """newton: gpnae_tail's NEWTON (default NEWTON_BF16 in bf16, 0 in fp32); a bf16 lane with newton > 0 runs its tail in fp32; neg_tail sends every sigmoid x < 0 to it; tiny=False: tanh x * P at every |x|, as before Task 1.16."""
+    def __init__(self, f, rom, newton=None, neg_tail=None, tiny=True, lam=None):
+        """newton: gpnae_tail's NEWTON (default NEWTON_BF16 in bf16, 0 in fp32); a bf16 lane with newton > 0 runs its tail in fp32; neg_tail sends every sigmoid x < 0 to it; tiny=False: tanh x * P at every |x|, and lam: SELU's lambda as fp32 bits, as before Task 1.16."""
         self.f, self.rom = f, rom
         self.newton = (NEWTON_BF16 if f.w < 32 else 0) if newton is None else newton
         self.wide = f.w < 32 and self.newton > 0  # gpnae_poly's bf16 branch: gpnae_tail in fp32, x widened, the result narrowed to nearest
         self.neg_tail = self.wide if neg_tail is None else neg_tail
         self.t32 = Lane(fpu.FP32, rom, newton=self.newton) if self.wide else None
         k = lambda v: fpu.from_fp32(v, f.m)
-        self.lam, self.la, self.one, self.two, self.neg_one, self.y0 = map(k, (LAMBDA, LA, ONE, TWO, NEG_ONE, NEWTON_Y0))
+        self.lam, self.la, self.one, self.two, self.neg_one, self.y0 = map(k, ((LAMBDA if f.w == 32 else LAMBDA_NARROW) if lam is None else lam, LA, ONE, TWO, NEG_ONE, NEWTON_Y0))
         self.tiny = k(TANH_TINY[f.m]) if tiny else 0  # gpnae_poly's T_TINY: tanh's post multiply takes 1.0 in place of P below it
         self.four, self.three_half, self.big = (k(v) & ((1 << (f.w - 1)) - 1) for v in (FOUR, THREE_HALF, BIG))
         self.cinv = [k(v) for v in CINV]
