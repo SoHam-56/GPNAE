@@ -117,7 +117,7 @@ for tag, ln, xs in (("bf16", lane, X), ("fp32", l32, x32)):
     print(f"{tag} tanh now:             {truth.line(r)}")
     eq(f"{tag} tanh meets the true-function gate on {xs.size} inputs (it missed {r_old.over} before)", (r.ok, r_old.ok), (True, False))
 
-# bf16 SELU's lambda is 0x3F87, rounded up: x >= 0 words change, 0x7F73 overflows to +Inf (it gave 0x7F7E), and every positive word is within 0.38%.
+# bf16 SELU's lambda is 0x3F87, rounded up: x >= 0 words change; at 0x7F73, lambda x is above bf16's max (rounding to it), the lane now gives +Inf (0x7F7E before), and every positive word is within 0.38%.
 old_l = gm.Lane(BF16, ROM, lam=gm.LAMBDA)
 new_o, old_o = lane.run(X, 1), old_l.run(X, 1)
 pos = ((X >> 15) & 1) == 0

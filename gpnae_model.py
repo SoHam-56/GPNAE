@@ -18,7 +18,7 @@ from number_formats import suggested_rel_tol  # noqa: E402  GPNAE root, the floa
 
 SETS = {1: (0, 8), 2: (9, 6), 3: (16, 8)}  # control word: (ROM base, degree), gpnae_poly's BASE_* and DEG_*
 LAMBDA, LA, ONE, TWO, NEG_ONE = 0x3F867D5F, 0x3FE10966, 0x3F800000, 0x40000000, 0xBF800000
-LAMBDA_NARROW = 0x3F870000  # bf16's lambda 1.0546875, rounded up (nearest is 0x3F86): its multiplier truncates, and 0x3F86 x 0x7F73 stays finite where lambda x overflows
+LAMBDA_NARROW = 0x3F870000  # bf16's lambda 1.0546875, rounded up (nearest is 0x3F86): its multiplier truncates, and 0x3F86 x 0x7F73 gave 0x7F7E, below bf16's max, where lambda x lies above the max
 TANH_TINY = {23: 0x39B89BA3, 7: 0x3DB90000}  # the first |x| where tanh(x) does not round to x (fp32 3.5211e-4, bf16 0.0903); below it the lane returns x
 FOUR, THREE_HALF, BIG = 0x40800000, 0x40600000, 0x42D00000
 NEWTON_Y0, NEWTON_BF16 = 0x3FC00000, 2  # 1.5, the Newton seed's constant; gpnae_poly's bf16 branch sets gpnae_tail's NEWTON to NEWTON_BF16
