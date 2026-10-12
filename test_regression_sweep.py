@@ -55,9 +55,12 @@ def test_verdicts():
     assert v("fp32/taylor", fl.replace("ACCURACY: PASS (true function)", "")) == "PASS"  # the published Taylor lane is not gpnae_poly
     assert v("bf16/lane", fl.replace("All patterns passed", "2 pattern(s) failed")) == "FAIL (no 'Verdict : All patterns passed')"
     assert v("bf16/lane", fl + "%Error: x\n") == "FAIL (log: %Error: x)"
-    i8 = "ACCURACY: PASS (true function)\nBITEXACT: PASS (diagnostic; also required)  selu 25856/25856\nMODEL ACCURACY: MISSED (...; reported, not gated)\n"
+    i8 = ("ACCURACY: PASS (true function)\nBITEXACT: PASS (diagnostic; also required)  selu 64512/64512  sigmoid 64512/64512  tanh 64512/64512"
+          "  relu 64512/64512  linear 64512/64512  stream 2098/2098\nMODEL ACCURACY: MISSED (...; reported, not gated)\n")
     assert v("int8/lane", i8) == "PASS" and v("int8/lane", i8.replace("BITEXACT: PASS", "BITEXACT: FAIL")) == "FAIL (no 'BITEXACT: PASS')"
     assert v("int8/lane", i8.replace("ACCURACY: PASS (true", "ACCURACY: FAIL (true")).startswith("FAIL (log: ACCURACY: FAIL")
+    assert v("int8/lane", i8, 1) == "FAIL (exit 1)"  # a clean int8 log does not excuse a failing exit
+    assert v("int8/lane", i8.replace("ACCURACY: PASS (true", "ACCURACY: FAIL (true"), 1) == "FAIL (exit 1)"  # regression.py exits 1 on ACCURACY: FAIL
     assert v("int8/lane", i8.replace("ACCURACY: PASS (true function)\n", "")) == "FAIL (no 'ACCURACY: PASS')"
     assert v("selftest", "ALL 4 PASSED\n") == "PASS" and v("selftest", "done\n").startswith("FAIL")
     chk = "check_gpnae_model_fp32: 0 errors\nRESULT: PASSED\n"
