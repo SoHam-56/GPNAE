@@ -320,10 +320,14 @@ def write_report(results, fmt, batches, per_batch, model, ranges, seed, abs_tol,
 # --------------------------------------------------------------------------
 
 INT8_ACTS = (("selu", 1), ("sigmoid", 2), ("tanh", 3), ("relu", 4), ("linear", 5))  # TB_gpnae_poly's order in int8
-N_RAND_INT8, N_SAT_INT8 = 32, 8  # random lane parameter sets per activation, and how many saturate the rescale; bit-exact only
-N_POS_INT8 = 64  # positive SELU sets per activation, x from 0 past the int32 limit; the last two hit it exactly; bit-exact only
+N_RAND_INT8, N_SAT_INT8 = 32, 8  # random lane parameter sets per activation, and how many saturate the rescale
+N_LARGE_INT8 = 64  # large-scale SELU sets: z_in -128, s_in 1 to 15.99 (Q4.11's limit), lambda * x up to 4290, past the old 512; calibrated, half clamping at the top
 N_LAD_INT8 = 41  # sigmoid ladder edge sets: t_i - 1 and t_i for the 19 thresholds, the hand-over 5119 and 5120, a rescale saturating at -32768
-N_SWEEP_INT8 = 64  # the scale sweep: s_in log-spaced 1/128 to 1/8, every int8 input; bit-exact only
+N_SWEEP_INT8 = 64  # the scale sweep: s_in log-spaced 1/128 to 1/8, every int8 input
+N_FINE_INT8 = 40  # fine-scale sets: s_in log-spaced 1e-7 to 1e-2, below and around Q4.11's step 2^-11; SELU calibrated, z_in random
+EDGE_SELU = ((0.016, 127, 0.1125, 0), (0.0171, 127, 0.0908, 127), (0.0256, 63, 0.1055, 0), (0.0219, 64, 0.128, -36),
+             (0.05, 0, 0.05 * 2.0 ** -27, 0), (3.0, -128, 3.0 * 2.0 ** -30, 127))  # SELU's table near x = -4 (the absolute fit missed these), then s_out << s_in: the host's (2^31 - 1, 0)
+N_EDGE_INT8 = len(EDGE_SELU)
 GATED_INT8 = ("sigmoid",)  # gpnae_model's words against exact_int8 at 6.25%: sigmoid gated, tanh and SELU reported (the truth gate takes all)
 STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2),
                (0, 16), (2, 1))  # (mode, elements): 0 puts with last on the final one, 1 the final put held back, 2 puts while busy
@@ -338,33 +342,24 @@ def rand_params_int8(rng, code, sat):
     mx = int(rng.integers(1 << 14, 1 << 15)) if sat else int(rng.integers(0, 1 << 15))
     shx = int(rng.integers(0, 7)) if sat else int(rng.integers(8, 21))  # shx >= 8 keeps 255 * mx / 2^shx below 2^15
     zin = int(rng.integers(-128, 128))
-    if code == 1:
-        return gm.Int8Params(mx, shx, zin, int(rng.integers(1 << 30, 1 << 31)), int(rng.integers(-31, 6)),
+    if code == 1:  # any normalized multiplier; SELU's shift is <= 0 by the host's contract
+        return gm.Int8Params(mx, shx, zin, int(rng.integers(1 << 30, 1 << 31)), int(rng.integers(-31, 1)),
                              int(rng.integers(-128, 128)))
     return gm.Int8Params(mx, shx, zin, 0, 0, 0)
 
 
-def pos_params_int8(rng, k):
-    """Positive SELU set k: z_in = -128, so q - z_in runs 0..255, and x = round((q + 128) * mx / 2^shx) reaches 255 * mx / 2^shx."""
+def large_case(rng, k):
+    """Large-scale SELU set k: z_in -128, s_in log-spaced 1 to 15.99, x to 255 s_in; s_out calibrated on that range (odd k) or a random part of it (even k, the top clamps)."""
     import gpnae_model as gm
-    if k < N_POS_INT8 - 2:
-        mx, shx = int(rng.integers(1 << 14, 1 << 15)), 3  # up to 255 * 32767 / 8, past SELU_POS_SAT; steps of 1 to 2 real
-    else:  # the last two: some input lands on x = SELU_POS_SAT - 1, then on SELU_POS_SAT itself
-        mx, shx = pos_hit(gm.SELU_POS_SAT - (N_POS_INT8 - 1 - k))
-    s_in = mx / 2.0 ** shx / 2048
+    s_in = float(np.geomspace(1.0, 15.99, N_LARGE_INT8)[k])
     s_out, z_out = gm.calib_out(0.0, gm.LAMBDA_F * 255 * s_in * (1.0 if k % 2 else float(rng.uniform(0.25, 1.0))))
-    mout, shout = gm.quantize_multiplier(2.0 ** -22 / s_out)  # odd sets: the exact range, even: finer, so the top end clamps
-    return gm.Int8Params(mx, shx, -128, mout, shout, z_out)
+    return gm.Case(s_in, -128, s_out, z_out, True)
 
 
-def pos_hit(x):
-    """(mx, shx) with round(d * mx / 2^shx) = x for some d in 1..255, so input q = d - 128 rescales to x exactly."""
-    for shx in range(0, 8):
-        for d in range(255, 0, -1):
-            mx = -(-(x * (1 << shx) - ((1 << shx) >> 1)) // d)  # the smallest mx whose rounded rescale reaches x
-            if mx <= 32767 and ((d * mx + ((1 << shx) >> 1)) >> shx) == x:
-                return mx, shx
-    raise ValueError(f"no int8 input rescales to {x}")
+def fine_case(rng, k):
+    """Fine-scale SELU set k: s_in log-spaced 1e-7 to 1e-2, z_in random, s_out calibrated on the input's whole range (selu_case)."""
+    import gpnae_model as gm
+    return gm.selu_case(float(np.geomspace(1e-7, 1e-2, N_FINE_INT8)[k]), int(rng.integers(-128, 128)))
 
 
 def ladder_hit(x):
@@ -477,9 +472,12 @@ def int8_sets(seed) -> dict:
     extra_q = [rl.permutation(256).astype(np.int64) - 128 for _ in range(N_LAD_INT8 + N_SWEEP_INT8)]
     rs = np.random.RandomState(seed)
     rr = np.random.default_rng([seed, 12])  # the random parameter sets and their input order
-    rp = np.random.default_rng([seed, 14])  # the positive SELU sets and their input order
-    pos_sets = [pos_params_int8(rp, k) for k in range(N_POS_INT8)]  # every activation runs them; only SELU's are of interest
-    pos_q = [rp.permutation(256).astype(np.int64) - 128 for _ in pos_sets]
+    rp = np.random.default_rng([seed, 14])  # the large-scale sets and their input order
+    large = [large_case(rp, k) for k in range(N_LARGE_INT8)]  # every activation runs SELU's scales; only SELU's outputs are of interest
+    large_q = [rp.permutation(256).astype(np.int64) - 128 for _ in large]
+    rf = np.random.default_rng([seed, 17])  # the fine-scale and edge sets and their input order
+    fine = [fine_case(rf, k) for k in range(N_FINE_INT8)] + [gm.Case(*e, True) for e in EDGE_SELU]
+    fine_q = [rf.permutation(256).astype(np.int64) - 128 for _ in fine]
     out = {}
     for act, code in INT8_ACTS:
         sets = []
@@ -487,8 +485,10 @@ def int8_sets(seed) -> dict:
             sets.append(("case", case, gm.int8_params(case, code), rs.permutation(256).astype(np.int64) - 128))  # every input once
         rand = [rand_params_int8(rr, code, k < N_SAT_INT8) for k in range(N_RAND_INT8)]
         sets += [("random", None, p, rr.permutation(256).astype(np.int64) - 128) for p in rand]
-        sets += [("positive", None, p if code == 1 else p._replace(mout=0, shout=0, zout=0), q) for p, q in zip(pos_sets, pos_q)]
+        own = (lambda c: c) if code == 1 else (lambda c: None)  # SELU gates on the set's float scales; the others on what the rescale encodes
+        sets += [("large", own(c), gm.int8_params(c, code), q) for c, q in zip(large, large_q)]
         sets += [("ladder" if k < N_LAD_INT8 else "sweep", None, p, q) for k, (p, q) in enumerate(zip(lad_sets + sweep, extra_q))]
+        sets += [("fine" if k < N_FINE_INT8 else "edge", own(c), gm.int8_params(c, code), q) for k, (c, q) in enumerate(zip(fine, fine_q))]
         out[act] = sets
     assert len(lad_sets) == N_LAD_INT8
     return out
@@ -502,8 +502,8 @@ def int8_quant(code, case, p):
     if case is not None:
         return case.s_in, case.z_in, case.s_out, case.z_out
     s_in = p.mx * 2.0 ** -p.shx / 2048  # the rescale: x = (q - z_in) mx / 2^shx in Q4.11
-    if code == 1:
-        s_out = 2.0 ** (9 - p.shout) / p.mout if p.mout else np.inf  # requantize: q = v mout 2^shout / 2^31, v in units of 2^-22
+    if code == 1:  # requantize: q = acc mout 2^(shout - 31), acc = x 2^(shx + 18), x = (q - z_in) s_in, s_in = mx 2^-(shx + 11)
+        s_out = s_in * 2.0 ** (24 - p.shout) / (p.mx * p.mout) if p.mout and p.mx else np.inf
         return s_in, p.zin, s_out, p.zout  # a zero multiplier (the ladder and sweep sets) leaves only the zero point
     if code in INT8_OUT:
         return (s_in, p.zin) + INT8_OUT[code]
@@ -546,11 +546,10 @@ def run_int8(args) -> int:
     per = MAX_SIGNALS
     n_cases = len(gm.INT8_CASES["tanh"])
     assert all(len(gm.INT8_CASES[a]) == n_cases for a, _ in INT8_ACTS), "every activation needs the same number of cases"
-    case_batches = n_cases * 256 // per
-    rand_batches = (n_cases + N_RAND_INT8) * 256 // per
-    pos_batches = (n_cases + N_RAND_INT8 + N_POS_INT8) * 256 // per
-    lad_batches = pos_batches + N_LAD_INT8 * 256 // per
-    batches = lad_batches + N_SWEEP_INT8 * 256 // per  # cases, random, positive SELU, ladder edges, the scale sweep
+    groups = (("case", n_cases), ("random", N_RAND_INT8), ("large", N_LARGE_INT8), ("ladder", N_LAD_INT8), ("sweep", N_SWEEP_INT8),
+              ("fine", N_FINE_INT8), ("edge", N_EDGE_INT8))  # the stimulus order
+    starts = np.cumsum([0] + [n * 256 // per for _, n in groups])  # each group's first batch
+    batches = int(starts[-1])
     sets = int8_sets(args.seed)
     lad_sets = [p for kind, _, p, _ in sets["tanh"] if kind == "ladder"]
     sweep = [p for kind, _, p, _ in sets["tanh"] if kind == "sweep"]
@@ -560,7 +559,7 @@ def run_int8(args) -> int:
     write_config(fmt, batches, per, 0.0, 0.0, "hw", args.timeout, args.seed, True, coeff)
     os.makedirs(STIM_DIR, exist_ok=True)
     rows, rand_sets = [], {}
-    pos_x = np.concatenate([gm.rescale_wide(q, p.zin, p.mx, p.shx) for kind, _, p, q in sets["selu"] if kind == "positive"])
+    large_x = np.concatenate([c.s_in * (q - c.z_in) for kind, c, _, q in sets["selu"] if kind == "large"])  # SELU's real inputs there
     for act, code in INT8_ACTS:
         stim, gold, par = [], [], []
         for kind, case, p, q in sets[act]:
@@ -580,7 +579,8 @@ def run_int8(args) -> int:
                              for p in par))
     n_sat = {act: sum(rescale_saturates(p) for p in s) for act, s in rand_sets.items()}
     stream = write_stream_int8(lane, np.random.default_rng([args.seed, 13]))
-    print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases, {N_RAND_INT8} random, {N_POS_INT8} positive SELU, {N_LAD_INT8} ladder edge and {N_SWEEP_INT8} scale sweep sets x 256 inputs per activation, "
+    print(hdr(f"\n{'='*78}\n  GPNAE int8 lane: {n_cases} cases, {N_RAND_INT8} random, {N_LARGE_INT8} large-scale, {N_LAD_INT8} ladder edge, {N_SWEEP_INT8} scale sweep, "
+              f"{N_FINE_INT8} fine-scale and {N_EDGE_INT8} edge sets x 256 inputs per activation, "
               f"a {stream['elements']}-element protocol stream, seed {args.seed}\n{'='*78}"))
     clear_got(ALL_ACTS + ("stream",))
     raw, wall = run_make("poly", "+dump_got")
@@ -590,10 +590,10 @@ def run_int8(args) -> int:
     parsed = parse_log(raw, expect_total=batches * per, expect_acts=len(INT8_ACTS))
     for act, a in parsed["per_act"].items():
         print_activation(act, a)
-    bad = {act: [0] * 5 for act, _ in INT8_ACTS}  # wrong or missing outputs: cases, random, positive SELU, ladder edge, scale sweep
+    bad = {act: [0] * len(groups) for act, _ in INT8_ACTS}  # wrong or missing outputs per group, in stimulus order
     for m in re.finditer(r"BATCHFAIL (\w+) b(\d+) : (\d+)", raw):
         if m.group(1) in bad:
-            bad[m.group(1)][sum(int(m.group(2)) >= b for b in (case_batches, rand_batches, pos_batches, lad_batches))] += int(m.group(3))
+            bad[m.group(1)][int(np.searchsorted(starts, int(m.group(2)), side="right")) - 1] += int(m.group(3))
     se = re.search(r"STREAM : elements (\d+)\s+exact (\d+)\s+failed (\d+)\s+missing (\d+)\s+extra (\d+)", raw)
     sb = re.search(r"STREAM boundaries : expected (\d+)\s+observed (\d+)\s+wrong (\d+)\s+edge errors (\d+)", raw)
     stream_ok = bool(se and sb) and int(se.group(1)) == stream["elements"] and int(se.group(2)) == stream["elements"] \
@@ -602,7 +602,7 @@ def run_int8(args) -> int:
     exact_ok = parsed["status"] == "PASS" and stream_ok
     tot = {act: gm.merge_acc(a for x, c, _, a in rows if x == act and c.gated) for act, _ in INT8_ACTS[:3]}
     tol = f"rel <= {100 * gm.REL_TOL_INT8:.2f}% or abs <= {gm.ABS_TOL_LSB} LSB"
-    n_c, n_r, n_p = n_cases * 256, N_RAND_INT8 * 256, N_POS_INT8 * 256
+    n_c, n_r, n_p = n_cases * 256, N_RAND_INT8 * 256, N_LARGE_INT8 * 256
     ran = lambda a: a in parsed["per_act"] and parsed["per_act"][a]["total"] == batches * per  # the TB checked all of it
     part = lambda a, k, n: f"{a} {n - bad[a][k]}/{n}" if ran(a) else f"{a} no result"
     print(hdr("      true-function gate (truth.py) on the RTL's words, every input of every set:"))
@@ -617,18 +617,19 @@ def run_int8(args) -> int:
          + "  ".join(f"{a} {v['exact']}/{v['total']}" for a, v in parsed["per_act"].items())
          + (f"  stream {se.group(2)}/{se.group(1)}" if se else "  stream NO-RESULT"),
          "  INT8_CASES, every int8 input: " + "  ".join(part(a, 0, n_c) for a, _ in INT8_ACTS),
-         f"  random sets ({N_RAND_INT8} per activation, bit-exact only): "
+         f"  random sets ({N_RAND_INT8} per activation): "
          + "  ".join(f"{part(a, 1, n_r)} ({n_sat[a]} saturate the rescale)" for a, _ in INT8_ACTS),
-         f"  positive SELU sets ({N_POS_INT8} per activation, z_in = -128, bit-exact only): {part('selu', 2, n_p)}; SELU inputs "
-         f"x >= 16: {int((pos_x >= 1 << 15).sum())}, of them in [16, {gm.SELU_POS_SAT / 2048:.2f}) exact: "
-         f"{int(((pos_x >= 1 << 15) & ~gm.selu_pos_saturates(pos_x)).sum())}, saturating lambda * x at int32: "
-         f"{int(gm.selu_pos_saturates(pos_x).sum())} (x = SELU_POS_SAT - 1 hit {int((pos_x == gm.SELU_POS_SAT - 1).sum())}, "
-         f"x = SELU_POS_SAT hit {int((pos_x == gm.SELU_POS_SAT).sum())}); the other activations "
-         + "  ".join(part(a, 2, n_p) for a, _ in INT8_ACTS[1:]),
+         f"  large-scale sets ({N_LARGE_INT8} per activation, z_in = -128, s_in 1 to 15.99): {part('selu', 2, n_p)}; SELU inputs "
+         f"x >= 16: {int((large_x >= 16).sum())}, lambda * x >= 512 (where the int32 saturation was): {int((gm.LAMBDA_F * large_x >= 512).sum())}, "
+         f"largest x {large_x.max():.1f}; the other activations " + "  ".join(part(a, 2, n_p) for a, _ in INT8_ACTS[1:]),
          f"  sigmoid ladder edge sets ({N_LAD_INT8} per activation: t_i - 1 and t_i for each threshold, 5119 and 5120, both signs, and a "
-         f"rescale saturating at -32768; bit-exact only): " + "  ".join(part(a, 3, N_LAD_INT8 * 256) for a, _ in INT8_ACTS),
-         f"  scale sweep ({N_SWEEP_INT8} per activation, s_in 1/128 to 1/8; bit-exact only): "
+         f"rescale saturating at -32768): " + "  ".join(part(a, 3, N_LAD_INT8 * 256) for a, _ in INT8_ACTS),
+         f"  scale sweep ({N_SWEEP_INT8} per activation, s_in 1/128 to 1/8): "
          + "  ".join(part(a, 4, N_SWEEP_INT8 * 256) for a, _ in INT8_ACTS),
+         f"  fine-scale sets ({N_FINE_INT8} per activation, s_in 1e-7 to 1e-2, SELU calibrated): "
+         + "  ".join(part(a, 5, N_FINE_INT8 * 256) for a, _ in INT8_ACTS),
+         f"  edge sets ({N_EDGE_INT8} per activation: SELU's table near x = -4, then s_out << s_in, which the host clamps to (2^31 - 1, 0)): "
+         + "  ".join(part(a, 6, N_EDGE_INT8 * 256) for a, _ in INT8_ACTS),
          f"  protocol stream ({stream['segments']} segments, {stream['groups']} groups, no reset between groups): "
          + (f"exact {se.group(2)}/{se.group(1)}, failed {se.group(3)}, missing {se.group(4)}, extra {se.group(5)}; group starts "
             f"{sb.group(2)} observed of {sb.group(1)} expected, {sb.group(3)} wrong, {sb.group(4)} edge errors"
@@ -653,9 +654,11 @@ def run_int8(args) -> int:
     L.append("random sets (mx shx z_in mout shout z_out), in stimulus order after the cases:")
     for act, s in rand_sets.items():
         L.append(f"  {act}: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for p in s))
-    L.append("positive SELU sets (mx shx z_in mout shout z_out), in stimulus order after the random sets:")
-    L.append("  selu: " + " ".join(f"({p.mx} {p.shx} {p.zin} {p.mout} {p.shout} {p.zout})" for kind, _, p, _ in sets["selu"] if kind == "positive"))
-    L.append("sigmoid ladder edge sets (mx shx x; z_in = 0, mout = shout = z_out = 0), in stimulus order after the positive SELU sets:")
+    L.append("large-scale, fine-scale and edge SELU sets (s_in z_in s_out z_out: mx shx mout shout):")
+    for g in ("large", "fine", "edge"):
+        L.append(f"  {g}: " + " ".join(f"({c.s_in:.6g} {c.z_in} {c.s_out:.6g} {c.z_out}: {p.mx} {p.shx} {p.mout} {p.shout})"
+                                       for kind, c, p, _ in sets["selu"] if kind == g))
+    L.append("sigmoid ladder edge sets (mx shx x; z_in = 0, mout = shout = z_out = 0), in stimulus order after the large-scale sets:")
     L.append("  " + " ".join(f"({p.mx} {p.shx} {x})" for p, x in zip(lad_sets, ladder_xs())))
     L.append("scale sweep sets (s_in mx shx z_in; mout = shout = z_out = 0), in stimulus order after the ladder edge sets:")
     L.append("  " + " ".join(f"({s:.6f} {p.mx} {p.shx} {p.zin})" for p, s in zip(sweep, np.geomspace(1 / 128, 1 / 8, N_SWEEP_INT8))))

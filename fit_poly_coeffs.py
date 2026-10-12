@@ -157,6 +157,53 @@ def fit_form(code, r, deg):
     return ints if all(-32768 <= v <= 32767 for v in ints) else None
 
 
+SELU_X = np.arange(gpnae_model.T_SELU, 0, dtype=np.int64)  # every Q4.11 x SELU's polynomial sees, -4 to -2^-11
+SELU_P = LA * np.expm1(SELU_X / 2048.0) / (SELU_X / 2048.0)  # selu(x) / x there
+
+
+def selu_rel_err(coeffs):
+    """P's worst relative error against selu(x) / x, bit-exact (barrel_mac's Q4.11 Horner) over every x in SELU_X."""
+    p = gpnae_model.horner(SELU_X, list(coeffs), 0, len(coeffs) - 1)
+    return float(np.abs(p / 2048.0 / SELU_P - 1.0).max())
+
+
+def fit_selu_rel(deg, it=400):
+    """SELU's P by relative minimax (its output is r * P): Lawson, then the best integers by selu_rel_err, exhaustive within a radius of at most 3125 tables, else coordinate descent."""
+    xr = SELU_X / 2048.0
+    V = np.vander(xr, deg + 1, increasing=True)
+    w = np.full(xr.size, 1.0 / xr.size)
+    for _ in range(it):
+        sw = np.sqrt(w) / SELU_P
+        c, *_ = np.linalg.lstsq(V * sw[:, None], SELU_P * sw, rcond=None)
+        e = np.abs(V @ c / SELU_P - 1)
+        w = w * e
+        w /= w.sum()
+    base = [int(np.floor(v * 2048 + 0.5)) for v in c]
+    if not all(-32768 <= v <= 32767 for v in base):
+        return None
+    rad = max(r for r in range(0, 7) if (2 * r + 1) ** (deg + 1) <= 3125 or r == 0)
+    best = (selu_rel_err(base), base)
+    if rad > 0:
+        import itertools
+        for d in itertools.product(range(-rad, rad + 1), repeat=deg + 1):
+            t = [b + k for b, k in zip(base, d)]
+            e = selu_rel_err(t)
+            if e < best[0]:
+                best = (e, t)
+    else:
+        improved = True
+        while improved:
+            improved = False
+            for k in range(deg + 1):
+                for s in (-1, 1):
+                    t = list(best[1])
+                    t[k] += s
+                    e = selu_rel_err(t)
+                    if e < best[0]:
+                        best, improved = (e, t), True
+    return best[1] if all(-32768 <= v <= 32767 for v in best[1]) else None
+
+
 def lane_for(code, coeffs):
     """The 2a lane (no sigmoid ladder, P-4 of the residual plan) with one coefficient set at base 0 and the model's thresholds."""
     rom = [0] * 32
@@ -200,6 +247,8 @@ def dense_cases(code):
 def dense_run(lane, code, case):
     """The lane's int8 outputs at every DENSE_X input, through run() with an identity rescale."""
     p = gpnae_model.int8_params(case, code)
+    if code == 1:  # SELU's post multiply takes r = q * mx, 24 bits: mx 1, shx 0 is the identity with r = x
+        p = p._replace(mx=1, shx=0, mout=gpnae_model.selu_out_params(case.s_in, 1, case.s_out)[0], shout=gpnae_model.selu_out_params(case.s_in, 1, case.s_out)[1])
     assert (gpnae_model.rescale(DENSE_X, 0, p.mx, p.shx) == DENSE_X).all(), "the dense sweep's rescale must be the identity"
     return lane.run(DENSE_X, code, p)
 
@@ -316,11 +365,11 @@ def main_int8(a):
     for code in (1, 2, 3):
         r, cands[code] = RANGE_INT8[code], []
         for d in DEGREES_INT8:
-            c = fit_form(code, r, d)
+            c = fit_selu_rel(d) if code == 1 else fit_form(code, r, d)  # SELU: relative minimax, its output being r * P
             if c is None:
                 L.append(f"{NAME_INT8[code]:<10}{d:>4}  coefficients beyond Q4.11")
                 continue
-            c = refine_int8(code, c)
+            c = c if code == 1 else refine_int8(code, c)
             s = strip_int8(c)
             lane = lane_for(code, s)
             dense, grid = measure_dense(lane, code), measure_cases(lane, code)
@@ -334,6 +383,8 @@ def main_int8(a):
                      f"{grid.worst_lsb:>5}{cw:>10.2f}{cm:>9.2f}{max(abs(v) for v in s) / 2048:>8.3f}")
         assert cands[code], f"{NAME_INT8[code]}: no degree from 2 to 12 has coefficients within Q4.11"
         chosen[code] = pick_int8(cands[code])
+        if code == 1:  # SELU keeps the lane's degree (SETS_INT8): one more degree is one more Horner round per group (Task 1.16 ruling)
+            chosen[code] = next(c for c in cands[code] if c.d == gpnae_model.SETS_INT8[1][1])
     while layout_int8({k: v[0] for k, v in chosen.items()}) is None:  # more than the ROM's 32 entries
         k = max(chosen, key=lambda c: (not chosen[c][2].ok, chosen[c][0]))  # one outside the tolerance first, then the highest degree
         lower = [c for c in cands[k] if c[0] < chosen[k][0]]
@@ -346,7 +397,10 @@ def main_int8(a):
         fig = (f"dense {dn.fail} of {n_dense[code]} outside, worst {100 * dn.worst_rel:.2f}% where |d| > 1 LSB, worst {dn.worst_lsb} LSB,"
                f" {dn.real_lsb:.2f} LSB against the unquantized function; grid {gr.fail} of {n_grid[code]} outside, worst"
                f" {100 * gr.worst_rel:.2f}%, worst {gr.worst_lsb} LSB")
-        if dn.ok:
+        if code == 1:
+            L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the lane's (SETS_INT8), relative minimax: {'MEETS' if dn.ok else 'MISSES'} "
+                     f"TOLERANCE ({fig}); the gate is truth.py's, run by regression.py")
+        elif dn.ok:
             L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the lowest within the tolerance: MEETS TOLERANCE on the 2a lane, ladder off ({fig})")
         else:
             L.append(f"{NAME_INT8[code]:<10} chosen: degree {k.d} (fitted at {k.nominal}), the best by dense misses: MISSES TOLERANCE on the 2a lane, ladder off ({fig}):"

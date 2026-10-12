@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Known values for gpnae_model's int8 lane: rounding and saturation of each step, the fixed output quantizations, SELU through the requantizer."""
+"""Known values for gpnae_model's int8 lane: rounding and saturation of each step, the fixed output quantizations, SELU's block-floating x through the requantizer."""
 import os
 import re
 import sys
@@ -42,21 +42,27 @@ eq("tanh, zero table: x * 0 inside +/-4, saturated outside", zero.run(np.array([
 zero_2a = gm.Lane(gm.INT8, [0] * 32, ladder=False)  # 2a's sigmoid, which saturates past 3.5 (the ladder takes over from 2.5)
 eq("sigmoid, zero table, ladder off: P = 0, 1 - P = 1 inside +/-3.5, saturated outside", zero_2a.run(np.array([70, 71, -70, -71]), 2, p), [-128, 127, 127, -128])
 eq("sigmoid, zero table, ladder on: the ladder at x = +-7168, +-7270 whatever the table", zero.run(np.array([70, 71, -70, -71]), 2, p), [120, 121, -120, -121])
-p2 = gm.Int8Params(mx=26214, shx=8, zin=0, mout=1 << 30, shout=-17, zout=3)  # output multiplier 2^-18: 1/16 per LSB in 2^-22
-eq("SELU x >= 0: lambda x, requantized", zero.run(np.array([10, 0]), 1, p2), [11, 3])
-eq("SELU -4 <= x < 0: x * P = 0 with a zero table", zero.run(np.array([-5]), 1, p2), [3])
-p3 = gm.Int8Params(mx=26214, shx=7, zin=0, mout=1 << 30, shout=-17, zout=3)  # s_in = 0.1
-eq("SELU x = -4 inside, x < -4: -lambda*alpha, requantized", zero.run(np.array([-40, -41, -71]), 1, p3), [3, -25, -25])
-eq("rescale_wide does not saturate", gm.rescale_wide(np.array([127, -128]), 0, 32767, 0), [4161409, -4194176])
-eq("SELU x >= 0 in 2^-22: lambda * x floored by 2^3, int32 from x = 997960", gm.selu_pos(np.array([1024, 997959, 997960])),
-   [2203520, 2147483023, (1 << 31) - 1])
-eq("SELU_POS_SAT is the first saturating x", (gm.SELU_POS_SAT,), (997960,))
-p4 = gm.Int8Params(mx=32767, shx=0, zin=0, mout=1 << 30, shout=-24, zout=0)  # x = 16 q, output multiplier 2^-25: 8 per LSB
-eq("SELU x = 160 and 480 exact past Q4.11, x = 496 saturates lambda * x to 2^31 - 1", zero.run(np.array([10, 30, 31]), 1, p4), [21, 63, 64])
+p2 = gm.Int8Params(26214, 8, 0, *gm.selu_out_params(0.05, 26214, 0.05), 3)  # s_in = s_out = 0.05: lambda * 0.5 / 0.05 = 10.5 -> 11, + 3
+eq("selu_out_params(0.05, 26214, 0.05) is QuantizeMultiplier(s_in / (2^7 mx s_out))", gm.selu_out_params(0.05, 26214, 0.05), (1342197760, -21))
+eq("SELU x >= 0: r * lambda >>> 7, requantized", zero.run(np.array([10, 0]), 1, p2), [14, 3])
+eq("SELU -4 <= x < 0: r * P = 0 with a zero table", zero.run(np.array([-5]), 1, p2), [3])
+p3 = gm.Int8Params(mx=26214, shx=7, zin=0, mout=1 << 30, shout=-19, zout=3)  # s_in = 0.1; output multiplier 2^-20
+eq("SELU x = -4 inside, x < -4: -lambda*alpha 2^shx * 1.0 >>> 4 = -3601 * 2^14, times 2^-20 is -56.3", zero.run(np.array([-40, -41, -71]), 1, p3), [3, -53, -53])
+eq("rescale_product is exact", gm.rescale_product(np.array([127, -128]), 0, 32767), [4161409, -4194176])
+eq("selu_acc at the extremes stays inside int32: d 255 at any shx, d -255 at shx 0, 9 (x < -4) and 31 (r * P)",
+   [int(gm.selu_acc(np.array([127]), -128, 32767, s, np.array([3451]))[0]) for s in (0, 31)]
+   + [int(gm.selu_acc(np.array([-128]), 127, 32767, s, np.array([3451]))[0]) for s in (0, 9, 31)],
+   [1123760904, 1123760904, -460928, -235995136, -1802195240])
+p4 = gm.Int8Params(32767, 0, 0, *gm.selu_out_params(32767 / 2048, 32767, 8.0), 0)  # x = 16 q, s_out 8
+eq("SELU past 512 is exact: x = 160, 480 and 496 give 21, 63 and 65 (the int32 saturation gave 64)", zero.run(np.array([10, 30, 31]), 1, p4), [21, 63, 65])
 eq("lane rounding is sienna_fmt_pkg's REQ_ROUNDING", (gm.REQ_ROUNDING,), ("DOUBLE",))
-flat = gm.Lane(gm.INT8, [192] + [0] * 31, sets={1: (0, 0)})  # P = 192 everywhere: x = -2048 gives v = -3 * 2^20, a -1.5 LSB tie
-eq("SELU requantize rounds the -1.5 tie away from zero (DOUBLE; SINGLE gives 2)", flat.run(np.array([-20]), 1, p2), [1])
-eq("ReLU and linear pass through", [int(v) for v in zero.run(np.array([-5, 7]), 4, p)] + [int(v) for v in zero.run(np.array([-5, 7]), 5, p)], [-5, 7, -5, 7])
+flat = gm.Lane(gm.INT8, [192] + [0] * 31, sets={1: (0, 0)})  # P = 192 everywhere: r = -16 * 2^14 gives acc -3 * 2^20, a -1.5 LSB tie at 2^-21
+eq("SELU requantize rounds the -1.5 tie away from zero (DOUBLE; SINGLE gives 2)", flat.run(np.array([-16]), 1, gm.Int8Params(16384, 5, 0, 1 << 30, -20, 3)), [1])
+eq("selu_out_params: a left shift becomes (2^31 - 1, 0); mx 0 gives (0, 0)", gm.selu_out_params(0.05, 26214, 0.05 * 2.0 ** -27) + gm.selu_out_params(1e-14, 0, 1e-14),
+   ((1 << 31) - 1, 0, 0, 0))
+eq("ReLU is max(q, z_in), linear passes through", [int(v) for v in zero.run(np.array([-5, 7, -128, 127]), 4, p._replace(zin=-3))]
+   + [int(v) for v in zero.run(np.array([-5, 7, 3, 4]), 4, p._replace(zin=4))] + [int(v) for v in zero.run(np.array([-5, 7]), 5, p._replace(zin=4))],
+   [-3, 7, -3, 127, 4, 7, 4, 4, -5, 7])
 eq("every case's rescale is normalized and within half a step", [int((16384 <= p.mx <= 32767 or p.shx == 31) and abs(p.mx - c.s_in * 2048 * 2.0 ** p.shx) <= 0.5) for a in ("tanh", "sigmoid", "selu") for c in gm.INT8_CASES[a] for p in [gm.int8_params(c, 3)]], [1] * 15)
 eq("REL_TOL_INT8 is GPNAE's max(1%, 8 * 2^-7)", (gm.REL_TOL_INT8, gm.ABS_TOL_LSB), (0.0625, 1))
 ct = gm.Case(1 / 32, 0, 1 / 128, 0, True)  # tanh golden: q = 0 -> 0, q = 32 -> 97, q = 1 -> 4
@@ -70,6 +76,14 @@ eq("tolerance measured from the output zero point", (a.ok, a.fail, a.worst_rel, 
 
 ROM = gm.read_rom(os.path.join(gm.ROOT, gm.coeff_file(gm.INT8)))
 lad, off = gm.Lane(gm.INT8, ROM), gm.Lane(gm.INT8, ROM, ladder=False)  # the lane as built, and 2a's
+eq("SELU's table (ROM 0-2) is fit_poly_coeffs' relative-minimax fit, 4.16% worst", (lad.rom[:3], fpc.fit_selu_rel(2), round(100 * fpc.selu_rel_err(lad.rom[:3]), 2)),
+   ([3451, 1238, 151], [3451, 1238, 151], 4.16))
+fine = gm.selu_case(1e-5, 0)  # s_out 1.405e-5, z_out 32: one Q4.11 step of x is 35 output LSB
+eq("SELU at s_in 1e-5, below Q4.11's step: q -25, -24, 24, 25 give 2, 3, 50, 51 (true 1, 2, 50, 51; the rounded x gave -27, 32, 32, 69)",
+   lad.run(np.array([-25, -24, 24, 25]), 1, gm.int8_params(fine, 1)), [2, 3, 50, 51])
+big = gm.Case(6609 / 2048, -128, 2.801, -128, True)  # the old regression's positive set 99
+eq("SELU past lambda x = 512: set 99's q 48 and 100 give 85 and 127, as exact_int8 (the saturation gave 55)",
+   [int(v) for v in lad.run(np.array([48, 100]), 1, gm.int8_params(big, 1))] + [int(v) for v in gm.exact_int8(np.array([48, 100]), 1, big)], [85, 127, 85, 127])
 eq("ladder constants: 19 rising codes from 5228 to 12773, from x = 5120",
    (gm.SIG_LAD_X0, len(gm.SIG_LAD_T), gm.SIG_LAD_T[0], gm.SIG_LAD_T[-1], int(all(np.diff(gm.SIG_LAD_T) > 0))), (5120, 19, 5228, 12773, 1))
 eq("the ladder's thresholds, computed from sigmoid, are gpnae_model's", fpc.sig_ladder_thresholds(), gm.SIG_LAD_T)
@@ -133,6 +147,10 @@ def rtl_ladder(path=os.path.join(gm.ROOT, "src", "gpnae_poly_int8.sv")):
 # SIG_LAD_T equal to the model's fixes the literal count, so SIG_LAD_N = len(gm.SIG_LAD_T) pins it to both.
 eq("gpnae_poly_int8's ladder literals are gpnae_model's (SIG_LAD_X0, SIG_LAD_T, SIG_LAD_N)", rtl_ladder(),
    (gm.SIG_LAD_X0, gm.SIG_LAD_T, len(gm.SIG_LAD_T)))
+sv = open(os.path.join(gm.ROOT, "src", "gpnae_poly_int8.sv")).read()
+eq("gpnae_poly_int8's SELU accumulator slices are gpnae_model's shifts (pm_res[31 + 4 : 4] for P, [31 + 7 : 7] for lambda)",
+   tuple(re.findall(r"assign rq_acc = neg_buf\[ps_p\[MUL_LAT\]\] \? pm_res\[(\d+):(\d+)\] : pm_res\[(\d+):(\d+)\];", sv)),
+   (tuple(str(v) for v in (31 + gm.SELU_SH_P, gm.SELU_SH_P, 31 + gm.SELU_SH_LAMBDA, gm.SELU_SH_LAMBDA)),))
 
 print(f"check_gpnae_model_int8: {errs} errors")
 print(f"RESULT: {'PASSED' if errs == 0 else 'FAILED'}")

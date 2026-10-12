@@ -166,13 +166,18 @@ def test_int8_sets():
     sets = reg.int8_sets(1)
     for act, code in reg.INT8_ACTS:
         kinds = [k for k, _, _, _ in sets[act]]
-        assert kinds == ["case"] * 5 + ["random"] * reg.N_RAND_INT8 + ["positive"] * reg.N_POS_INT8 + ["ladder"] * reg.N_LAD_INT8 \
-            + ["sweep"] * reg.N_SWEEP_INT8, act
+        assert kinds == ["case"] * 5 + ["random"] * reg.N_RAND_INT8 + ["large"] * reg.N_LARGE_INT8 + ["ladder"] * reg.N_LAD_INT8 \
+            + ["sweep"] * reg.N_SWEEP_INT8 + ["fine"] * reg.N_FINE_INT8 + ["edge"] * reg.N_EDGE_INT8, act
         assert all(sorted(q.tolist()) == list(range(-128, 128)) for _, _, _, q in sets[act]), act  # every input once per set
-    for case in gm.INT8_CASES["selu"]:  # the integers' s_out is the case's within the multiplier's 31 bits
+    for case in gm.INT8_CASES["selu"]:  # the integers' scales are the case's within mx's rounding (2^-15), which the decoded s_in carries into s_out
         p = gm.int8_params(case, 1)
         s_in, z_in, s_out, z_out = reg.int8_quant(1, None, p)
-        assert abs(s_out / case.s_out - 1) < 2 ** -29 and abs(s_in / case.s_in - 1) < 2 ** -14 and (z_in, z_out) == (case.z_in, case.z_out), case
+        assert abs(s_out / case.s_out - 1) < 2 ** -14 and abs(s_in / case.s_in - 1) < 2 ** -14 and (z_in, z_out) == (case.z_in, case.z_out), case
+    sel = [(k, c, p) for k, c, p, _ in sets["selu"]]
+    assert all(p.shout <= 0 for _, _, p in sel) and all(c is not None for k, c, _ in sel if k in ("large", "fine", "edge")), "SELU: shift <= 0, own scales"
+    assert sum(p.mout == (1 << 31) - 1 and p.shout == 0 for k, _, p in sel if k == "edge") == 2, "two edge sets take the host's clamp"
+    big = [c.s_in for k, c, _ in sel if k == "large"] + [c.s_in for k, c, _ in sel if k == "fine"]
+    assert min(big) == 1e-7 and max(big) == 15.99 and all(c is None for a, _ in reg.INT8_ACTS[1:] for k, c, _, _ in sets[a] if k in ("large", "fine", "edge"))
     p = gm.int8_params(gm.INT8_CASES["tanh"][0], 3)
     assert reg.int8_quant(3, None, p)[2:] == (1 / 128, 0) and reg.int8_quant(2, None, p)[2:] == (1 / 256, -128)
     assert reg.int8_quant(1, None, p._replace(mout=0))[2] == np.inf and reg.int8_quant(4, None, p)[2:] == reg.int8_quant(4, None, p)[:2]
@@ -196,10 +201,28 @@ def test_stream_gate():
         lin = np.flatnonzero(st["func"] == "linear")[3]
         bad, _ = reg.truth_stream(st, np.where(np.arange(y.size) == lin, (y + 15 + 128) % 256 - 128, y))
         none, _ = reg.truth_stream(st, None)
-    assert res["linear"].ok and res["tanh"].ok and not bad["linear"].ok and bad["linear"].over == 1 and none["selu"] is None
+    assert all(r.ok for r in res.values()) and not bad["linear"].ok and bad["linear"].over == 1 and none["selu"] is None
 
 
-MIN_TESTS = 8  # tests this file holds; fewer run means one was lost, which is a failure
+def test_int8_model_passes_the_gate():
+    """The lane model's words over every int8 set pass truth.py (the RTL must equal them bit for bit); SELU's old table on the edge sets, and ReLU passed through, fail."""
+    import gpnae_model as gm
+    rom = gm.read_rom(os.path.join(reg.ROOT, gm.coeff_file(gm.INT8)))
+    sets = reg.int8_sets(1)
+    lane, old = gm.Lane(gm.INT8, rom), gm.Lane(gm.INT8, [3454, 1288, 167] + rom[3:])
+    with contextlib.redirect_stdout(io.StringIO()):
+        res, _ = reg.truth_int8(sets, {act: np.concatenate([lane.run(q, code, p) for _, _, p, q in sets[act]]) for act, code in reg.INT8_ACTS})
+        edge = [s for s in sets["selu"] if s[0] == "edge"][:4]  # the table witnesses
+        r_old = reg.truth.gate("int8", "selu", np.concatenate([q for *_, q in edge]), np.concatenate([old.run(q, 1, p) for _, _, p, q in edge]),
+                               quant=[np.repeat([c[k] for _, c, _, _ in edge], 256) for k in range(4)])
+        relu = sets["relu"]
+        r_pass = reg.truth.gate("int8", "relu", np.concatenate([q for *_, q in relu]), np.concatenate([q for *_, q in relu]),
+                                quant=[np.repeat([reg.int8_quant(4, c, p)[k] for _, c, p, _ in relu], 256) for k in range(4)])
+    assert all(r.ok for r in res.values()), {a: (r.over, r.worst_lsb) for a, r in res.items()}
+    assert not r_old.ok and r_old.over >= 10 and not r_pass.ok and r_pass.over > 10000, (r_old.over, r_pass.over)
+
+
+MIN_TESTS = 9  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]

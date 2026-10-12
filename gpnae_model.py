@@ -297,8 +297,8 @@ SIG_LAD_X0 = 5120  # sigmoid from |x| >= 2.5 (Q4.11) is the exact ladder below, 
 SIG_LAD_T = (5228, 5350, 5479, 5616, 5761, 5916, 6082, 6261, 6456, 6669, 6905, 7170, 7471, 7821, 8240, 8763, 9460, 10515,
              12773)  # where round(256 sigmoid(-|x|)) steps; fit_poly_coeffs.sig_ladder_thresholds() derives them
 SELU_SAT, ONE_Q11, LAMBDA_Q14 = -3601, 2048, 17215  # -lambda*alpha and 1.0 in Q4.11, lambda in Q1.14
-XW = 24  # gpnae_poly_int8's unsaturated x: |q - z_in| <= 255 and mx < 2^15 keep |(q - z_in) * mx| below 2^23
-SELU_POS_SAT = -(-(1 << 34) // LAMBDA_Q14)  # the smallest unsaturated x where floor(lambda * x / 2^3) leaves int32
+XW = 24  # gpnae_poly_int8's post multiplier: |q - z_in| <= 255 and mx < 2^15 keep the rescale product r = (q - z_in) * mx below 2^23
+SELU_SH_LAMBDA, SELU_SH_P = 7, 4  # SELU's accumulator in 2^-(shx + 18): r * lambda (2^-(shx + 25)) >>> 7; r * P and the x < -4 constant (2^-(shx + 22)) >>> 4
 LAMBDA_F, LA_F = 1.0507009873554805, 1.7580993408473766
 PKG_SV = os.path.join(ROOT, "ArithmeticLibrary", "Common", "src", "sienna_fmt_pkg.sv")
 
@@ -320,27 +320,35 @@ Int8Params = namedtuple("Int8Params", "mx shx zin mout shout zout")
 Case = namedtuple("Case", "s_in z_in s_out z_out gated")
 
 
-def rescale_wide(q, zin, mx, s):
-    """(q - z_in) * mx rounded half up by 2^s, unsaturated (gpnae_poly_int8 rescale_raw(), SELU's positive branch)."""
+def rescale_product(q, zin, mx):
+    """The rescale's exact product r = (q - z_in) * mx (gpnae_poly_int8's rm_res): x in units of 2^-(shx + 11), |r| < 2^23."""
     assert 0 <= mx <= 32767, "gp_mx_i must be below 2^15"
     q = np.asarray(q, dtype=np.int64)
-    p = ipu.int_mul(q - zin, np.full_like(q, mx), w=16)
-    return p if s == 0 else (p + (1 << (s - 1))) >> s
+    return ipu.int_mul(q - zin, np.full_like(q, mx), w=16)
 
 
 def rescale(q, zin, mx, s):
     """(q - z_in) * mx rounded half up by 2^s, saturated to Q4.11 (gpnae_poly_int8 rescale())."""
-    return np.clip(rescale_wide(q, zin, mx, s), -32768, 32767)
+    p = rescale_product(q, zin, mx)
+    return np.clip(p if s == 0 else (p + (1 << (s - 1))) >> s, -32768, 32767)
 
 
-def selu_pos(xw):
-    """SELU's positive branch in 2^-22: lambda * x (Q1.14 by the unsaturated rescale, 2^-25) floored by 2^3, saturated to int32."""
-    return np.clip(ipu.int_mul(xw, np.full_like(np.asarray(xw, dtype=np.int64), LAMBDA_Q14), w=XW) >> 3, -(1 << 31), (1 << 31) - 1)
+def selu_acc(q, zin, mx, shx, p):
+    """SELU's int32 accumulator in 2^-(shx + 18), x block-floating: r * lambda (r >= 0), r * P (x >= -4), -lambda*alpha 2^shx * 1.0 (x < -4); the sign is r's."""
+    r = rescale_product(q, zin, mx)
+    sat = rescale(q, zin, mx, shx) < T_SELU  # x < -4 needs |r| > 2^(shx + 13), so shx <= 9 there and SELU_SAT << shx fits 24 bits
+    pm_a = np.where(sat, ipu.sx(np.int64(SELU_SAT) << shx, XW), r)
+    pm_b = np.where(r >= 0, LAMBDA_Q14, np.where(sat, ONE_Q11, p))
+    pm = ipu.int_mul(pm_a, pm_b, w=XW)
+    return ipu.sx(np.where(r >= 0, pm >> SELU_SH_LAMBDA, pm >> SELU_SH_P), 32)  # pm_res[38:7] and [35:4]; |acc| < 2^31 for |q - z_in| <= 255, mx < 2^15
 
 
-def selu_pos_saturates(xw):
-    """Where selu_pos saturates: lambda * x >= 2^31 in 2^-22, i.e. x >= SELU_POS_SAT (lambda * x >= 512, x >= 487.3)."""
-    return np.asarray(xw, dtype=np.int64) >= SELU_POS_SAT
+def selu_out_params(s_in, mx, s_out):
+    """SELU's (mout, shout): the output code is acc s_in / (2^7 mx s_out); (2^31 - 1, 0) where QuantizeMultiplier would shift left (every nonzero acc saturates there)."""
+    if mx == 0:
+        return 0, 0  # s_in below 2^-43: every r is 0 and every output z_out
+    m, sh = quantize_multiplier(s_in / (2.0 ** SELU_SH_LAMBDA * mx * s_out))
+    return ((1 << 31) - 1, 0) if sh > 0 else (m, sh)
 
 
 def mac_operand(x, code):
@@ -420,7 +428,7 @@ def int8_params(case, code):
     """The lane's per-layer inputs for a case: rescale always, SELU's output requantize for code 1."""
     mx, shx = rescale_params(case.s_in)
     if code == 1:
-        mout, shout = quantize_multiplier(2.0 ** -22 / case.s_out)  # the SELU value is in units of 2^-22
+        mout, shout = selu_out_params(case.s_in, mx, case.s_out)  # the SELU accumulator is in units of 2^-(shx + 18)
         return Int8Params(mx, shx, case.z_in, mout, shout, case.z_out)
     return Int8Params(mx, shx, case.z_in, 0, 0, 0)
 
@@ -434,7 +442,7 @@ def exact_lsb(q, code, case):
     if code == 2:
         return (1 / (1 + np.exp(-r))) / (1 / 256), -128
     if code == 1:
-        return np.where(r >= 0, LAMBDA_F * r, LA_F * np.expm1(r)) / case.s_out, case.z_out
+        return np.where(r >= 0, LAMBDA_F * r, LA_F * np.expm1(np.minimum(r, 0))) / case.s_out, case.z_out
     return q.astype(float), 0
 
 
@@ -497,8 +505,10 @@ class LaneInt8(Lane):
     def run(self, q, code, par):
         q = np.asarray(q, dtype=np.int64)
         code = code if code in (1, 2, 4, 5) else 3  # every other control word runs tanh, as in the float lane
-        if code in (4, 5):
-            return q.copy()  # ReLU and linear pass through: the requantize clamp applied them
+        if code == 4:
+            return np.maximum(q, par.zin)  # ReLU: max(q, z_in), the input's zero point being its real 0
+        if code == 5:
+            return q.copy()
         x = rescale(q, par.zin, par.mx, par.shx)
         neg = x < 0
         p = self.poly(x, code)
@@ -511,9 +521,8 @@ class LaneInt8(Lane):
         if code == 3:
             sat = np.abs(x) > self.thresh[3]
             return np.where(sat, np.where(neg, -128, 127), quant_tanh(ipu.int_mul(x, p, w=16)))
-        sat = x < self.thresh[1]
-        prod = ipu.int_mul(np.where(sat, SELU_SAT, x), np.where(sat, ONE_Q11, p), w=16)  # x * P and -lambda*alpha * 1.0, 2^-22
-        v = np.where(neg, prod, selu_pos(rescale_wide(q, par.zin, par.mx, par.shx)))  # x >= 0: lambda * x unsaturated, 2^-22
+        assert self.thresh[1] == T_SELU and par.shout <= 0, "SELU: the x < -4 constant is placed for T_SELU; the host passes (2^31 - 1, 0) for a left shift"
+        v = selu_acc(q, par.zin, par.mx, par.shx, p)
         full = lambda c: np.full_like(v, c)
         return ipu.requant(v, full(par.mout), full(par.shout), full(par.zout), full(-128), full(127), REQ_ROUNDING)
 
