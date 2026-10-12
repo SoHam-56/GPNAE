@@ -132,10 +132,11 @@ module gpnae_poly_int8 #(
   logic [$clog2(OUT_MAX + 1)-1:0] out_cnt;  // output credits held, from lane_link
   assign fifo_pop = fifo_rd_en && (fifo_count != '0);
 
-  logic is_selu, is_sig, is_byp, is_tanh;
+  logic is_selu, is_sig, is_relu, is_byp, is_tanh;
   assign is_selu = (control_word_i == 3'b001);
   assign is_sig  = (control_word_i == 3'b010);
-  assign is_byp  = (control_word_i == 3'b100) || (control_word_i == 3'b101);  // ReLU and linear pass through
+  assign is_relu = (control_word_i == 3'b100);
+  assign is_byp  = is_relu || (control_word_i == 3'b101);  // ReLU and linear skip the polynomial
   assign is_tanh = !is_selu && !is_sig && !is_byp;  // every other control word runs tanh, as in the float lane
 
   logic [ADDR_LINES-1:0] poly_base, poly_deg;
@@ -351,7 +352,7 @@ module gpnae_poly_int8 #(
           cap_v <= {cap_v[CAP_LAG-2:0], (pop_idx < grp_n)};
           if (cap_v[CAP_LAG-1]) begin
             ld_idx <= ld_idx + 1;
-            if (is_byp) res_rdy[ld_idx[SW-1:0]] <= 1'b1;  // the requantize clamp already applied ReLU
+            if (is_byp) res_rdy[ld_idx[SW-1:0]] <= 1'b1;  // ReLU and linear are ready at capture
             if (ld_idx + 1 == grp_n) begin
               n_elems   <= grp_n;
               iss_idx   <= '0;
@@ -472,7 +473,7 @@ module gpnae_poly_int8 #(
       G_CAP:
         if (cap_v[CAP_LAG-1]) begin
           q_buf[ld_idx[SW-1:0]] <= fifo_data_o;
-          if (is_byp) res_buf[ld_idx[SW-1:0]] <= fifo_data_o;
+          if (is_byp) res_buf[ld_idx[SW-1:0]] <= (is_relu && ($signed(fifo_data_o) < $signed(gp_zin_i))) ? gp_zin_i : fifo_data_o;  // ReLU: max(q, z_in)
         end
 
       G_LOAD: begin
