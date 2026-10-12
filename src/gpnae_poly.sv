@@ -56,11 +56,15 @@ module gpnae_poly #(
   localparam int DN_LAT = FP32 ? 6 : sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // fp32_down: done_o = valid_stage6; else fpAdder
 
   localparam logic [DATA_WIDTH-1:0] LAMDA = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h3F867D5F, MAN_W));
+  localparam logic [DATA_WIDTH-1:0] ONE_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h3F800000, MAN_W));
+  // tanh(x) rounds to x below these (fp32 3.5211e-4, bf16 0.0903, gpnae_model.TANH_TINY), so tanh's post multiply takes 1.0 there.
+  localparam logic [DATA_WIDTH-1:0] T_TINY_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(FP32 ? 32'h39B89BA3 : 32'h3DB90000, MAN_W));
   localparam logic [DATA_WIDTH-1:0] NEG_ONE = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'hBF800000, MAN_W));
   localparam logic [DATA_WIDTH-1:0] T4_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h40800000, MAN_W));  // 4.0
   localparam logic [DATA_WIDTH-1:0] T35_W = DATA_WIDTH'(sienna_fmt_pkg::from_fp32(32'h40600000, MAN_W));  // 3.5
   localparam logic [DATA_WIDTH-2:0] T4 = T4_W[DATA_WIDTH-2:0];
   localparam logic [DATA_WIDTH-2:0] T35 = T35_W[DATA_WIDTH-2:0];
+  localparam logic [DATA_WIDTH-2:0] T_TINY = T_TINY_W[DATA_WIDTH-2:0];
 
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "gpnae_poly: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
@@ -200,6 +204,7 @@ module gpnae_poly #(
 
   logic [DATA_WIDTH-1:0] sig_buf[K];
   logic [        K-1:0]  pos_buf;
+  logic [        K-1:0]  tiny_buf;  // |x| below T_TINY: tanh returns x
   logic [DATA_WIDTH-1:0] pol_buf[K];
   logic [DATA_WIDTH-1:0] res_buf[K];
   logic [        K-1:0]  res_rdy;
@@ -377,6 +382,7 @@ module gpnae_poly #(
       pd_v           <= '0;
       res_rdy        <= '0;
       pos_buf        <= '0;
+      tiny_buf       <= '0;
       tail_buf       <= '0;
       tail_pend      <= '0;
       trdy           <= '0;
@@ -445,6 +451,7 @@ module gpnae_poly #(
           if (cap_v[CAP_LAG-1]) begin
             sig_buf[ld_idx[SW-1:0]] <= fifo_data_o;
             pos_buf[ld_idx[SW-1:0]] <= sig_is_pos;
+            tiny_buf[ld_idx[SW-1:0]] <= (fifo_data_o[DATA_WIDTH-2:0] < T_TINY);
             tail_buf[ld_idx[SW-1:0]] <= sig_in_tail;
             tail_pend[ld_idx[SW-1:0]] <= sig_in_tail;
             trdy[ld_idx[SW-1:0]] <= 1'b0;
@@ -539,7 +546,7 @@ module gpnae_poly #(
           end else begin
             mul_a     <= sig_buf[iss_idx[SW-1:0]];
             mul_b     <= (is_selu && pos_buf[iss_idx[SW-1:0]]) ? LAMDA
-                                                              : pol_buf[iss_idx[SW-1:0]];
+                       : (is_tanh && tiny_buf[iss_idx[SW-1:0]]) ? ONE_W : pol_buf[iss_idx[SW-1:0]];
             mul_valid <= 1'b1;
             pm_v[0]   <= 1'b1;
             pm_p[0]   <= iss_idx[SW-1:0];
