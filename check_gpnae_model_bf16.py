@@ -82,11 +82,13 @@ for ln, xs, tag in ((lane, X, "bf16"), (old, X, "bf16 as built"), (l32, x32, "fp
         vec, one = ln.tail_v(xs[i], code), np.array([ln.tail(int(v), code) for v in xs[i]])
         eq(f"{tag} code {code}: tail_v equals tail on {i.size} inputs", int((vec != one).sum()), 0)
 
-# x < 0 words equal the study's d3 bit for bit: its cand_d.py (s_fp32_newton, narrowed) wrote check_gpnae_model_bf16_d3.mem.
+# x < 0 words equal the study's d3 bit for bit: its cand_d.py (s_fp32_newton, narrowed) wrote check_gpnae_model_bf16_d3.mem; gen_check_gpnae_model_bf16_d3.py regenerates it from fpu.
 neg = (((X >> 15) & 1) == 1) & ((X & 0x7FFF) != 0)
 d3 = np.array([int(v, 16) for v in open(os.path.join(gm.ROOT, "check_gpnae_model_bf16_d3.mem")) if v.strip()], dtype=np.int64)
 eq("the study's d3 words: one per x < 0 input", (d3.size, int(neg.sum())), (32639, 32639))
 eq("x < 0 sigmoid words equal the study's d3", int((out[neg] != d3).sum()), 0)
+import gen_check_gpnae_model_bf16_d3 as gen_d3  # noqa: E402
+eq("the d3 file is gen_check_gpnae_model_bf16_d3's words", int((np.asarray(gen_d3.d3_words(), dtype=np.int64) != d3).sum()), 0)
 
 # fp32 and the as-built bf16 lane equal 3efe6f6's gpnae_model: digests of its outputs on the same inputs.
 OLD = {("bf16", 1): "1e4e3426ffc8616d", ("bf16", 2): "352049b8db595585", ("bf16", 3): "3c0feb455c9459c0", ("bf16", 4): "2bdacb7c6abe05e6",
