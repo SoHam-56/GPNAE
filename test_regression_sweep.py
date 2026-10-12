@@ -185,6 +185,7 @@ def test_int8_sets():
     v = reg.truth.decode("fp32", x)
     assert x.size % reg.MAX_SIGNALS == 0 and x.size >= reg.N_FP32_GRID + reg.N_FP32_RAND and np.isfinite(v).all()
     assert {0.0, 2.0 ** -149, -2.0 ** -149, 3.5, -4.0} <= set(v.tolist()) and v.max() == np.finfo(np.float32).max
+    assert {gm.TANH_TINY[23] + d for d in (-1, 0, 1)} <= set(x.tolist()), "tanh's tiny-|x| threshold and its neighbours"
     assert np.array_equal(x, reg.fp32_dense_inputs(1)) and not np.array_equal(x, reg.fp32_dense_inputs(2))
 
 

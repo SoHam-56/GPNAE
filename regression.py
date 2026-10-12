@@ -694,6 +694,7 @@ def gm_finite_bf16():
 
 def fp32_dense_inputs(seed):
     """fp32_dense's inputs: a 2^17 + 1 point grid over [-16, 16], 2^19 random finite bit patterns, 2^19 uniform in [-20, 20], edges."""
+    import gpnae_model as gm
     rng = np.random.default_rng([seed, 17])
     grid = truth.encode("fp32", np.linspace(-16.0, 16.0, N_FP32_GRID + 1))
     pat = rng.integers(0, 1 << 32, N_FP32_RAND, dtype=np.int64)
@@ -702,6 +703,7 @@ def fp32_dense_inputs(seed):
     pow2 = [1 << k for k in range(23)] + [e << 23 for e in range(1, 255)]  # 2^-149 .. 2^127
     near = [int(truth.encode("fp32", v)) + d for v in (2.5, 3.5, 4.0, 16.0, 88.72283935546875, 0.0625, 1.0) for d in (-2, -1, 0, 1, 2)]
     tops = [0x7F7FFFFF - k for k in range(4)] + [0x007FFFFF - k for k in range(4)] + [0x00800000 + k for k in range(4)]
+    tops += [gm.TANH_TINY[23] + d for d in (-2, -1, 0, 1, 2)]  # tanh's tiny-|x| threshold, where the lane changes from x to x * P
     edges = np.array(pow2 + near + tops + [0], dtype=np.int64)
     x = np.concatenate([grid, pat, uni, edges, edges | (1 << 31)])
     pad = -x.size % MAX_SIGNALS
