@@ -42,8 +42,8 @@ module gpnae_poly #(
     input logic [15:0] gp_mx_i,     // int8 only (D-2): input rescale multiplier, below 2^15
     input logic [ 4:0] gp_shx_i,    // int8: input rescale shift
     input logic [ 7:0] gp_zin_i,    // int8: input zero point
-    input logic [31:0] gp_mout_i,   // int8: SELU output multiplier
-    input logic [ 7:0] gp_shout_i,  // int8: SELU output shift
+    input logic [23:0] gp_mout_i,   // int8: SELU output scale's mantissa
+    input logic [ 5:0] gp_shout_i,  // int8: SELU output scale's right shift
     input logic [ 7:0] gp_zout_i    // int8: SELU output zero point
 );
 

@@ -32,7 +32,7 @@ DESIGN_FILES = \
 	../ArithmeticLibrary/Converters/FPNarrow/src/fpNarrow.sv \
 	../ArithmeticLibrary/Multipliers/Int/src/intMultiplier.sv \
 	../ArithmeticLibrary/Multipliers/Fx/src/fxMac.sv \
-	../ArithmeticLibrary/Requant/src/tfliteRequant.sv \
+	../ArithmeticLibrary/Requantizer/src/int8Requantizer.sv \
 	../ArithmeticLibrary/Divider/FP32/src/fp32Divider.sv \
 	../ArithmeticLibrary/Divider/FP32/src/divu.sv \
 	fp32_down.sv \

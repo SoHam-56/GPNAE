@@ -31,9 +31,6 @@ eq("sigmoid output rounding and clamp", gm.quant_sig(np.array([2048, 0, 4, 3, -9
 eq("tanh output from x*P", gm.quant_tanh(np.array([16384, 16383, -16384, -16385, 1 << 30])), [1, 0, 0, -1, 127])
 eq("rescale_params(1/128)", gm.rescale_params(1 / 128), (16384, 10))
 eq("rescale_params(0.05)", gm.rescale_params(0.05), (26214, 8))
-eq("quantize_multiplier(0.5)", gm.quantize_multiplier(0.5), (1 << 30, 0))
-eq("quantize_multiplier(1.0)", gm.quantize_multiplier(1.0), (1 << 30, 1))
-eq("quantize_multiplier(0.75)", gm.quantize_multiplier(0.75), (1610612736, 0))
 eq("16-bit ROM words read as two's complement", gm.Lane(gm.INT8, [0xFFFF] + [0] * 31).rom[:2], [-1, 0])
 
 zero = gm.Lane(gm.INT8, [0] * 32)  # P = 0 everywhere, so only the non-polynomial paths show
@@ -43,10 +40,10 @@ zero_2a = gm.Lane(gm.INT8, [0] * 32, ladder=False)  # 2a's sigmoid, which satura
 eq("sigmoid, zero table, ladder off: P = 0, 1 - P = 1 inside +/-3.5, saturated outside", zero_2a.run(np.array([70, 71, -70, -71]), 2, p), [-128, 127, 127, -128])
 eq("sigmoid, zero table, ladder on: the ladder at x = +-7168, +-7270 whatever the table", zero.run(np.array([70, 71, -70, -71]), 2, p), [120, 121, -120, -121])
 p2 = gm.Int8Params(26214, 8, 0, *gm.selu_out_params(0.05, 26214, 0.05), 3)  # s_in = s_out = 0.05: lambda * 0.5 / 0.05 = 10.5 -> 11, + 3
-eq("selu_out_params(0.05, 26214, 0.05) is QuantizeMultiplier(s_in / (2^7 mx s_out))", gm.selu_out_params(0.05, 26214, 0.05), (1342197760, -21))
+eq("selu_out_params(0.05, 26214, 0.05) is ipu.encode_scale(s_in / (2^7 mx s_out)) = 10485920 2^-45", gm.selu_out_params(0.05, 26214, 0.05), (10485920, 45))
 eq("SELU x >= 0: r * lambda >>> 7, requantized", zero.run(np.array([10, 0]), 1, p2), [14, 3])
 eq("SELU -4 <= x < 0: r * P = 0 with a zero table", zero.run(np.array([-5]), 1, p2), [3])
-p3 = gm.Int8Params(mx=26214, shx=7, zin=0, mout=1 << 30, shout=-19, zout=3)  # s_in = 0.1; output multiplier 2^-20
+p3 = gm.Int8Params(mx=26214, shx=7, zin=0, mout=1 << 23, shout=43, zout=3)  # s_in = 0.1; output scale 2^-20
 eq("SELU x = -4 inside, x < -4: -lambda*alpha 2^shx * 1.0 >>> 4 = -3601 * 2^14, times 2^-20 is -56.3", zero.run(np.array([-40, -41, -71]), 1, p3), [3, -53, -53])
 eq("rescale_product is exact", gm.rescale_product(np.array([127, -128]), 0, 32767), [4161409, -4194176])
 eq("selu_acc at the extremes stays inside int32: d 255 at any shx, d -255 at shx 0, 9 (x < -4) and 31 (r * P)",
@@ -55,11 +52,10 @@ eq("selu_acc at the extremes stays inside int32: d 255 at any shx, d -255 at shx
    [1123760904, 1123760904, -460928, -235995136, -1802195240])
 p4 = gm.Int8Params(32767, 0, 0, *gm.selu_out_params(32767 / 2048, 32767, 8.0), 0)  # x = 16 q, s_out 8
 eq("SELU past 512 is exact: x = 160, 480 and 496 give 21, 63 and 65 (the int32 saturation gave 64)", zero.run(np.array([10, 30, 31]), 1, p4), [21, 63, 65])
-eq("lane rounding is sienna_fmt_pkg's REQ_ROUNDING", (gm.REQ_ROUNDING,), ("DOUBLE",))
 flat = gm.Lane(gm.INT8, [192] + [0] * 31, sets={1: (0, 0)})  # P = 192 everywhere: r = -16 * 2^14 gives acc -3 * 2^20, a -1.5 LSB tie at 2^-21
-eq("SELU requantize rounds the -1.5 tie away from zero (DOUBLE; SINGLE gives 2)", flat.run(np.array([-16]), 1, gm.Int8Params(16384, 5, 0, 1 << 30, -20, 3)), [1])
-eq("selu_out_params: a left shift becomes (2^31 - 1, 0); mx 0 gives (0, 0)", gm.selu_out_params(0.05, 26214, 0.05 * 2.0 ** -27) + gm.selu_out_params(1e-14, 0, 1e-14),
-   ((1 << 31) - 1, 0, 0, 0))
+eq("SELU requantize rounds the -1.5 tie half up, to -1 (+ 3 is 2)", flat.run(np.array([-16]), 1, gm.Int8Params(16384, 5, 0, 1 << 23, 44, 3)), [2])
+eq("selu_out_params: a scale of 40 is an ordinary code (no left-shift case); mx 0 gives the flush code", gm.selu_out_params(0.05, 26214, 0.05 * 2.0 ** -27) + gm.selu_out_params(1e-14, 0, 1e-14),
+   (10485920, 18, 0, 55))
 eq("ReLU is max(q, z_in), linear passes through", [int(v) for v in zero.run(np.array([-5, 7, -128, 127]), 4, p._replace(zin=-3))]
    + [int(v) for v in zero.run(np.array([-5, 7, 3, 4]), 4, p._replace(zin=4))] + [int(v) for v in zero.run(np.array([-5, 7]), 5, p._replace(zin=4))],
    [-3, 7, -3, 127, 4, 7, 4, 4, -5, 7])
@@ -84,10 +80,10 @@ eq("SELU at s_in 1e-5, below Q4.11's step: q -25, -24, 24, 25 give 2, 3, 50, 51 
 big = gm.Case(6609 / 2048, -128, 2.801, -128, True)  # the old regression's positive set 99
 eq("SELU past lambda x = 512: set 99's q 48 and 100 give 85 and 127, as exact_int8 (the saturation gave 55)",
    [int(v) for v in lad.run(np.array([48, 100]), 1, gm.int8_params(big, 1))] + [int(v) for v in gm.exact_int8(np.array([48, 100]), 1, big)], [85, 127, 85, 127])
-tiny = [gm.Case(s, 0, s / 200, -128, True) for s in (2e-13, 3.5e-13)]  # mx 1 and 2 at shx 31; QuantizeMultiplier would shift left for both
-eq("the clamp's limit: at mx 1 (s_in 2e-13) q 1 gives 6 where the true code is 82; at mx 2 (3.5e-13) it is exact, 81 against 82",
+tiny = [gm.Case(s, 0, s / 200, -128, True) for s in (2e-13, 3.5e-13)]  # mx 1 and 2 at shx 31: output scales 1.5625 and 0.78125
+eq("tiny input scales: at mx 1 (s_in 2e-13) and mx 2 (3.5e-13) q 1 gives 81 against the true 82 (the old left-shift special case gave 6 at mx 1)",
    [int(gm.int8_params(c, 1).mx) for c in tiny] + [int(lad.run(np.array([1]), 1, gm.int8_params(c, 1))[0]) for c in tiny] + [int(gm.exact_int8(np.array([1]), 1, tiny[0])[0])],
-   [1, 2, 6, 81, 82])
+   [1, 2, 81, 81, 82])
 eq("ladder constants: 19 rising codes from 5228 to 12773, from x = 5120",
    (gm.SIG_LAD_X0, len(gm.SIG_LAD_T), gm.SIG_LAD_T[0], gm.SIG_LAD_T[-1], int(all(np.diff(gm.SIG_LAD_T) > 0))), (5120, 19, 5228, 12773, 1))
 eq("the ladder's thresholds, computed from sigmoid, are gpnae_model's", fpc.sig_ladder_thresholds(), gm.SIG_LAD_T)

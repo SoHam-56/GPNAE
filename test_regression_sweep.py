@@ -177,8 +177,9 @@ def test_int8_sets():
         s_in, z_in, s_out, z_out = reg.int8_quant(1, None, p)
         assert abs(s_out / case.s_out - 1) < 2 ** -14 and abs(s_in / case.s_in - 1) < 2 ** -14 and (z_in, z_out) == (case.z_in, case.z_out), case
     sel = [(k, c, p) for k, c, p, _ in sets["selu"]]
-    assert all(p.shout <= 0 for _, _, p in sel) and all(c is not None for k, c, _ in sel if k in ("large", "fine", "edge")), "SELU: shift <= 0, own scales"
-    assert sum(p.mout == (1 << 31) - 1 and p.shout == 0 for k, _, p in sel if k == "edge") == 2, "two edge sets take the host's clamp"
+    assert all(0 <= p.shout <= gm.ipu.REQ_MAX_SHIFT and p.mout < 1 << 24 for _, _, p in sel) and \
+        all(c is not None for k, c, _ in sel if k in ("large", "fine", "edge")), "SELU: a 24-bit mantissa and a shift in [0, 55], own scales"
+    assert sum(p.mout == (1 << 24) - 1 and p.shout == 16 for k, _, p in sel if k == "edge") == 1, "one edge set (s_out << s_in, scale >= 2^8) takes the saturating code"
     big = [c.s_in for k, c, _ in sel if k == "large"] + [c.s_in for k, c, _ in sel if k == "fine"]
     assert min(big) == 1e-7 and max(big) == 15.99 and all(c is None for a, _ in reg.INT8_ACTS[1:] for k, c, _, _ in sets[a] if k in ("large", "fine", "edge"))
     p = gm.int8_params(gm.INT8_CASES["tanh"][0], 3)

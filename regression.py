@@ -40,7 +40,7 @@ hdr = lambda s: f"{_O}{_B}{s}{_X}"
 
 def write_config(fmt, batches: int, per_batch: int, rel_tol: float, abs_tol: float,
                  model: str, timeout_cycles: int, seed: int, exact: bool = False,
-                 coeff_file: str = "poly_coeffs.mem", req_rounding: str = None) -> None:
+                 coeff_file: str = "poly_coeffs.mem") -> None:
     """Emit the include file the testbench pulls in."""
     path = os.path.join(TB_DIR, "gpnae_test_config.svh")
     with open(path, "w") as f:
@@ -63,10 +63,6 @@ def write_config(fmt, batches: int, per_batch: int, rel_tol: float, abs_tol: flo
         f.write('  localparam string STIM_DIR      = "testbenches/stimulus/";\n')
         f.write(f"  localparam bit EXACT_MATCH      = {1 if exact else 0};\n")
         f.write(f'  localparam string COEFF_FILE    = "{coeff_file}";\n')
-        if req_rounding is None:
-            import gpnae_model
-            req_rounding = gpnae_model.REQ_ROUNDING  # the rounding the model's SELU requantize uses, from sienna_fmt_pkg
-        f.write(f'  localparam string REQ_ROUNDING  = "{req_rounding}";\n')
 
 
 def generate_vectors(test_name: str, fmt, batches: int, per_batch: int, model: str,
@@ -326,7 +322,7 @@ N_LAD_INT8 = 41  # sigmoid ladder edge sets: t_i - 1 and t_i for the 19 threshol
 N_SWEEP_INT8 = 64  # the scale sweep: s_in log-spaced 1/128 to 1/8, every int8 input
 N_FINE_INT8 = 40  # fine-scale sets: s_in log-spaced 1e-7 to 1e-2, below and around Q4.11's step 2^-11; SELU calibrated, z_in random
 EDGE_SELU = ((0.016, 127, 0.1125, 0), (0.0171, 127, 0.0908, 127), (0.0256, 63, 0.1055, 0), (0.0219, 64, 0.128, -36),
-             (0.05, 0, 0.05 * 2.0 ** -27, 0), (3.0, -128, 3.0 * 2.0 ** -30, 127))  # SELU's table near x = -4 (the absolute fit missed these), then s_out << s_in: the host's (2^31 - 1, 0)
+             (0.05, 0, 0.05 * 2.0 ** -27, 0), (3.0, -128, 3.0 * 2.0 ** -30, 127))  # SELU's table near x = -4 (the absolute fit missed these), then s_out << s_in: output scales 40 and 341 (the saturating code)
 N_EDGE_INT8 = len(EDGE_SELU)
 GATED_INT8 = ("sigmoid",)  # gpnae_model's words against exact_int8 at 6.25%: sigmoid gated, tanh and SELU reported (the truth gate takes all)
 STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2),
@@ -342,8 +338,8 @@ def rand_params_int8(rng, code, sat):
     mx = int(rng.integers(1 << 14, 1 << 15)) if sat else int(rng.integers(0, 1 << 15))
     shx = int(rng.integers(0, 7)) if sat else int(rng.integers(8, 21))  # shx >= 8 keeps 255 * mx / 2^shx below 2^15
     zin = int(rng.integers(-128, 128))
-    if code == 1:  # any normalized multiplier; SELU's shift is <= 0 by the host's contract
-        return gm.Int8Params(mx, shx, zin, int(rng.integers(1 << 30, 1 << 31)), int(rng.integers(-31, 1)),
+    if code == 1:  # any normalized 24-bit mantissa; shifts 24..55 span scales 2^-32 .. 1
+        return gm.Int8Params(mx, shx, zin, int(rng.integers(1 << 23, 1 << 24)), int(rng.integers(24, 56)),
                              int(rng.integers(-128, 128)))
     return gm.Int8Params(mx, shx, zin, 0, 0, 0)
 
@@ -494,7 +490,7 @@ def int8_sets(seed) -> dict:
     return out
 
 
-INT8_OUT = {2: (1 / 256, -128), 3: (1 / 128, 0)}  # sigmoid's and tanh's fixed output quantization (TFLite's)
+INT8_OUT = {2: (1 / 256, -128), 3: (1 / 128, 0)}  # sigmoid's and tanh's fixed output quantization (a convention of the converters)
 
 
 def int8_quant(code, case, p):
@@ -502,8 +498,8 @@ def int8_quant(code, case, p):
     if case is not None:
         return case.s_in, case.z_in, case.s_out, case.z_out
     s_in = p.mx * 2.0 ** -p.shx / 2048  # the rescale: x = (q - z_in) mx / 2^shx in Q4.11
-    if code == 1:  # requantize: q = acc mout 2^(shout - 31), acc = x 2^(shx + 18), x = (q - z_in) s_in, s_in = mx 2^-(shx + 11)
-        s_out = s_in * 2.0 ** (24 - p.shout) / (p.mx * p.mout) if p.mout and p.mx else np.inf
+    if code == 1:  # requantize: q = acc mout 2^-shout, acc = x 2^(shx + 18), x = (q - z_in) s_in, s_in = mx 2^-(shx + 11)
+        s_out = s_in * 2.0 ** (p.shout - 7) / (p.mx * p.mout) if p.mout and p.mx else np.inf
         return s_in, p.zin, s_out, p.zout  # a zero multiplier (the ladder and sweep sets) leaves only the zero point
     if code in INT8_OUT:
         return (s_in, p.zin) + INT8_OUT[code]
@@ -628,7 +624,7 @@ def run_int8(args) -> int:
          + "  ".join(part(a, 4, N_SWEEP_INT8 * 256) for a, _ in INT8_ACTS),
          f"  fine-scale sets ({N_FINE_INT8} per activation, s_in 1e-7 to 1e-2, SELU calibrated): "
          + "  ".join(part(a, 5, N_FINE_INT8 * 256) for a, _ in INT8_ACTS),
-         f"  edge sets ({N_EDGE_INT8} per activation: SELU's table near x = -4, then s_out << s_in, which the host clamps to (2^31 - 1, 0)): "
+         f"  edge sets ({N_EDGE_INT8} per activation: SELU's table near x = -4, then s_out << s_in, output scales 40 and 341, the second the saturating code): "
          + "  ".join(part(a, 6, N_EDGE_INT8 * 256) for a, _ in INT8_ACTS),
          f"  protocol stream ({stream['segments']} segments, {stream['groups']} groups, no reset between groups): "
          + (f"exact {se.group(2)}/{se.group(1)}, failed {se.group(3)}, missing {se.group(4)}, extra {se.group(5)}; group starts "

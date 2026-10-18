@@ -96,8 +96,8 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
       .gp_mx_i(gp_mx),
       .gp_shx_i(gp_shx[4:0]),
       .gp_zin_i(gp_zin),
-      .gp_mout_i(gp_mout),
-      .gp_shout_i(gp_shout),
+      .gp_mout_i(gp_mout[23:0]),  // 32- and 8-bit containers of the stimulus words
+      .gp_shout_i(gp_shout[5:0]),
       .gp_zout_i(gp_zout)
   );
 
@@ -160,9 +160,6 @@ module TB_gpnae_poly #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  //
           $fatal(1, "coefficient ROM[%0d] is %h, %s has %h", i, dut.G_INT8.lane_inst.barrel_mac_inst.coeff_rom_inst.ROM.ROM[i],
                  COEFF_FILE, want[i]);
     end
-    // The requantizer in the RTL and the model's must round alike (the variant pinned at G0).
-    initial if (sienna_fmt_pkg::REQ_ROUNDING != REQ_ROUNDING)
-      $fatal(1, "RTL requantize rounds %s, the model %s", sienna_fmt_pkg::REQ_ROUNDING, REQ_ROUNDING);
   end else begin : G_ROM_FP
     initial begin
       logic [DATA_WIDTH-1:0] want[32];

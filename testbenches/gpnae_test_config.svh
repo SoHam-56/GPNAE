@@ -17,4 +17,3 @@
   localparam string STIM_DIR      = "testbenches/stimulus/";
   localparam bit EXACT_MATCH      = 0;
   localparam string COEFF_FILE    = "poly_coeffs.mem";
-  localparam string REQ_ROUNDING  = "DOUBLE";

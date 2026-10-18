@@ -21,8 +21,8 @@ module gpnae_poly_int8 #(
     input logic [15:0] gp_mx_i,     // input rescale: x = round((q - z_in) * mx / 2^shx) in Q4.11, mx below 2^15
     input logic [ 4:0] gp_shx_i,
     input logic [ 7:0] gp_zin_i,    // input zero point
-    input logic [31:0] gp_mout_i,   // SELU output: TFLite multiplier and shift of s_in / (2^7 mx s_out), shift <= 0
-    input logic [ 7:0] gp_shout_i,
+    input logic [23:0] gp_mout_i,   // SELU output: the scale s_in / (2^7 mx s_out) as a 24-bit mantissa and right shift (ipu.encode_scale)
+    input logic [ 5:0] gp_shout_i,
     input logic [ 7:0] gp_zout_i    // SELU output zero point
 );
 
@@ -32,7 +32,7 @@ module gpnae_poly_int8 #(
   localparam int XW = 24;  // the post multiplier: |q - z_in| <= 255 and mx < 2^15 keep the rescale product r = (q - z_in) * mx below 2^23
   localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(0, 7);  // intMultiplier
   localparam int FX_LAT = sienna_fmt_pkg::fx_lat();  // fxMac: the tanh squarer
-  localparam int RQ_LAT = sienna_fmt_pkg::req_lat();  // tfliteRequant
+  localparam int RQ_LAT = sienna_fmt_pkg::req_lat();  // int8Requantizer
   localparam int PS_LAT = MUL_LAT + RQ_LAT;  // SELU post stage: multiply, then requantize
 
   localparam logic signed [W-1:0] T_SELU = -16'sd8192;  // saturation in Q4.11, the float lane's thresholds: SELU x < -4
@@ -216,7 +216,7 @@ module gpnae_poly_int8 #(
 
   // SELU requantize in 2^-(shx + 18): r * P and the x < -4 constant >>> 4, r * lambda >>> 7; each fits int32 for every legal r.
   assign rq_acc = neg_buf[ps_p[MUL_LAT]] ? pm_res[35:4] : pm_res[38:7];
-  tfliteRequant #(.ROUNDING(sienna_fmt_pkg::REQ_ROUNDING)) POSTQ (
+  int8Requantizer POSTQ (
       .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(ps_v[MUL_LAT]), .acc_i(rq_acc), .mult_i(gp_mout_i), .shift_i(gp_shout_i),
       .zp_i(gp_zout_i), .act_min_i(8'h80), .act_max_i(8'h7F), .result_o(rq_res), .done_o(rq_done)
   );
@@ -509,9 +509,8 @@ module gpnae_poly_int8 #(
       if (rs_v[MUL_LAT] != rm_done) $fatal(1, "gpnae_poly_int8: rescale intMultiplier latency is not %0d", MUL_LAT);
       if (sq_v[FX_LAT] != sq_done) $fatal(1, "gpnae_poly_int8: squaring fxMac latency is not %0d", FX_LAT);
       if ((pt_v[MUL_LAT] | ps_v[MUL_LAT]) != pm_done) $fatal(1, "gpnae_poly_int8: post intMultiplier latency is not %0d", MUL_LAT);
-      if (ps_v[PS_LAT] != rq_done) $fatal(1, "gpnae_poly_int8: tfliteRequant latency is not %0d", RQ_LAT);
+      if (ps_v[PS_LAT] != rq_done) $fatal(1, "gpnae_poly_int8: int8Requantizer latency is not %0d", RQ_LAT);
       if (rm_valid && rm_b[W-1]) $fatal(1, "gpnae_poly_int8: gp_mx_i must be below 2^15");
-      if (pm_valid && is_selu && $signed(gp_shout_i) > 0) $fatal(1, "gpnae_poly_int8: SELU's gp_shout_i must be <= 0 (the host passes (2^31 - 1, 0) for a left shift), not %0d", $signed(gp_shout_i));
     end
 `endif
 

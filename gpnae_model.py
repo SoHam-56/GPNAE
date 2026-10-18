@@ -3,7 +3,6 @@
 fp32's negative sigmoid goes through fp32_down, modelled stage for stage (fp32_down below): it truncates the aligned operand, unlike fpAdder.
 bf16's tail runs in fp32 (x widened, the result narrowed to nearest) and takes every sigmoid x < 0, with NEWTON_BF16 Newton steps for 1/(1 + E)."""
 import os
-import re
 import sys
 from collections import namedtuple
 
@@ -13,7 +12,6 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "Common", "models"))
 import fpu  # noqa: E402
 import ipu  # noqa: E402
-from ipu import quantize_multiplier  # noqa: E402,F401  TFLite's QuantizeMultiplier, AriL's one copy
 from number_formats import suggested_rel_tol  # noqa: E402  GPNAE root, the float regression's tolerance rule
 
 SETS = {1: (0, 8), 2: (9, 6), 3: (16, 8)}  # control word: (ROM base, degree), gpnae_poly's BASE_* and DEG_*
@@ -303,22 +301,8 @@ SELU_SAT, ONE_Q11, LAMBDA_Q14 = -3601, 2048, 17215  # -lambda*alpha and 1.0 in Q
 XW = 24  # gpnae_poly_int8's post multiplier: |q - z_in| <= 255 and mx < 2^15 keep the rescale product r = (q - z_in) * mx below 2^23
 SELU_SH_LAMBDA, SELU_SH_P = 7, 4  # SELU's accumulator in 2^-(shx + 18): r * lambda (2^-(shx + 25)) >>> 7; r * P and the x < -4 constant (2^-(shx + 22)) >>> 4
 LAMBDA_F, LA_F = 1.0507009873554805, 1.7580993408473766
-PKG_SV = os.path.join(ROOT, "ArithmeticLibrary", "Common", "src", "sienna_fmt_pkg.sv")
 
 
-def rtl_req_rounding(path=PKG_SV) -> str:
-    """REQ_ROUNDING as sienna_fmt_pkg.sv sets it for tfliteRequant, so the model rounds as the RTL does."""
-    try:
-        m = re.findall(r'^\s*localparam\s+string\s+REQ_ROUNDING\s*=\s*"([A-Z]+)"\s*;', open(path).read(), re.M)
-    except OSError as e:
-        raise RuntimeError(f"int8 lane: cannot read {path} for REQ_ROUNDING: {e}") from e
-    if len(m) != 1 or m[0] not in ipu.ROUNDINGS:
-        raise RuntimeError(f'int8 lane: {path} needs exactly one `localparam string REQ_ROUNDING = "SINGLE"|"DOUBLE";` line, found {m}')
-    return m[0]
-
-
-REQ_ROUNDING = rtl_req_rounding()  # the SELU requantize's rounding, from the RTL's own constant
-assert ipu.REQ_ROUNDING in (None, REQ_ROUNDING), f"ipu.REQ_ROUNDING {ipu.REQ_ROUNDING} (rounding.txt) disagrees with sienna_fmt_pkg's {REQ_ROUNDING}"
 Int8Params = namedtuple("Int8Params", "mx shx zin mout shout zout")
 Case = namedtuple("Case", "s_in z_in s_out z_out gated")
 
@@ -347,11 +331,10 @@ def selu_acc(q, zin, mx, shx, p):
 
 
 def selu_out_params(s_in, mx, s_out):
-    """SELU's (mout, shout): the output code is acc s_in / (2^7 mx s_out); (2^31 - 1, 0) where QuantizeMultiplier would shift left, exact for mx >= 2 (every nonzero |acc| >= 268 saturates any z_out), not for mx 1 (s_in < 1.5 * 2^-42, about 3.4e-13)."""
+    """SELU's (mout, shout): the output code is acc s_in / (2^7 mx s_out), that scale as ipu.encode_scale's 24-bit mantissa and right shift."""
     if mx == 0:
-        return 0, 0  # s_in below 2^-43: every r is 0 and every output z_out
-    m, sh = quantize_multiplier(s_in / (2.0 ** SELU_SH_LAMBDA * mx * s_out))
-    return ((1 << 31) - 1, 0) if sh > 0 else (m, sh)
+        return 0, ipu.REQ_MAX_SHIFT  # s_in below 2^-43: every r is 0 and every output z_out (the flush code)
+    return ipu.encode_scale(s_in / (2.0 ** SELU_SH_LAMBDA * mx * s_out))
 
 
 def mac_operand(x, code):
@@ -402,7 +385,7 @@ def rescale_params(s_in):
 
 
 def calib_out(y_lo, y_hi):
-    """TFLite-style int8 output quantization of [y_lo, y_hi], widened to hold 0."""
+    """Asymmetric min/max int8 output quantization of [y_lo, y_hi], widened to hold 0."""
     lo, hi = min(y_lo, 0.0), max(y_hi, 0.0)
     s = (hi - lo) / 255.0
     return s, int(np.clip(np.floor(-128 - lo / s + 0.5), -128, 127))
@@ -524,10 +507,10 @@ class LaneInt8(Lane):
         if code == 3:
             sat = np.abs(x) > self.thresh[3]
             return np.where(sat, np.where(neg, -128, 127), quant_tanh(ipu.int_mul(x, p, w=16)))
-        assert self.thresh[1] == T_SELU and par.shout <= 0, "SELU: the x < -4 constant is placed for T_SELU; the host passes (2^31 - 1, 0) for a left shift"
+        assert self.thresh[1] == T_SELU, "SELU: the x < -4 constant is placed for T_SELU"
         v = selu_acc(q, par.zin, par.mx, par.shx, p)
         full = lambda c: np.full_like(v, c)
-        return ipu.requant(v, full(par.mout), full(par.shout), full(par.zout), full(-128), full(127), REQ_ROUNDING)
+        return ipu.requantize(v, full(par.mout), full(par.shout), full(par.zout), full(-128), full(127))
 
     def element(self, q, code, par) -> int:
         return int(self.run(np.array([q]), code, par)[0])
