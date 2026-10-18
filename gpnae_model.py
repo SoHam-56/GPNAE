@@ -444,17 +444,19 @@ Acc = namedtuple("Acc", "ok fail worst_rel worst_lsb real_lsb differ")
 
 
 def accuracy_int8(out, q, code, case):
-    """One case against GPNAE's tolerance: d = out - exact_int8 passes if abs(d) <= 1 LSB or abs(d) / abs(golden - z) <= 6.25%."""
+    """One case on the decimal rule at GPNAE's tolerance: the decoded output within max(REL_TOL_INT8 |t|, one step) of t, the exact
+    value clamped to the output range (in steps: |out - tc| <= max(REL_TOL_INT8 |tc - z|, 1)); worst_lsb is the codes off round(t)."""
     y, z = exact_lsb(q, code, case)
     g = exact_int8(q, code, case)
     out = np.asarray(out, dtype=np.int64)
-    d = np.abs(out - g)
-    mag = np.abs(g - z)
-    rel = np.where(mag > 0, d / np.maximum(mag, 1), np.where(d > 0, np.inf, 0.0))  # a zero golden: the absolute bound only, as TB_gpnae_poly
-    ok = (d <= ABS_TOL_LSB) | (rel <= REL_TOL_INT8)
-    far = rel[d > ABS_TOL_LSB]  # the outputs where the relative bound decides
-    return Acc(bool(ok.all()), int((~ok).sum()), float(far.max()) if far.size else 0.0, int(d.max()),
-               float(np.abs(out - z - y).max()), int((d > 0).sum()))
+    tc = np.clip(y + z, -128, 127)
+    d = np.abs(out - tc)
+    mag = np.abs(tc - z)
+    rel = np.where(mag > 0, d / np.where(mag > 0, mag, 1.0), np.where(d > 0, np.inf, 0.0))
+    ok = d <= np.maximum(REL_TOL_INT8 * mag, ABS_TOL_LSB)
+    far = rel[d > ABS_TOL_LSB]  # the outputs past one step, where the relative bound decides
+    return Acc(bool(ok.all()), int((~ok).sum()), float(far.max()) if far.size else 0.0, int(np.abs(out - g).max()),
+               float(np.abs(out - z - y).max()), int((out != g).sum()))
 
 
 def merge_acc(accs):

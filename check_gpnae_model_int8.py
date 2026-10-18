@@ -63,9 +63,10 @@ eq("every case's rescale is normalized and within half a step", [int((16384 <= p
 eq("REL_TOL_INT8 is GPNAE's max(1%, 8 * 2^-7)", (gm.REL_TOL_INT8, gm.ABS_TOL_LSB), (0.0625, 1))
 ct = gm.Case(1 / 32, 0, 1 / 128, 0, True)  # tanh golden: q = 0 -> 0, q = 32 -> 97, q = 1 -> 4
 a = gm.accuracy_int8(np.array([1, 98, 99, 110, 5, 6]), np.array([0, 32, 32, 32, 1, 1]), 3, ct)
-eq("tolerance: 1 LSB passes, 2/97 passes, 13/97 and 2/4 fail", (a.ok, a.fail, a.worst_rel, a.worst_lsb, round(a.real_lsb, 3), a.differ), (False, 2, 0.5, 13, 12.516, 6))
+eq("tolerance: one step passes, 1.52 of t 97.48 passes, 12.52 of 97.48 fails, 1.01 and 2.01 steps of t 3.99 fail (the one-code form passed 1.01)",
+   (a.ok, a.fail, round(a.worst_rel, 4), a.worst_lsb, round(a.real_lsb, 3), a.differ), (False, 3, 0.5005, 13, 12.516, 6))
 m = gm.merge_acc([a, a])
-eq("merge_acc sums counts, keeps the worst", (m.ok, m.fail, m.worst_rel, m.worst_lsb, m.differ), (False, 4, 0.5, 13, 12))
+eq("merge_acc sums counts, keeps the worst", (m.ok, m.fail, round(m.worst_rel, 4), m.worst_lsb, m.differ), (False, 6, 0.5005, 13, 12))
 cs = gm.Case(1 / 32, 0, 1 / 256, -128, True)  # sigmoid golden at q = 0: 0, i.e. 128 LSB above the zero point -128
 a = gm.accuracy_int8(np.array([4, 9]), np.array([0, 0]), 2, cs)
 eq("tolerance measured from the output zero point", (a.ok, a.fail, a.worst_rel, a.worst_lsb), (False, 1, 0.0703125, 9))
@@ -121,13 +122,13 @@ eq("the lane is the ladder at every |x| >= 2.5", int(np.sum(y_lad[ax] != gm.sig_
 eq("below 2.5 the lane is 2a's polynomial, unchanged", int(np.sum(y_lad[~ax] != y_off[~ax])), [0])
 a = gm.accuracy_int8(y_lad, X, 2, dense)
 eq("sigmoid dense with the ladder: 0 of 65536 outside, worst 2 LSB", (a.fail, a.worst_lsb), (0, 2))
-eq("sigmoid dense without it: 2a's 3370 outside", (gm.accuracy_int8(y_off, X, 2, dense).fail,), (3370,))
+eq("sigmoid dense without it: 2a's 4363 outside on the decimal rule (3370 with the one-code form)", (gm.accuracy_int8(y_off, X, 2, dense).fail,), (4363,))
 q = np.arange(-128, 128, dtype=np.int64)
 gated = [c for c in gm.INT8_CASES["sigmoid"] if c.gated]
 g = gm.merge_acc(gm.accuracy_int8(lad.run(q, 2, gm.int8_params(c, 2)), q, 2, c) for c in gated)
 eq("sigmoid gated with the ladder: 0 of 1280 outside", (g.fail, 256 * len(gated)), (0, 1280))
 late = gm.Lane(gm.INT8, ROM, lad_x0=7168)  # the spec's rejected start at 3.5
-eq("a ladder from 3.5 leaves 24 dense misses (spec)", (gm.accuracy_int8(late.run(X, 2, p_id), X, 2, dense).fail,), (24,))
+eq("a ladder from 3.5 leaves 183 dense misses on the decimal rule (the spec's 24 with the one-code form)", (gm.accuracy_int8(late.run(X, 2, p_id), X, 2, dense).fail,), (183,))
 for code, name in ((1, "selu"), (3, "tanh")):
     for c in gm.INT8_CASES[name]:
         eq(f"{name} unchanged by the ladder ({c.s_in:.4f}, {c.z_in})",
