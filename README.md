@@ -76,9 +76,9 @@ The upper end of each range comes from inputs at the edges of the fitted range, 
 |---|---|---|---|---|
 | fp32 | 1 182 960 (a grid over [-16, 16], 2^20 random, the range edges) | 0.006% | 0.073% | 0.39% |
 | bf16 | every finite input, and the eleven patterns (67 920) | 2.5% | 0.77% | 8.5% |
-| int8 | every input of 252 parameter sets (about 65 000) | 6.0% (10 LSB) | 1.7% (2 LSB) | 4.8% (3 LSB) |
+| int8 | every input of 252 parameter sets (about 65 000) | 7.8% (10 steps) | 6.0% (2 steps) | 7.3% (3 steps) |
 
-The gate's bound is 10% (a waiver; 1% is the target): no output in any format exceeds it. In int8 an output within 1 LSB of the rounded true value passes, so the int8 figures are the worst among outputs more than 1 LSB off, with the worst distance in LSB.
+The gate's bound is 10% (a waiver; 1% is the target): no output in any format exceeds it. In int8 an output passes when it is within max(10% |t|, one output step) of t, the exact value clamped to the output range (the decimal rule), so the int8 figures are the worst among outputs more than one step from t, with the worst distance in steps (measured: rs2_g6bf_i1_gpreg2).
 
 - **fp32** is within 1% everywhere.
 - **bf16** carries only 8 significant bits. Its sigmoid sends every x < 0 to the tail unit, which runs in fp32 with two Newton steps for 1/(1 + e^-|x|) and rounds the result to nearest bf16, because 1 - P in 8 bits cannot reach 1% there; over every finite bf16 input it is within 0.772% (at x = 0.0156). tanh's worst, 8.5%, is at |x| = 3.84, just below the tail's start at 4.
