@@ -288,7 +288,7 @@ class Int8Fmt:
 INT8 = Int8Fmt()
 FORMATS = dict(fpu.FORMATS, int8=INT8)
 REL_TOL_INT8 = suggested_rel_tol(INT8)  # max(1%, 8 eps) = 6.25%, bf16's value (L2-4)
-ABS_TOL_LSB = 1  # the int8 analog of --abs-tol: one output LSB
+ABS_TOL_LSB = 1  # the int8 analog of --abs-tol: one output step from the exact t (the decimal rule's floor)
 
 Q = 11  # Q4.11
 SETS_INT8 = {1: (0, 2), 2: (9, 3), 3: (16, 3)}  # (ROM base, degree) per control word; Task 10's fit sets it

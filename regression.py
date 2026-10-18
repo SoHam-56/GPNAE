@@ -597,7 +597,7 @@ def run_int8(args) -> int:
         and int(sb.group(3)) == 0 and int(sb.group(4)) == 0
     exact_ok = parsed["status"] == "PASS" and stream_ok
     tot = {act: gm.merge_acc(a for x, c, _, a in rows if x == act and c.gated) for act, _ in INT8_ACTS[:3]}
-    tol = f"rel <= {100 * gm.REL_TOL_INT8:.2f}% or abs <= {gm.ABS_TOL_LSB} LSB"
+    tol = f"|out - t| <= max({100 * gm.REL_TOL_INT8:.2f}% |t|, {gm.ABS_TOL_LSB} step), t exact and clamped"
     n_c, n_r, n_p = n_cases * 256, N_RAND_INT8 * 256, N_LARGE_INT8 * 256
     ran = lambda a: a in parsed["per_act"] and parsed["per_act"][a]["total"] == batches * per  # the TB checked all of it
     part = lambda a, k, n: f"{a} {n - bad[a][k]}/{n}" if ran(a) else f"{a} no result"
@@ -638,7 +638,7 @@ def run_int8(args) -> int:
                  f"{a.differ:>7}{'yes' if case.gated else 'no':>6}")
     for act, a in tot.items():
         L.append(f"{act:<8} {'within' if a.ok else 'OUTSIDE'} tolerance ({tol}): {a.fail} gated outputs outside, worst "
-                 f"{100 * a.worst_rel:.2f}% where |d| > 1 LSB, worst {a.worst_lsb} LSB, {a.real_lsb:.2f} LSB against the "
+                 f"{100 * a.worst_rel:.2f}% where |d| > 1 step from t, worst {a.worst_lsb} LSB, {a.real_lsb:.2f} LSB against the "
                  f"unquantized function")
     missed = [act for act, a in tot.items() if not a.ok]
     n_gated = {act: 256 * sum(c.gated for c in gm.INT8_CASES[act]) for act in tot}
@@ -662,7 +662,7 @@ def run_int8(args) -> int:
         fh.write("\n".join(L) + "\n")
     fields = lambda a: {"pass": a.ok, "fail": a.fail, "worst_rel": a.worst_rel, "worst_lsb": a.worst_lsb,
                         "real_lsb": a.real_lsb, "differ": a.differ}
-    summary = {act: {"rel_tol": gm.REL_TOL_INT8, "abs_tol_lsb": gm.ABS_TOL_LSB, **fields(a), "cases": []}
+    summary = {act: {"rel_tol": gm.REL_TOL_INT8, "abs_tol_lsb": gm.ABS_TOL_LSB, "rule": "decimal", **fields(a), "cases": []}
                for act, a in tot.items()}  # per activation: the tolerance, the gated cases merged, and every case
     for act, case, p, a in rows:
         summary[act]["cases"].append({"s_in": float(case.s_in), "z_in": int(case.z_in), "s_out": float(case.s_out),

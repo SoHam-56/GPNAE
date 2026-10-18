@@ -344,7 +344,7 @@ def layout_int8(deg):
 def main_int8(a):
     out = gpnae_model.coeff_file(gpnae_model.INT8)
     assert out not in ("poly_coeffs.mem", "poly_coeffs_bf16.mem", "taylor_coeffs.mem")
-    tol = f"rel <= {100 * gpnae_model.REL_TOL_INT8:.2f}% or abs <= {gpnae_model.ABS_TOL_LSB} LSB"
+    tol = f"|out - t| <= max({100 * gpnae_model.REL_TOL_INT8:.2f}% |t|, {gpnae_model.ABS_TOL_LSB} step), t exact and clamped"
     L, cands, chosen = [], {}, {}
     n_dense = {c: DENSE_X.size * len(dense_cases(c)) for c in (1, 2, 3)}
     n_grid = {c: 256 * sum(k.gated for k in gpnae_model.INT8_CASES[NAME_INT8[c]]) for c in (1, 2, 3)}
@@ -356,7 +356,7 @@ def main_int8(a):
     L.append(f"case (Task 12's measure; SELU {n_grid[1]}, sigmoid {n_grid[2]}, tanh {n_grid[3]} inputs), kept alongside. Each degree is")
     L.append("fitted, refined by coordinate descent on the dense tolerance (kept only if it misses fewer), then stripped of zero leading")
     L.append("coefficients: deg, the fitted degree; eff, the effective one, which evaluates bit-identically. fail, outputs outside the tolerance; rel, the worst relative")
-    L.append("error where |d| > 1 LSB; LSB, the worst |d| against exact_int8; real, the worst error against the unquantized function;")
+    L.append("error where |d| > 1 step from t; LSB, the worst |d| against exact_int8; real, the worst error against the unquantized function;")
     L.append("hsat, inputs whose output uses P with a Horner step that saturates; rail, the smallest |x| with output -128 or 127.")
     L.append("range max and mean: the unsaturated, unclamped path's error over the fitted range in output LSB.")
     L.append("Dense real includes the int8 clamp: SELU's s_out covers only its case's inputs, so large x rails (exact_int8 rails too).")
@@ -394,7 +394,7 @@ def main_int8(a):
     for code in (1, 2, 3):
         k = chosen[code]
         dn, gr = k.dense, k.grid
-        fig = (f"dense {dn.fail} of {n_dense[code]} outside, worst {100 * dn.worst_rel:.2f}% where |d| > 1 LSB, worst {dn.worst_lsb} LSB,"
+        fig = (f"dense {dn.fail} of {n_dense[code]} outside, worst {100 * dn.worst_rel:.2f}% where |d| > 1 step from t, worst {dn.worst_lsb} LSB,"
                f" {dn.real_lsb:.2f} LSB against the unquantized function; grid {gr.fail} of {n_grid[code]} outside, worst"
                f" {100 * gr.worst_rel:.2f}%, worst {gr.worst_lsb} LSB")
         if code == 1:
