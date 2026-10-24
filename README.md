@@ -14,6 +14,9 @@ Neural-network accelerators are good at multiply-accumulate and slow at non-line
 
 ---
 
+
+In SIENNA, each lane is `gpnae_poly` behind SIENNA's `gpnae_lane` wrapper, which gives it `EXP_W` and `MAN_W` from the format package under the build's define. This repository's own builds still take the format as `EXP_W` and `MAN_W`; the restructure's next stage moves GPNAE onto the define as well.
+
 ## The published design: TYTAN
 
 > S. Pramanik, V. William, A. Raha, D. Das, A. Mukherjee and J. L. Paluh, "TYTAN: Taylor-series based Non-Linear Activation Engine for Deep Learning Accelerators," VDAT 2025, Springer. [Book](https://link.springer.com/book/9783032263049) · [arXiv:2512.23062](https://arxiv.org/abs/2512.23062)
