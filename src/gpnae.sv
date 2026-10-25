@@ -35,6 +35,7 @@ module gpnae
     input logic [LOAD_ADDR_W-1:0] coef_addr_i,
     input logic [           31:0] coef_data_i,
     output logic                  idle_o  // no element in the lane: a coefficient write now is taken, one while it is low is refused
+    // idle_o is per element, not per set: it also rises between a set's groups, so a host must not load until the whole set is out.
 );
   localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;
   localparam int SW = $clog2(K);
