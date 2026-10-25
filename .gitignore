@@ -1,4 +1,6 @@
 Verilator/
+VCS/
+VCS_bm/
 
 # Python and simulation artifacts
 __pycache__/

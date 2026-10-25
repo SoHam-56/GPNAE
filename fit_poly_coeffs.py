@@ -34,7 +34,7 @@ FMT = {"fp32": fpu.FP32, "bf16": fpu.BF16, "int8": gm.INT8}
 FUNCS = (gm.SELU, gm.SIGMOID, gm.TANH)
 REFS = {gm.SELU: truefn.truth.selu, gm.SIGMOID: truefn.truth.sigmoid, gm.TANH: truefn.truth.tanh}
 
-# ── tier 0: the design of record (gpnae_fit_study.log 4.4; design_cfg.json, dprime.json and int8.json in /proj/scratch/spramanik/fit_study) ──
+# ── tier 0: the design of record (gpnae_fit_study.log 4.4; design_cfg.json, dprime.json and int8.json of the fit study, kept outside the repository) ──
 H = lambda *v: [int(x, 16) for x in v]
 EXP2_FP32_DEG4 = H("3f7fffd4", "bf316a6d", "3e7515d4", "bd596432", "3bddbe6a")  # 2^-f on [0, 1], expx.fit_exp2(4)
 RECORD = {
