@@ -126,7 +126,10 @@ lint:
 	@t=$$(mktemp -d); sed 's/^endmodule/  logic lint_planted;\nendmodule/' $(SRC_DIR)/gpnae.sv > $$t/gpnae.sv; \
 	if verilator --lint-only -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/lint_waivers.vlt $(filter-out $(SRC_DIR)/gpnae.sv,$(DESIGN_FILES)) \
 	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK: a warning planted in gpnae.sv shows through the waivers"; \
-	else echo "lint control FAIL: a warning planted in gpnae.sv did not show"; rm -rf $$t; exit 1; fi; rm -rf $$t
+	else echo "lint control FAIL: a warning planted in gpnae.sv did not show"; rm -rf $$t; exit 1; fi; \
+	if verilator --lint-only -Wall -Wno-fatal $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/lint_waivers.vlt $(filter-out $(SRC_DIR)/gpnae.sv,$(DESIGN_FILES)) \
+	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK (sim): a warning planted in gpnae.sv shows through the waivers without SYNTHESIS"; \
+	else echo "lint control FAIL (sim): a warning planted in gpnae.sv did not show without SYNTHESIS"; rm -rf $$t; exit 1; fi; rm -rf $$t
 
 # check-fmt: the allowlist is the package and ArithmeticLibrary's units, and GPNAE's define-selected math modules.
 FMT_ALLOW = ^(ArithmeticLibrary/.*|src/(gpnae_act_in|gpnae_post|gpnae_coef_mem|gpnae_horner)\.sv)$$
