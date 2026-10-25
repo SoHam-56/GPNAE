@@ -18,9 +18,9 @@ import time
 
 import numpy as np
 
-import gpnae_model as gm
-
 ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))  # gpnae_model and the helpers
+import gpnae_model as gm  # noqa: E402
 sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "Common", "models"))
 import truefn  # noqa: E402  the true-function gate library
 import fourstate  # noqa: E402  4-state safe parsing: an x or z word fails its test by name
@@ -744,9 +744,9 @@ class LaneSpec(regress.Spec):
     def verilator_argv(self, name):
         py = sys.executable
         if name == "selftest":
-            return [py, "test_regression_sweep.py"]
+            return [py, "scripts/test_regression_sweep.py"]
         if name == "check-model":
-            return [py, "check_gpnae_model.py"]
+            return [py, "scripts/check_gpnae_model.py"]
         if name in ("check-fmt", "check-hier"):
             return ["make", name, f"PYTHON={py}"]
         f, _, r = name.partition("/")

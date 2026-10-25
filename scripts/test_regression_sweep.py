@@ -38,7 +38,7 @@ def test_commands():
     assert reg.SPEC.argv("int8/load", None) == rg + ["int8", "--run", "load"] and reg.SPEC.argv("fp32/cycles", None) == rg + ["fp32", "--run", "cycles"]
     assert reg.SPEC.argv("fp32/fault-load", None) == rg + ["fp32", "--run", "fault4"] and reg.SPEC.argv("bf16/fault-tier", None) == rg + ["bf16", "--run", "fault5"]
     assert reg.SPEC.argv("int8/barrel-mac", None) == ["make", "barrel-mac", "FMT=int8", f"PYTHON={py}"]
-    assert reg.SPEC.argv("selftest", None) == [py, "test_regression_sweep.py"] and reg.SPEC.argv("check-model", None) == [py, "check_gpnae_model.py"]
+    assert reg.SPEC.argv("selftest", None) == [py, "scripts/test_regression_sweep.py"] and reg.SPEC.argv("check-model", None) == [py, "scripts/check_gpnae_model.py"]
     assert reg.SPEC.argv("check-hier", None) == ["make", "check-hier", f"PYTHON={py}"] and reg.SPEC.argv("bf16/lint", None) == ["make", "lint", "FMT=bf16"]
     mk = open(os.path.join(reg.ROOT, "Makefile")).read()
     assert reg.LINT_TOPS == tuple(mk.split("LINT_TOPS = ")[1].split("\n")[0].split()), "regression.py's LINT_TOPS is the Makefile's"
@@ -209,7 +209,7 @@ def test_vcs_commands():
     py, rg = sys.executable, [sys.executable, "regression.py", "--format"]
     assert spec.argv("bf16/lane-t1", None) == rg + ["bf16", "--run", "gate", "--tier", "1", "--sim", "vcs"]
     assert spec.argv("int8/barrel-mac", None) == ["make", "barrel-mac", "FMT=int8", f"PYTHON={py}", "SIM=vcs"]
-    assert spec.argv("selftest", None) == [py, "test_regression_sweep.py"] and spec.argv("check-model", None) == [py, "check_gpnae_model.py"]
+    assert spec.argv("selftest", None) == [py, "scripts/test_regression_sweep.py"] and spec.argv("check-model", None) == [py, "scripts/check_gpnae_model.py"]
     assert spec.not_applicable("check-hier") and not reg.SPEC.not_applicable("check-hier") and not spec.not_applicable("check-fmt")
     assert reg.SPEC.argv("bf16/lane-t1", None)[-1] == "1"  # Verilator's commands as before
     env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE") and k != "SIM"}
