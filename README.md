@@ -114,12 +114,14 @@ cd GPNAE
 make regression                                     # every format: lint, the lane at each tier, protocol, load path, cycles, faults
 make regression FMT=bf16                            # one format
 python3 regression.py --format bf16 --run gate --tier 0   # one lane gate: every bf16 input against the true function
-make fit                                            # refit every tier; writes gpnae_coef_default.json and gpnae_coef_mem.sv's reset contents
+make fit                                            # refit every tier; writes scripts/gpnae_coef_default.json and src/memory/gpnae_coef_mem.sv's reset contents
 ```
 
 Activate the venv in the shell that runs make: some checks call `python3` directly, and without the venv that is the system's Python, which may lack NumPy.
 
-`regression.py` writes the stimulus, builds the testbench and judges every output against the true function. `gpnae_model.py` is the bit-exact model of the hardware, and `fit_poly_coeffs.py` fits the coefficient sets of every tier. `make regression` runs each point in a private copy of the tree and passes only on each point's own verdict; the table is `testbenches/results/regression/regression.log`.
+`regression.py` writes the stimulus, builds the testbench and judges every output against the true function. `scripts/gpnae_model.py` is the bit-exact model of the hardware, and `scripts/fit_poly_coeffs.py` fits the coefficient sets of every tier. `make regression` runs each point in a private copy of the tree and passes only on each point's own verdict; the table is `testbenches/results/regression/regression.log`.
+
+The layout: `src/` holds the RTL by function (`lane`: gpnae and its stages; `mac`: the barrel MAC and the fixed-point Horner step; `memory`: the coefficient memory; `link`: the lane FIFO and credit link), `testbenches/top/` TB_gpnae, `testbenches/units/` TB_barrel_mac, `testbenches/stimulus/` the stimulus the benches read, and `scripts/` the model, the fit, the checks and the lint waivers.
 
 The published Taylor lane was removed from this tree; the last commit that builds it carries the tag `gpnae_taylor_final`.
 
@@ -182,8 +184,8 @@ What maps to what:
 | `+verilator+error+limit+N` | nothing | VCS carries on after `$error` by default |
 | `-j`, `--build-jobs`, `--threads`, `SIM_THREADS` | `-j<cores>` (compile) | VCS simulates on one thread |
 | `OPT_FAST=-O0`, `LARGE_CODE=1`, `USE_CCACHE` | not applicable | Verilator build workarounds |
-| `/* verilator lint_off ... */`, `lint_waivers.vlt` | ignored | comments to VCS; the waiver file is Verilator's |
-| `--lint-only -Wall` (the lint points) | `+lint=all` (ArithmeticLibrary's Common/vcs_lint.py) | reported, not gated, until `vcs_lint_baseline.txt` is recorded |
+| `/* verilator lint_off ... */`, `scripts/lint_waivers.vlt` | ignored | comments to VCS; the waiver file is Verilator's |
+| `--lint-only -Wall` (the lint points) | `+lint=all` (ArithmeticLibrary's scripts/vcs_lint.py) | reported, not gated, until `vcs_lint_baseline.txt` is recorded |
 | `check-hier` (Verilator's `--xml-only` hierarchy) | not applicable | listed as N/A |
 
 ---
