@@ -7,7 +7,7 @@
 //                    fp32 E (1 - E) with E = 2^-n P(f) on the same MAC, bf16 E / (1 + E) in fp32 on the tail
 //   tanh             x P_p(x^2), x at tiny |x|, +-1 past the last bound
 //   int8 runs each in Q4.11 on a centered operand (x - c, or |x| - c with P ~ tanh(|x|)), with int8 out; ReLU and linear pass at capture.
-// One accuracy tier, within 1%; the define picks the math (sienna_fmt_pkg).
+// Three accuracy tiers (tier_i: within 1%, 5%, 10%) each hold their own sets; the define picks the math (sienna_fmt_pkg).
 // Elements run in groups of up to K: captured from the FIFO, classified (gpnae_act_in) on the way into the barrel MAC, post-processed
 // one per cycle (gpnae_post), and retired in order on the output link once K output credits are held.
 module gpnae
@@ -27,6 +27,7 @@ module gpnae
     credit_link_if.producer out,  // one result per put; a group starts only with K output credits
 
     input logic [CONTROL_WIDTH-1:0] control_word_i,
+    input logic [              1:0] tier_i,  // 0, 1 or 2; held with control_word_i
     input sienna_fmt_pkg::lane_params_t par_i,  // int8: the input rescale and SELU's output requantize; floats: a 1-bit dummy
 
     // The coefficient memory's load path: a 32-bit word per cycle at gpnae_pkg's word address, taken only while idle_o.
@@ -115,8 +116,8 @@ module gpnae
       .out_cnt_o   (out_cnt)
   );
 
-  // The group's function, taken as it starts.
-  logic [1:0] fn_q;
+  // The group's function and tier, taken as it starts.
+  logic [1:0] fn_q, tier_q;
   logic       byp_q, relu_q;
   logic [1:0] fn_c;
   logic       byp_c, relu_c;
@@ -131,7 +132,7 @@ module gpnae
   logic [ACT_W-1:0] coef_rdata;
   logic             lane_idle, coef_we;  // a write lands only while the lane holds no element (set below)
   gpnae_coef_mem COEF (.clk_i(clk_i), .rstn_i(rstn_i), .wr_i(coef_we), .waddr_i(coef_addr_i), .wdata_i(coef_data_i), .raddr_i(coef_raddr),
-                       .rdata_o(coef_rdata), .desc_o(desc), .tail_o(tset));
+                       .rdata_o(coef_rdata), .tier_i(tier_q), .desc_o(desc), .tail_o(tset));
 
   // ── per-element state ──
   logic [DATA_WIDTH-1:0] in_buf[K];  // the captured words
@@ -277,6 +278,7 @@ module gpnae
       trdy       <= '0;
       has_exp    <= 1'b0;
       fn_q       <= '0;
+      tier_q     <= '0;
       byp_q      <= 1'b0;
       relu_q     <= 1'b0;
     end else begin
@@ -308,6 +310,7 @@ module gpnae
             // The FIFO reports its own occupancy, so the whole group is popped back to back.
             grp_n  <= (fifo_count > K[ADDR_LINES:0]) ? K[SW:0] : fifo_count[SW:0];
             fn_q   <= fn_c;
+            tier_q <= tier_i;
             byp_q  <= byp_c;
             relu_q <= relu_c;
             gstate <= G_CAP;
@@ -419,6 +422,7 @@ module gpnae
           if (fifo_count == '0) gstate <= G_IDLE;
           else if (grp_go) begin
             fn_q   <= fn_c;
+            tier_q <= tier_i;
             byp_q  <= byp_c;
             relu_q <= relu_c;
             gstate <= G_CAP;
@@ -468,5 +472,12 @@ module gpnae
     end
   a_load_idle: assert property (@(posedge clk_i) disable iff (!rstn_i) we_seen |-> idle_seen)
     else $error("gpnae: a_load_idle: a coefficient memory write landed while the lane is busy");
+  // A group's tier is one of the three.
+  logic start_seen;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) start_seen <= 1'b0;
+    else start_seen <= (gstate == G_IDLE || gstate == G_NEXT) && grp_go;
+  a_tier_valid: assert property (@(posedge clk_i) disable iff (!rstn_i) start_seen |-> (int'(tier_q) < NUM_TIERS))
+    else $error("gpnae: a_tier_valid: tier %0d does not exist (0 to %0d)", tier_q, NUM_TIERS - 1);
 `endif
 endmodule

@@ -8,7 +8,7 @@ package gpnae_pkg;
   localparam int ACT_W = sienna_fmt_pkg::ACTIVATION_DATA_WIDTH;
   localparam int COEF_WORDS = 128;  // coefficient words, ACT_W bits each
   localparam int COEF_ADDR_W = 7;
-  localparam int NUM_TIERS = 1;  // one accuracy tier: within 1%
+  localparam int NUM_TIERS = 3;  // accuracy tiers: 0 within 1%, 1 within 5%, 2 within 10%
   localparam int NUM_DESC = 4;  // per tier: SELU's x < 0 side, sigmoid x >= 0, sigmoid x < 0, tanh
   localparam int D_SELU = 0, D_SIGP = 1, D_SIGN = 2, D_TANH = 3;
   localparam int PMAX = 6;  // pieces per descriptor
