@@ -42,6 +42,8 @@ MUTANTS = (
      "  assign w_desc = 1'b0;", "fp32", "load", "LOAD fp32: FAIL"),
     ("load_gate_dropped", "src/gpnae.sv", "  assign coef_we   = coef_wr_i && lane_idle;", "  assign coef_we   = coef_wr_i;", "bf16", "fault4",
      "a_load_idle"),
+    ("idle_ignores_group", "src/gpnae.sv", "  assign lane_idle = (gstate == G_IDLE) && (fifo_count == '0) && !tail_busy;",
+     "  assign lane_idle = (fifo_count == '0) && !tail_busy;", "bf16", "fault4", "a_coef_quiet"),
     ("load_drops_tail_writes", "src/gpnae_coef_mem.sv",
      "  assign w_tail = wr_i && (int'(waddr_i) >= A_TAIL) && (int'(waddr_i) < A_TAIL + NUM_TIERS * TAIL_STRIDE);", "  assign w_tail = 1'b0;", "bf16",
      "load", "LOAD bf16: FAIL"),
