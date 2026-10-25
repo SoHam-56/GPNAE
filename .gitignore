@@ -10,5 +10,11 @@ __pycache__/
 *.ron
 *.wcfg
 testbenches/results/regression/
-# regression.py --test bf16_all: the RTL words TB_gpnae_poly dumps with +dump_got
+# the RTL words TB_gpnae dumps with +dump_got
 testbenches/stimulus/*_got.mem
+Verilator_*/
+# regression.py's and barrel_mac_vectors.py's stimulus: the int8 parameter sets and streams, the load file, the barrel bench's groups
+testbenches/stimulus/*_par.mem
+testbenches/stimulus/stream_*.mem
+testbenches/stimulus/coef_load.mem
+testbenches/stimulus/bm_*.mem
