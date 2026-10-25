@@ -585,7 +585,7 @@ def do_cycles(fmt, seed):
 
 
 def do_fault(fmt, which):
-    """FAULT 4: coefficient writes while the lane works must be refused (none lands: no a_load_idle, every word still the reset image's, the
+    """FAULT 4: coefficient writes while the lane works must be refused (none lands: no a_load_idle or a_coef_quiet, every word still the reset image's, the
     TB counts them); FAULT 5 (tier 3) must fire a_tier_valid."""
     name = {4: "a_load_idle", 5: "a_tier_valid"}[which]
     if fmt == "int8":
@@ -604,9 +604,10 @@ def do_fault(fmt, which):
     if which == 4:  # the interlock: the writes are refused, so the batch passes bit for bit against the reset image
         m = re.search(r"LOAD REFUSED: (\d+) coefficient writes", raw)
         refused = int(m.group(1)) if m else 0
-        ok = refused == 4 and fired == 0 and "RESULT: PASSED" in raw
+        quiet = len(re.findall("a_coef_quiet", raw))  # the occupancy check, apart from the interlock's own terms
+        ok = refused == 4 and fired == 0 and quiet == 0 and "RESULT: PASSED" in raw
         return ok, [f"FAULT 4 (writes while busy refused): {'CAUGHT' if ok else 'NOT CAUGHT'}, {refused} of 4 writes refused, "
-                    f"{fired} lines name {name}, the batch {'matches' if 'RESULT: PASSED' in raw else 'does not match'} the reset image"]
+                    f"{fired} lines name {name}, {quiet} name a_coef_quiet, the batch {'matches' if 'RESULT: PASSED' in raw else 'does not match'} the reset image"]
     return fired > 0, [f"FAULT {which} ({name}): {'CAUGHT' if fired else 'NOT CAUGHT'}, {fired} lines name the assertion"]
 
 
