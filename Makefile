@@ -96,6 +96,7 @@ default: help
 help:
 	@echo "  make verilator [FMT=f]  - build and run TB_gpnae (regression.py writes its stimulus; the run size and tier are SIM_ARGS)"
 	@echo "  make barrel-mac [FMT=f] - TB_barrel_mac on barrel_mac_vectors.py's groups, bit for bit"
+	@echo "  make lint [FMT=f]       - verilator --lint-only -Wall of gpnae and each of its new modules, with and without SYNTHESIS (lint_waivers.vlt: the library's and B's lane_link's own)"
 	@echo "  make check-fmt          - no RTL outside the allowlist names a precision (C4: a planted EXP_W must fail it)"
 	@echo "  make check-hier         - at each define, the lane elaborates only that precision's units"
 	@echo "  make fit                - fit_poly_coeffs.py: every tier, then the default JSON and gpnae_coef_mem.sv's tables"
@@ -117,6 +118,16 @@ barrel-mac:
 	  --top-module TB_barrel_mac --Mdir $(VERILATOR_DIR)_bm $(DESIGN_FILES) $(TB_DIR)/TB_barrel_mac.sv -o sim
 	$(VERILATOR_DIR)_bm/sim
 
+LINT_TOPS = fixedPointMultiplyAdd gpnae_horner barrel_mac gpnae_exp_split gpnae_coef_mem gpnae_act_in gpnae_post gpnae
+lint:
+	@for t in $(LINT_TOPS) $(if $(filter bf16,$(FMT)),gpnae_tail); do \
+	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT)" -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module $$t $(PRJ_DIR)/lint_waivers.vlt $(DESIGN_FILES) || exit 1; \
+	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT) sim" -Wall -Wno-fatal $(FMT_DEF) --top-module $$t $(PRJ_DIR)/lint_waivers.vlt $(DESIGN_FILES) || exit 1; done
+	@t=$$(mktemp -d); sed 's/^endmodule/  logic lint_planted;\nendmodule/' $(SRC_DIR)/gpnae.sv > $$t/gpnae.sv; \
+	if verilator --lint-only -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/lint_waivers.vlt $(filter-out $(SRC_DIR)/gpnae.sv,$(DESIGN_FILES)) \
+	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK: a warning planted in gpnae.sv shows through the waivers"; \
+	else echo "lint control FAIL: a warning planted in gpnae.sv did not show"; rm -rf $$t; exit 1; fi; rm -rf $$t
+
 # check-fmt: the allowlist is the package and ArithmeticLibrary's units, and GPNAE's define-selected math modules.
 FMT_ALLOW = ^(ArithmeticLibrary/.*|src/(gpnae_act_in|gpnae_post|gpnae_coef_mem|gpnae_horner)\.sv)$$
 check-fmt:
@@ -136,7 +147,7 @@ clean:
 	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier
 	-rm -f *.vcd *.fst
 
-.PHONY: default help verilator barrel-mac check-fmt check-hier fit clean regression regression-summary
+.PHONY: default help verilator barrel-mac lint check-fmt check-hier fit clean regression regression-summary
 
 # make regression: selftest, check-model and per format the barrel MAC, each tier's gate, protocol, load, cycles and the two faults.
 FORMATS  = fp32 bf16 int8

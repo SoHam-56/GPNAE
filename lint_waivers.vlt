@@ -1,0 +1,6 @@
+`verilator_config
+// make lint judges GPNAE's own files: ArithmeticLibrary lints its units itself, and lane_link's four warnings are B's, unchanged.
+lint_off -file "*/ArithmeticLibrary/*"
+lint_off -rule PINCONNECTEMPTY -file "*/src/lane_link.sv" -match "*has_credit_o*"
+lint_off -rule UNUSEDSIGNAL -file "*/src/lane_link.sv" -match "*cap_*"
+lint_off -rule WIDTHEXPAND -file "*/src/lane_link.sv" -match "*res_data_i*"
