@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bit-exact model of the gpnae lane (src/gpnae.sv), element for element: the region each input falls in (the coefficient memory's
+"""Bit-exact model of the gpnae lane (src/lane/gpnae.sv), element for element: the region each input falls in (the coefficient memory's
 descriptors for the activation and tier), the operand, Horner on the barrel MAC with the region's coefficient set, the post stage;
 bf16's fp32 tail for negative sigmoid past its Q set; int8 in Q4.11 on fixedPointMultiplyAdd. Built on AriL's fpu.py and ipu.py.
 The coefficient memory's reset default is gpnae_coef_default.json, which fit_poly_coeffs.py writes with the RTL's literal tables."""
@@ -11,12 +11,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the GPNAE repository
 sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "Common", "models"))
 import fpu  # noqa: E402
 import ipu  # noqa: E402
 
-DEFAULT_JSON = os.path.join(ROOT, "gpnae_coef_default.json")
+DEFAULT_JSON = os.path.join(ROOT, "scripts", "gpnae_coef_default.json")
 
 # Control words, as SIENNA drives them: 001 SELU, 010 sigmoid, 100 ReLU, 101 linear; every other word runs tanh.
 SELU, SIGMOID, TANH, RELU, LINEAR = 1, 2, 3, 4, 5

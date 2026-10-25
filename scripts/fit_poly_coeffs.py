@@ -7,7 +7,7 @@ cost (rounds, then words); each piece fitted by float64 minimax (relative; absol
 format, then coordinate descent on its bits against the bit-exact lane (gpnae_model) under the decimal rule at the tier's tolerance.
 A candidate is kept when every input of the gate set passes within MARGIN of the tolerance (fp32: a dense and random sample, so a
 tighter margin; bf16 every input; int8 every code at 144 scales and every Q4.11 input).
-Writes gpnae_coef_default.json, the literal tables in src/gpnae_coef_mem.sv between its markers, and fit_poly_coeffs.log (a report).
+Writes gpnae_coef_default.json, the literal tables in src/memory/gpnae_coef_mem.sv between its markers, and fit_poly_coeffs.log (a report).
 Usage: fit_poly_coeffs.py [--fmt fp32,bf16,int8] [--jobs N] [--check] (--check: re-measure the written default, change nothing)."""
 import argparse
 import itertools
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(gm.ROOT, "ArithmeticLibrary", "Common", "models"
 import truefn  # noqa: E402
 
 ROOT = gm.ROOT
-SV = os.path.join(ROOT, "src", "gpnae_coef_mem.sv")
+SV = os.path.join(ROOT, "src", "memory", "gpnae_coef_mem.sv")
 REPORT = os.path.join(ROOT, "fit_poly_coeffs.log")
 MARGIN = {"fp32": 0.85, "bf16": 0.97, "int8": 0.97}  # a kept candidate's worst, as a share of its tier's tolerance
 FMT = {"fp32": fpu.FP32, "bf16": fpu.BF16, "int8": gm.INT8}

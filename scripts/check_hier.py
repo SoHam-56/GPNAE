@@ -7,7 +7,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the GPNAE repository
 UNITS = {  # every arithmetic unit of ArithmeticLibrary and GPNAE's own: per-format units, the generic integer units and the int8-only units
     "fp32Multiplier", "fp32Adder", "fp32Divider", "bf16Multiplier", "bf16Adder", "bf16WideMultiplier", "fp32ToBf16",
     "int8Multiplier", "int16Multiplier", "int24Multiplier", "int32Adder", "intMultiplier", "intAdder", "fixedPointMultiplyAdd",
@@ -37,7 +37,7 @@ def elaborate(fmt: str, files: list, verilator: str, out: str) -> str:
     x = os.path.join(out, f"hier_{fmt}.xml")
     # the bench is the top: Verilator cannot elaborate a top with interface ports, and the bench instantiates no arithmetic unit
     cmd = [verilator, "--xml-only", "--xml-output", x, "--timing", "-Wno-fatal", "-Wno-lint", "-Wno-style", *d, "--top-module", "TB_gpnae",
-           f"-I{os.path.join(ROOT, 'testbenches')}", "--Mdir", os.path.join(out, f"obj_{fmt}"), *files, os.path.join(ROOT, "testbenches", "TB_gpnae.sv")]
+           f"-I{os.path.join(ROOT, 'testbenches')}", "--Mdir", os.path.join(out, f"obj_{fmt}"), *files, os.path.join(ROOT, "testbenches", "top", "TB_gpnae.sv")]
     r = subprocess.run(cmd, cwd=os.path.join(ROOT, "src"), capture_output=True, text=True)
     if r.returncode != 0:
         errs = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.startswith("%Error")]

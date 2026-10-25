@@ -9,5 +9,5 @@ if [ -n "$CXX_COROUTINES" ]; then
   chmod +x "$WRAP/g++"
   export PATH="$WRAP:$(dirname "$CXX_COROUTINES"):$PATH"
 fi
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 exec python3 regression.py "$@"

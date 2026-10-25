@@ -10,6 +10,7 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # regression.py, at the repository root
 import regression as reg  # noqa: E402
 import gpnae_model as gm  # noqa: E402
 

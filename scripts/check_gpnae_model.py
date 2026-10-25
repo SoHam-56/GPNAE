@@ -23,7 +23,7 @@ def eq(what, got, want):
 
 
 # the default image passes and the RTL holds it
-r = subprocess.run([sys.executable, os.path.join(gm.ROOT, "fit_poly_coeffs.py"), "--check"], capture_output=True, text=True)
+r = subprocess.run([sys.executable, os.path.join(gm.ROOT, "scripts", "fit_poly_coeffs.py"), "--check"], capture_output=True, text=True)
 print(r.stdout, end="")
 eq("fit_poly_coeffs.py --check exit", r.returncode, 0)
 
