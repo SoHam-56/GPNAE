@@ -5,35 +5,35 @@ TB_DIR = $(PRJ_DIR)/testbenches
 ARIL = $(PRJ_DIR)/ArithmeticLibrary
 
 # The build's precision: FMT=fp32 (default), bf16 or int8; FMT_DEF is the define sienna_fmt_pkg reads (ArithmeticLibrary's fmt.mk).
-include $(ARIL)/Common/fmt.mk
+include $(ARIL)/scripts/fmt.mk
 # The simulator: SIM ?= verilator, or vcs (ArithmeticLibrary's sim.mk: plain VCS builds, TRACE=1, XPROP=1, RANDINIT=1); make vcs runs TB_gpnae on VCS.
 VCS_LINT_BASELINE = $(PRJ_DIR)/vcs_lint_baseline.txt
-include $(ARIL)/Common/sim.mk
+include $(ARIL)/scripts/sim.mk
 
 VERILATOR = verilator
 
 # The lane: the format package, the credit interface, the units every format's math modules may pick, then gpnae's own files.
 DESIGN_FILES = \
-	$(ARIL)/Common/src/sienna_fmt_pkg.sv \
-	$(ARIL)/Common/src/credit_link_if.sv \
-	$(ARIL)/Common/src/credit_counter.sv \
-	$(ARIL)/Common/src/credit_link_checker.sv \
-	$(ARIL)/Fmt/src/fmt_mul.sv \
-	$(ARIL)/Fmt/src/fmt_add.sv \
-	$(ARIL)/Multipliers/Radix4Booth/src/R4Booth.sv \
-	$(ARIL)/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
-	$(ARIL)/Multipliers/FP32/src/fp32Multiplier.sv \
-	$(ARIL)/Adders/FP32/src/LZC.sv \
-	$(ARIL)/Adders/FP32/src/fp32Adder.sv \
-	$(ARIL)/Multipliers/BF16/src/bf16Multiplier.sv \
-	$(ARIL)/Multipliers/BF16Wide/src/bf16WideMultiplier.sv \
-	$(ARIL)/Adders/BF16/src/bf16Adder.sv \
-	$(ARIL)/Converters/FP32ToBF16/src/fp32ToBf16.sv \
-	$(ARIL)/Multipliers/Int8/src/int8Multiplier.sv \
-	$(ARIL)/Adders/Int32/src/int32Adder.sv \
-	$(ARIL)/Multipliers/Int16/src/int16Multiplier.sv \
-	$(ARIL)/Multipliers/Int24/src/int24Multiplier.sv \
-	$(ARIL)/Requantizer/src/int8Requantizer.sv \
+	$(ARIL)/src/fmt/sienna_fmt_pkg.sv \
+	$(ARIL)/src/credit/credit_link_if.sv \
+	$(ARIL)/src/credit/credit_counter.sv \
+	$(ARIL)/src/credit/credit_link_checker.sv \
+	$(ARIL)/src/fmt/fmt_mul.sv \
+	$(ARIL)/src/fmt/fmt_add.sv \
+	$(ARIL)/src/multipliers/R4Booth.sv \
+	$(ARIL)/src/multipliers/karatsubaUnsigned.sv \
+	$(ARIL)/src/multipliers/fp32Multiplier.sv \
+	$(ARIL)/src/adders/LZC.sv \
+	$(ARIL)/src/adders/fp32Adder.sv \
+	$(ARIL)/src/multipliers/bf16Multiplier.sv \
+	$(ARIL)/src/multipliers/bf16WideMultiplier.sv \
+	$(ARIL)/src/adders/bf16Adder.sv \
+	$(ARIL)/src/converters/fp32ToBf16.sv \
+	$(ARIL)/src/multipliers/int8Multiplier.sv \
+	$(ARIL)/src/adders/int32Adder.sv \
+	$(ARIL)/src/multipliers/int16Multiplier.sv \
+	$(ARIL)/src/multipliers/int24Multiplier.sv \
+	$(ARIL)/src/quantized/int8Requantizer.sv \
 	$(SRC_DIR)/lane/gpnae_pkg.sv \
 	$(SRC_DIR)/link/lane_fifo.sv \
 	$(SRC_DIR)/link/lane_link.sv \
@@ -136,7 +136,7 @@ else
 endif
 
 LINT_TOPS = fixedPointMultiplyAdd gpnae_horner barrel_mac gpnae_exp_split gpnae_coef_mem gpnae_act_in gpnae_post gpnae
-# make lint SIM=vcs: VCS's +lint=all of each top, with and without SYNTHESIS (Common/vcs_lint.py; reported until vcs_lint_baseline.txt holds it)
+# make lint SIM=vcs: VCS's +lint=all of each top, with and without SYNTHESIS (ArithmeticLibrary's scripts/vcs_lint.py; reported until vcs_lint_baseline.txt holds it)
 lint:
 ifeq ($(SIM),vcs)
 	@rc=0; for t in $(LINT_TOPS) $(if $(filter bf16,$(FMT)),gpnae_tail); do \
@@ -144,8 +144,8 @@ ifeq ($(SIM),vcs)
 	  $(call vcs_lint,$$t $(FMT) sim,$$t,$(DESIGN_FILES),$(FMT_DEF)) || rc=1; done; exit $$rc
 else
 	@for t in $(LINT_TOPS) $(if $(filter bf16,$(FMT)),gpnae_tail); do \
-	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT)" -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; \
-	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT) sim" -Wall -Wno-fatal $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; done
+	  bash $(ARIL)/scripts/lint.sh "lint $$t $(FMT)" -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; \
+	  bash $(ARIL)/scripts/lint.sh "lint $$t $(FMT) sim" -Wall -Wno-fatal $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; done
 	@t=$$(mktemp -d); sed 's/^endmodule/  logic lint_planted;\nendmodule/' $(SRC_DIR)/lane/gpnae.sv > $$t/gpnae.sv; \
 	if verilator --lint-only -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/scripts/lint_waivers.vlt $(filter-out $(SRC_DIR)/lane/gpnae.sv,$(DESIGN_FILES)) \
 	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK: a warning planted in gpnae.sv shows through the waivers"; \
@@ -158,9 +158,9 @@ endif
 # check-fmt: the allowlist is the package and ArithmeticLibrary's units, and GPNAE's define-selected math modules.
 FMT_ALLOW = ^(ArithmeticLibrary/.*|src/(lane/gpnae_act_in|lane/gpnae_post|memory/gpnae_coef_mem|lane/gpnae_horner)\.sv)$$
 check-fmt:
-	@bash $(ARIL)/Common/check_fmt.sh $(PRJ_DIR) '$(FMT_ALLOW)' && echo "check-fmt OK: the tree passes" || { echo "check-fmt FAIL: the tree"; exit 1; }
+	@bash $(ARIL)/scripts/check_fmt.sh $(PRJ_DIR) '$(FMT_ALLOW)' && echo "check-fmt OK: the tree passes" || { echo "check-fmt FAIL: the tree"; exit 1; }
 	@t=$$(mktemp -d); mkdir -p $$t/src/lane; cp $(SRC_DIR)/lane/gpnae.sv $$t/src/lane/; echo '// EXP_W' >> $$t/src/lane/gpnae.sv; \
-	if bash $(ARIL)/Common/check_fmt.sh $$t '$(FMT_ALLOW)' > $$t/c4.log; then echo "check-fmt FAIL: C4 planted EXP_W passed"; exit 1; \
+	if bash $(ARIL)/scripts/check_fmt.sh $$t '$(FMT_ALLOW)' > $$t/c4.log; then echo "check-fmt FAIL: C4 planted EXP_W passed"; exit 1; \
 	elif ! /usr/bin/grep -q '^check-fmt: 1 RTL files outside the allowlist, 1 naming a precision$$' $$t/c4.log; then echo "check-fmt FAIL: C4 failed for another reason"; cat $$t/c4.log; exit 1; \
 	else echo "check-fmt OK: C4 planted EXP_W in gpnae.sv fails"; fi; rm -rf $$t
 

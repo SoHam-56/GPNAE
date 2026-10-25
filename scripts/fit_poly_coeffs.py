@@ -23,7 +23,7 @@ import numpy as np
 import gpnae_model as gm
 from gpnae_model import fpu, ipu
 
-sys.path.insert(0, os.path.join(gm.ROOT, "ArithmeticLibrary", "Common", "models"))
+sys.path.insert(0, os.path.join(gm.ROOT, "ArithmeticLibrary", "models"))
 import truefn  # noqa: E402
 
 ROOT = gm.ROOT

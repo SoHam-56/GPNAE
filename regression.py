@@ -21,7 +21,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))  # gpnae_model and the helpers
 import gpnae_model as gm  # noqa: E402
-sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "Common", "models"))
+sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "models"))
 import truefn  # noqa: E402  the true-function gate library
 import fourstate  # noqa: E402  4-state safe parsing: an x or z word fails its test by name
 TB_DIR = os.path.join(ROOT, "testbenches")
@@ -674,7 +674,7 @@ def main():
 def _engine():
     """The library's make regression engine, under its own name (SIENNA and SystolicMesh each have a regression.py too)."""
     import importlib.util
-    s = importlib.util.spec_from_file_location("aril_regress", os.path.join(ROOT, "ArithmeticLibrary", "Common", "regress.py"))
+    s = importlib.util.spec_from_file_location("aril_regress", os.path.join(ROOT, "ArithmeticLibrary", "scripts", "regress.py"))
     m = importlib.util.module_from_spec(s)
     s.loader.exec_module(m)
     return m

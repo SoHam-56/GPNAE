@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the GPNAE repository
-sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "Common", "models"))
+sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "models"))
 import fpu  # noqa: E402
 import ipu  # noqa: E402
 
