@@ -56,8 +56,8 @@ RECORD = {
                                                                          H("3f3d", "bda5", "3b85")]),
     },
     "int8": {  # centered operand: x - c (SELU) or |x| - c, fixedPointMultiplyAdd at 11 + frac
-        # SELU: [-5.25, 0] at the study's degree 4 (try_int8 over S 4.75 to 6.5, rs3_b2_f1_refit2): the study's S 4.75 misses 1% (1.023%) on
-        # regression.py's case sets, S 5.0 on the held-out sets (1.084%); 5.25 measures 0.688% on the fit sets, 0.678% held out; same cycles
+        # SELU: [-5.25, 0] at the study's degree 4, chosen on the fit sets alone (try_int8 over S 4.75 to 6.5, rs3_b2_f1_refit2): S 4.75 misses 1%
+        # (1.195%), S 5.0 is past int8's MARGIN (0.988% against 0.97%); 5.25 measures 0.688% on the fit sets, 0.678% held out; same cycles
         gm.SELU: dict(bounds=[10752], deg=4, center=-5376, frac=2, sets=[[1271, 1510, 1576, 1634, 1011]]),
         "sigp": dict(bounds=[12800], deg=5, center=6400, frac=2, sets=[[1965, 322, -692, 770, -31, -373]]),
         "sign": dict(share=True, reflect=1, bounds=[12800]),  # 1 - P on the x >= 0 set
