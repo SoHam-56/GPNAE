@@ -1,6 +1,6 @@
 `timescale 1ns / 100ps
 
-// The lane's coefficient memory, its reset default only (read-only): COEF_WORDS coefficient words, four descriptors (piece bounds, base, degree and
+// The lane's coefficient memory, host-writable: COEF_WORDS coefficient words, per tier four descriptors (piece bounds, base, degree and
 // the rest as data), and in builds with the float tail its fp32 sets. Reset loads the build-time default below, the format's, fitted by
 // fit_poly_coeffs.py. A write takes 32 bits at a 9-bit word address (gpnae_pkg's map); the barrel MAC reads one word a cycle, registered;
 // the descriptors and tail set of the selected tier are combinational.
@@ -9,6 +9,10 @@ module gpnae_coef_mem
 (
     input logic clk_i,
     input logic rstn_i,
+
+    input logic                   wr_i,  // the load path: one word per cycle
+    input logic [LOAD_ADDR_W-1:0] waddr_i,
+    input logic [           31:0] wdata_i,
 
     input  logic [COEF_ADDR_W-1:0] raddr_i,
     output logic [      ACT_W-1:0] rdata_o,  // the word at raddr_i, a cycle later
@@ -49,12 +53,30 @@ module gpnae_coef_mem
   logic [ACT_W-1:0] words[COEF_WORDS];
   desc_t            desc [NUM_TIERS][NUM_DESC];
 
+  // Which field a write hits.
+  logic             w_coef, w_desc, w_tail;
+  logic [      3:0] w_di;  // the descriptor
+  logic [      3:0] w_j;
+  logic [      2:0] w_tj;
+  localparam int FA_W = $clog2(N_FIELDS + 1);
+  logic [FA_W-1:0] fa;
+  assign fa     = FA_W'(waddr_i - LOAD_ADDR_W'(A_DESC));
+  assign w_coef = wr_i && (int'(waddr_i) < A_DESC);
+  assign w_desc = wr_i && (int'(waddr_i) >= A_DESC) && (int'(waddr_i) < A_TAIL);
+  assign w_tail = wr_i && (int'(waddr_i) >= A_TAIL) && (int'(waddr_i) < A_TAIL + NUM_TIERS * TAIL_STRIDE);
+  assign w_di   = 4'(int'(fa) / DESC_STRIDE);
+  assign w_j    = 4'(int'(fa) % DESC_STRIDE);
+  assign w_tj   = 3'((int'(waddr_i) - A_TAIL) % TAIL_STRIDE);
+
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       /* verilator lint_off UNUSEDLOOP */
       for (int i = 0; i < COEF_WORDS; i++) words[i] <= DEF_WORDS[i*ACT_W+:ACT_W];
       for (int t = 0; t < NUM_TIERS; t++) for (int d = 0; d < NUM_DESC; d++) desc[t][d] <= def_desc(t, d);
       /* verilator lint_on UNUSEDLOOP */
+    end else begin
+      if (w_coef) words[waddr_i[COEF_ADDR_W-1:0]] <= wdata_i[ACT_W-1:0];
+      if (w_desc) desc[0][int'(w_di)] <= desc_field(desc[0][int'(w_di)], int'(w_j), wdata_i);
     end
   end
 
@@ -66,8 +88,13 @@ module gpnae_coef_mem
     tail_t tail[NUM_TIERS];
     always_ff @(posedge clk_i or negedge rstn_i)
       if (!rstn_i) for (int t = 0; t < NUM_TIERS; t++) tail[t] <= def_tail(t);
+      else if (w_tail) tail[0] <= tail_field(tail[0], int'(w_tj), wdata_i);
     assign tail_o = tail[0];
   end else begin : G_NO_TAIL
     assign tail_o = '0;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic unused_tail;
+    assign unused_tail = w_tail ^ ^w_tj;
+    /* verilator lint_on UNUSEDSIGNAL */
   end
 endmodule

@@ -1,10 +1,10 @@
 `timescale 1ns / 100ps
 
-// The gpnae lane's coefficient memory layout and element kinds, shared by its modules (gpnae_model.py mirrors it).
+// The gpnae lane's coefficient memory layout and element kinds, shared by its modules and the host's loader (gpnae_model.py mirrors it).
 package gpnae_pkg;
   /* verilator lint_save */
   /* verilator lint_off UNUSEDPARAM */  // a package of constants: no single module reads every one
-  /* verilator lint_off UNUSEDSIGNAL */  // the field decodes take a 32-bit field word
+  /* verilator lint_off UNUSEDSIGNAL */  // the field decodes take the load path's 32-bit word
   localparam int ACT_W = sienna_fmt_pkg::ACTIVATION_DATA_WIDTH;
   localparam int COEF_WORDS = 128;  // coefficient words, ACT_W bits each
   localparam int COEF_ADDR_W = 7;
@@ -13,6 +13,7 @@ package gpnae_pkg;
   localparam int D_SELU = 0, D_SIGP = 1, D_SIGN = 2, D_TANH = 3;
   localparam int PMAX = 6;  // pieces per descriptor
   localparam int TAIL_MAXC = 6;  // coefficients of the fp32 tail's set (bf16)
+  localparam int LOAD_ADDR_W = 9;  // the load path's word address
   localparam int A_DESC = COEF_WORDS;  // descriptor fields from here, 16 words per descriptor in tier-major order
   localparam int DESC_STRIDE = 16;
   localparam int A_TAIL = A_DESC + NUM_TIERS * NUM_DESC * DESC_STRIDE;  // the tail sets from here, 8 words per tier
@@ -52,7 +53,7 @@ package gpnae_pkg;
     K_TAIL = 3'd7   // bf16 sigmoid x < 0 beyond: the fp32 tail's result
   } kind_t;
 
-  // A field word of a descriptor (the reset default's): j < PMAX a bound, then {reflect[16], base[14:8], deg[7:4], np[2:0]}, {exp_deg, exp_base},
+  // A field word written into a descriptor: j < PMAX a bound, then {reflect[16], base[14:8], deg[7:4], np[2:0]}, {exp_deg, exp_base},
   // the center, the frac.
   function automatic desc_t desc_field(input desc_t d, input int j, input logic [31:0] v);
     desc_t r = d;
@@ -70,7 +71,7 @@ package gpnae_pkg;
     return r;
   endfunction
 
-  // A field word of a tail set (the reset default's): j < TAIL_MAXC a coefficient, j = TAIL_MAXC {newton[5:4], deg[2:0]}.
+  // A field word written into a tail set: j < TAIL_MAXC a coefficient, j = TAIL_MAXC {newton[5:4], deg[2:0]}.
   function automatic tail_t tail_field(input tail_t t, input int j, input logic [31:0] v);
     tail_t r = t;
     if (j < TAIL_MAXC) r.coef[j] = v;

@@ -1,7 +1,7 @@
 `default_nettype wire
 `timescale 1ns / 100ps
 
-// GPNAE, the activation lane: each activation as polynomial pieces, its coefficient sets and piece bounds data in a memory.
+// GPNAE, the activation lane: each activation as polynomial pieces, its coefficient sets and piece bounds data in a host-writable memory.
 //   SELU     x >= 0  lambda x;  x < 0  x P_p(x) on piece p of |x|, -lambda*alpha past the last bound
 //   sigmoid  x >= 0  P_p(|x|), 1 past the last bound;  x < 0  1 - P_p(|x|) or a set of its own, then e^-|x| past the last bound:
 //                    fp32 E (1 - E) with E = 2^-n P(f) on the same MAC, bf16 E / (1 + E) in fp32 on the tail
@@ -27,7 +27,13 @@ module gpnae
     credit_link_if.producer out,  // one result per put; a group starts only with K output credits
 
     input logic [CONTROL_WIDTH-1:0] control_word_i,
-    input sienna_fmt_pkg::lane_params_t par_i  // int8: the input rescale and SELU's output requantize; floats: a 1-bit dummy
+    input sienna_fmt_pkg::lane_params_t par_i,  // int8: the input rescale and SELU's output requantize; floats: a 1-bit dummy
+
+    // The coefficient memory's load path: a 32-bit word per cycle at gpnae_pkg's word address, taken only while idle_o.
+    input logic                   coef_wr_i,
+    input logic [LOAD_ADDR_W-1:0] coef_addr_i,
+    input logic [           31:0] coef_data_i,
+    output logic                  idle_o  // no element in the lane: a coefficient write now is taken, one while it is low is refused
 );
   localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;
   localparam int SW = $clog2(K);
@@ -123,7 +129,9 @@ module gpnae
   tail_t            tset;
   logic [COEF_ADDR_W-1:0] coef_raddr;
   logic [ACT_W-1:0] coef_rdata;
-  gpnae_coef_mem COEF (.clk_i(clk_i), .rstn_i(rstn_i), .raddr_i(coef_raddr), .rdata_o(coef_rdata), .desc_o(desc), .tail_o(tset));
+  logic             lane_idle, coef_we;  // a write lands only while the lane holds no element (set below)
+  gpnae_coef_mem COEF (.clk_i(clk_i), .rstn_i(rstn_i), .wr_i(coef_we), .waddr_i(coef_addr_i), .wdata_i(coef_data_i), .raddr_i(coef_raddr),
+                       .rdata_o(coef_rdata), .desc_o(desc), .tail_o(tset));
 
   // ── per-element state ──
   logic [DATA_WIDTH-1:0] in_buf[K];  // the captured words
@@ -442,8 +450,23 @@ module gpnae
     if (tail_done) tres_buf[tail_idx] <= tail_res;
   end
 
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_busy;
-  assign unused_busy = tail_busy;  // no reader in a lane without a load path
-  /* verilator lint_on UNUSEDSIGNAL */
+  // The load interlock: a group in flight reads the memory every cycle, so a write lands only while the lane holds no element.
+  assign lane_idle = (gstate == G_IDLE) && (fifo_count == '0) && !tail_busy;
+  assign coef_we   = coef_wr_i && lane_idle;
+  assign idle_o    = lane_idle;
+
+`ifndef SYNTHESIS
+  // No write reaches the memory while the lane holds an element. Both terms are registered.
+  logic we_seen, idle_seen;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) begin
+      we_seen   <= 1'b0;
+      idle_seen <= 1'b1;
+    end else begin
+      we_seen   <= coef_we;
+      idle_seen <= lane_idle;
+    end
+  a_load_idle: assert property (@(posedge clk_i) disable iff (!rstn_i) we_seen |-> idle_seen)
+    else $error("gpnae: a_load_idle: a coefficient memory write landed while the lane is busy");
+`endif
 endmodule
