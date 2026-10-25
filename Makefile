@@ -17,9 +17,6 @@ DESIGN_FILES = \
 	lane_fifo.sv \
 	lane_link.sv \
 	TYTAN/Memory/CoeffROM.v \
-	TYTAN/Memory/InputFIFO.v \
-	TYTAN/Memory/PE5B.v \
-	TYTAN/Memory/RAM.v \
 	TYTAN/Memory/ROM.v \
 	TYTAN/LZC.v \
 	../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
@@ -36,11 +33,7 @@ DESIGN_FILES = \
 	../ArithmeticLibrary/Divider/FP32/src/fp32Divider.sv \
 	../ArithmeticLibrary/Divider/FP32/src/divu.sv \
 	fp32_down.sv \
-	fp32_up_down.sv \
-	SeLu.sv \
-	sigtan.sv \
 	TYTAN/barrel_mac.sv \
-	gpnae.sv \
 	gpnae_tail.sv \
 	gpnae_poly_int8.sv \
 	gpnae_poly.sv
@@ -51,8 +44,8 @@ ifeq ($(USE_CCACHE),0)
 export CCACHE_DISABLE := 1
 endif
 
-TESTBENCH = TB_gpnae.sv
-TOP_MODULE = TB_gpnae
+TESTBENCH = TB_gpnae_poly.sv
+TOP_MODULE = TB_gpnae_poly
 
 VERILATOR_DIR = $(PRJ_DIR)/Verilator
 IVERILOG_DIR = $(PRJ_DIR)/Icarus

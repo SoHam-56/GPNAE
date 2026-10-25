@@ -15,11 +15,11 @@ import regression as reg  # noqa: E402
 
 def test_points():
     once = ["selftest", "check-model-fp32", "check-model-bf16", "check-model-int8"]
-    assert reg.SPEC.points(False, ["fp32", "bf16", "int8"]) == once + ["fp32/taylor", "fp32/lane", "fp32/lane-accuracy", "bf16/lane", "bf16/lane-accuracy", "int8/lane"]
-    assert reg.SPEC.points(False, ["bf16"]) == once + ["bf16/lane", "bf16/lane-accuracy"]  # the published Taylor lane is fp32 only
+    assert reg.SPEC.points(False, ["fp32", "bf16", "int8"]) == once + ["fp32/lane", "fp32/lane-accuracy", "bf16/lane", "bf16/lane-accuracy", "int8/lane"]
+    assert reg.SPEC.points(False, ["bf16"]) == once + ["bf16/lane", "bf16/lane-accuracy"]
     assert reg.SPEC.points(True, ["int8"]) == once + ["int8/lane"] and reg.SPEC.points(False, []) == []
     assert reg.SPEC.reported == frozenset()  # nothing is reported only
-    for bad in ("fp16/lane", "int8/lane-accuracy", "fp32/N8_T2/lane", "fp32/check-model-fp32", "bf16/taylor", "int8/taylor", "nosuch"):
+    for bad in ("fp16/lane", "int8/lane-accuracy", "fp32/N8_T2/lane", "fp32/check-model-fp32", "fp32/taylor", "bf16/taylor", "nosuch"):
         try:
             reg.SPEC.parse(bad)
         except ValueError:
@@ -33,7 +33,6 @@ def test_commands():
     assert reg.SPEC.argv("bf16/lane-accuracy", None) == lane + ["bf16", "--model", "exact"]  # against the functions, gated
     assert reg.SPEC.argv("fp32/lane", None) == lane + ["fp32", "--model", "hw"]  # fp32 too: gpnae_model models fp32_down's P - 1
     assert reg.SPEC.argv("fp32/lane-accuracy", None) == lane + ["fp32", "--model", "exact"]
-    assert reg.SPEC.argv("fp32/taylor", None) == [py, "regression.py", "--lane", "gpnae", "--format", "fp32"]  # the published lane, its tests unchanged
     assert reg.SPEC.argv("check-model-fp32", None) == [py, "check_gpnae_model_fp32.py"] and reg.SPEC.argv("check-model-int8", None) == [py, "check_gpnae_model_int8.py"] and reg.SPEC.argv("check-model-bf16", None) == [py, "check_gpnae_model_bf16.py"]
     assert reg.SPEC.argv("int8/lane", None) == lane + ["int8", "--model", "exact"] and reg.SPEC.argv("selftest", None) == [py, "test_regression_sweep.py"]
 
@@ -43,7 +42,6 @@ def test_lane_threads():
     for flags in ("-j2", "-j", "", "-j8"):
         for p in ("fp32/lane", "bf16/lane-accuracy", "int8/lane"):
             assert reg.regress.point_env(reg.SPEC, p, flags, 8).get("SIM_THREADS") == "1", (p, flags)
-    assert reg.regress.point_env(reg.SPEC, "fp32/taylor", "-j2", 8).get("SIM_THREADS") == "4"  # the Taylor lane keeps cores / N
 
 
 def test_verdicts():
@@ -52,7 +50,6 @@ def test_verdicts():
     assert v("fp32/lane", fl) == "PASS" and v("fp32/lane", fl, 1) == "FAIL (exit 1)" and v("fp32/lane", fl.replace("7200", "0")) == "FAIL (0 element checks)"
     assert v("fp32/lane-accuracy", fl.replace("ACCURACY: PASS", "ACCURACY: NONE")) == "FAIL (no 'ACCURACY: PASS')"  # the gate must have run
     assert v("bf16/lane", fl.replace("ACCURACY: PASS", "ACCURACY: FAIL")).startswith("FAIL (log: ACCURACY: FAIL")
-    assert v("fp32/taylor", fl.replace("ACCURACY: PASS (true function)", "")) == "PASS"  # the published Taylor lane is not gpnae_poly
     assert v("bf16/lane", fl.replace("All patterns passed", "2 pattern(s) failed")) == "FAIL (no 'Verdict : All patterns passed')"
     assert v("bf16/lane", fl + "%Error: x\n") == "FAIL (log: %Error: x)"
     i8 = ("ACCURACY: PASS (true function)\nBITEXACT: PASS (diagnostic; also required)  selu 64512/64512  sigmoid 64512/64512  tanh 64512/64512"
