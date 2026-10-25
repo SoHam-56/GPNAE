@@ -1,108 +1,67 @@
 `timescale 1ns / 100ps
 
-// Activation tails for gpnae_poly, for inputs past the fitted polynomials' range.
-// Computes e^a for a <= 0 without cancellation: halve to |z| <= 1, Taylor e^z - 1, then double back.
-// SELU x < -4: lambda*alpha*(e^x - 1).  sigmoid |x| > 3.5: E(1 - E(1 - E)), E = e^-|x|.
-// tanh |x| > 4: 1 - 2*E(1 - E(1 - E)), E = e^-2|x|, with the sign of x.
-// NEWTON > 0, sigmoid x < 0: E*y instead, y -> 1/(1 + E) by NEWTON Newton steps from 1.5 - (1 + E)/2.
-// CONTEXTS elements run at once, each with its own registers, sharing one multiplier and one adder.
-// Every element sees the same operations on the same operands as when they ran one at a time; only the timing differs.
-module gpnae_tail #(
-    parameter int EXP_W    = 8,   // the build's number format: fp32 8/23, bf16 8/7
-    parameter int MAN_W    = 23,
-    parameter int CONTEXTS = 4,
-    parameter int IW       = 4,  // width of the caller's element index
-    parameter int NEWTON   = 0   // Newton steps for sigmoid x < 0; 0 keeps the series
+// bf16's negative sigmoid past its Q set, in fp32: E = e^-t = 2^-n P(f), k = t log2 e split into n and f, P(f) ~ 2^-f by Horner on the
+// tier's fp32 set; then sigmoid(-t) = E y, y -> 1/(1 + E) from 1.5 - (1 + E)/2 by NEWTON steps y (2 - (1 + E) y). The result is fp32;
+// the lane narrows it to nearest. CONTEXTS elements run at once, each with its own registers, sharing one fp32Multiplier and one
+// fp32Adder; every element sees the same operations on the same operands whatever its timing.
+module gpnae_tail
+  import gpnae_pkg::*;
+#(
+    parameter int CONTEXTS = 8,
+    parameter int IW       = 4  // width of the caller's element tag
 ) (
     input logic clk_i,
     input logic rstn_i,
 
-    input  logic                 start_i,  // taken on a cycle ready_o is high
-    input  logic [EXP_W+MAN_W:0] x_i,
-    input  logic [          1:0] func_i,   // 01 SELU, 10 sigmoid, 11 tanh
-    input  logic [       IW-1:0] idx_i,    // returned with the result
-    output logic                 ready_o,  // a context is free
+    input  logic          start_i,  // taken on a cycle ready_o is high
+    input  logic [31:0]   x_i,  // t = |x| as an fp32 word
+    input  logic [IW-1:0] idx_i,  // returned with the result
+    input  tail_t         set_i,  // the tier's set, held while busy_o
+    output logic          ready_o,  // a context is free
 
-    output logic [EXP_W+MAN_W:0] result_o,
-    output logic [       IW-1:0] idx_o,
-    output logic                 done_o,
-    output logic                 busy_o
+    output logic [  31:0] result_o,
+    output logic [IW-1:0] idx_o,
+    output logic          done_o,
+    output logic          busy_o
 );
-
-  localparam int W = 1 + EXP_W + MAN_W;
-  localparam int BIAS = (1 << (EXP_W - 1)) - 1;
   localparam int C = CONTEXTS;
   localparam int CW = (C > 1) ? $clog2(C) : 1;
+  localparam logic [31:0] ONE = 32'h3F800000, TWO = 32'h40000000, Y0 = 32'h3FC00000, LOG2E = 32'h3FB8AA3B, S = 32'h80000000;
 
-  // An fp32 constant in this format.
-  function automatic logic [W-1:0] K_(input logic [31:0] fp32);
-    return W'(sienna_fmt_pkg::from_fp32(fp32, MAN_W));
-  endfunction
-
-  localparam logic [W-1:0] ONE = K_(32'h3F800000);
-  localparam logic [W-1:0] TWO = K_(32'h40000000);
-  localparam logic [W-1:0] Y0 = K_(32'h3FC00000);  // 1.5, the Newton seed's constant
-  localparam logic [W-1:0] LA = K_(32'h3FE10966);  // lambda * alpha
-  localparam logic [W-1:0] BIG_W = K_(32'h42D00000);
-  localparam logic [W-2:0] BIG = BIG_W[W-2:0];  // |a| > 104: e^a is below every normal value
-  localparam logic [W-1:0] SIGN = {1'b1, {(W - 1) {1'b0}}};
-  localparam bit NWT = (NEWTON > 0);  // the Newton states exist only then; a NEWTON = 0 build is today's
-  // Once E is known, a sigmoid x < 0 element goes to T_ND when NWT, else to T_U; the constant select keeps a NEWTON = 0 netlist today's.
-
-  // 1/(k+1)! for k = 0..10
-  logic [W-1:0] cinv[11];
-  assign cinv[0]  = K_(32'h3F800000);
-  assign cinv[1]  = K_(32'h3F000000);
-  assign cinv[2]  = K_(32'h3E2AAAAB);
-  assign cinv[3]  = K_(32'h3D2AAAAB);
-  assign cinv[4]  = K_(32'h3C088889);
-  assign cinv[5]  = K_(32'h3AB60B61);
-  assign cinv[6]  = K_(32'h39500D01);
-  assign cinv[7]  = K_(32'h37D00D01);
-  assign cinv[8]  = K_(32'h3638EF1D);
-  assign cinv[9]  = K_(32'h3493F27E);
-  assign cinv[10] = K_(32'h32D7322B);
-
-  typedef enum logic [4:0] {
+  typedef enum logic [3:0] {
     T_IDLE,
-    T_TAY_MUL,   // acc * z
-    T_TAY_ADD,   // + 1/(k+1)!
-    T_TAY_FIN,   // d = z * acc
-    T_SELU_ADD,  // t = d + 2
-    T_SELU_MUL,  // d = d * t
-    T_SELU_OUT,  // lambda * alpha * d
-    T_E1,        // E = 1 + d
-    T_SQ,        // E = E * E
-    T_U,         // u = 1 - E
-    T_V,         // v = E * u
-    T_W,         // w = 1 - v
-    T_S,         // s = E * w
-    T_SIG_OUT,   // 1 - s
-    T_TANH_OUT,  // 1 - 2 s
-    T_DONE,
-    T_ND,        // D = 1 + E
-    T_NY0,       // y = 1.5 - D/2
-    T_NDY,       // t = D * y
-    T_NT,        // t = 2 - t
-    T_NYT,       // y = y * t
-    T_NS         // s = E * y
+    T_K,     // k = t log2 e
+    T_HMUL,  // tmp = f acc
+    T_HADD,  // acc = c_j + tmp
+    T_ND,    // D = 1 + E
+    T_NY0,   // y = 1.5 - D/2
+    T_NDY,   // tmp = D y
+    T_NT,    // tmp = 2 - tmp
+    T_NYT,   // y = y tmp
+    T_NS,    // s = E y
+    T_DONE
   } tstate_t;
 
   tstate_t st[C];
-  logic [W-1:0] x[C], z[C], acc[C], d[C], e[C], s[C], tmp[C], res[C];
-  logic [1:0] fn[C];
-  logic [3:0] k[C], m[C];
+  logic [31:0] x[C], f[C], acc[C], e[C], d[C], y[C], tmp[C], res[C];
+  logic [7:0] n[C];
+  logic [2:0] j[C];  // the Horner coefficient index
+  logic [1:0] k[C];  // Newton steps left
   logic issued[C];  // this context has an operation in a shared unit
   logic [IW-1:0] id[C];
 
-  // Negate for subtraction.
-  function automatic logic [W-1:0] neg(input logic [W-1:0] v);
-    return {~v[W-1], v[W-2:0]};
+  // E = P 2^-n by an exponent subtract: 0 where that leaves the normal range.
+  /* verilator lint_off UNUSEDSIGNAL */
+  function automatic logic [31:0] scale(input logic [31:0] p, input logic [7:0] nn);  // P > 0: its sign is not read
+    logic signed [9:0] ep;
+    ep = 10'(p[30:23]) - 10'(nn);
+    return (ep <= 10'sd0) ? 32'd0 : {1'b0, ep[7:0], p[22:0]};
   endfunction
+  /* verilator lint_on UNUSEDSIGNAL */
 
-  // What each context wants from the shared units this cycle, exactly the operands the one-context version issued.
+  // What each context wants from the shared units this cycle.
   logic mreq[C], areq[C];
-  logic [W-1:0] ma[C], mb[C], aa[C], ab[C];
+  logic [31:0] ma[C], mb[C], aa[C], ab[C];
   always_comb begin
     for (int c = 0; c < C; c++) begin
       mreq[c] = 1'b0;
@@ -113,37 +72,22 @@ module gpnae_tail #(
       ab[c] = '0;
       if (!issued[c]) begin
         case (st[c])
-          T_TAY_MUL:  begin mreq[c] = 1'b1; ma[c] = acc[c]; mb[c] = z[c]; end
-          T_TAY_ADD:  begin areq[c] = 1'b1; aa[c] = tmp[c]; ab[c] = cinv[k[c]]; end
-          T_TAY_FIN:  begin mreq[c] = 1'b1; ma[c] = z[c]; mb[c] = acc[c]; end
-          T_SELU_ADD: begin areq[c] = 1'b1; aa[c] = d[c]; ab[c] = TWO; end
-          T_SELU_MUL: begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = tmp[c]; end
-          T_SELU_OUT: begin mreq[c] = 1'b1; ma[c] = LA; mb[c] = d[c]; end
-          T_E1:       begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = d[c]; end
-          T_SQ:       if (!(e[c][W-2:MAN_W] < EXP_W'((BIAS + 1) / 2))) begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = e[c]; end
-          T_U:        begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(e[c]); end
-          T_V:        begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = tmp[c]; end
-          T_W:        begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(tmp[c]); end
-          T_S:        begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = tmp[c]; end
-          T_SIG_OUT:  begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = neg(s[c]); end
-          T_TANH_OUT: begin
-            areq[c] = 1'b1;
-            aa[c] = ONE;
-            ab[c] = (s[c][W-2:0] == '0) ? SIGN : {1'b1, s[c][W-2:MAN_W] + EXP_W'(1), s[c][MAN_W-1:0]};  // 2s as an exponent increment
-          end
-          T_ND:       if (NWT) begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = e[c]; end
-          T_NY0:      if (NWT) begin areq[c] = 1'b1; aa[c] = Y0; ab[c] = {1'b1, d[c][W-2:MAN_W] - EXP_W'(1), d[c][MAN_W-1:0]}; end  // -D/2, D >= 1
-          T_NDY:      if (NWT) begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = acc[c]; end
-          T_NT:       if (NWT) begin areq[c] = 1'b1; aa[c] = TWO; ab[c] = neg(tmp[c]); end
-          T_NYT:      if (NWT) begin mreq[c] = 1'b1; ma[c] = acc[c]; mb[c] = tmp[c]; end
-          T_NS:       if (NWT) begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = acc[c]; end
+          T_K:    begin mreq[c] = 1'b1; ma[c] = x[c]; mb[c] = LOG2E; end
+          T_HMUL: begin mreq[c] = 1'b1; ma[c] = f[c]; mb[c] = acc[c]; end
+          T_HADD: begin areq[c] = 1'b1; aa[c] = set_i.coef[j[c]]; ab[c] = tmp[c]; end
+          T_ND:   begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = e[c]; end
+          T_NY0:  begin areq[c] = 1'b1; aa[c] = Y0; ab[c] = {1'b1, d[c][30:23] - 8'd1, d[c][22:0]}; end  // -D/2, D >= 1
+          T_NDY:  begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = y[c]; end
+          T_NT:   begin areq[c] = 1'b1; aa[c] = TWO; ab[c] = tmp[c] ^ S; end
+          T_NYT:  begin mreq[c] = 1'b1; ma[c] = y[c]; mb[c] = tmp[c]; end
+          T_NS:   begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = y[c]; end
           default: ;
         endcase
       end
     end
   end
 
-  // Lowest requesting context wins each unit; a context asks again only after its result is back, so none starves.
+  // The lowest requesting context wins each unit; a context asks again only after its result is back, so none starves.
   logic mgnt_v, agnt_v, free_v, out_v;
   logic [CW-1:0] mgnt, agnt, free_c, out_c;
   always_comb begin
@@ -160,29 +104,27 @@ module gpnae_tail #(
   end
   assign ready_o = free_v;
 
-  logic [W-1:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
+  logic [31:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
   logic mul_valid, mul_done, add_valid, add_done;
+  /* verilator lint_off PINCONNECTEMPTY */
+  fp32Multiplier TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
+                       .overflow_o(), .underflow_o(), .invalid_o());
+  fp32Adder TADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid), .A(add_a), .B(add_b), .result_o(add_res), .done_o(add_done),
+                  .overflow_o(), .underflow_o(), .invalid_o());
+  /* verilator lint_on PINCONNECTEMPTY */
 
-  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W) || sienna_fmt_pkg::is_int(EXP_W)) begin : G_BAD_FORMAT
-    $fatal(1, "gpnae_tail: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
-  end else if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
-    fp32Multiplier TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res),
-                         .done_o(mul_done), .overflow_o(), .underflow_o(), .invalid_o());
-    fp32Adder TADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid), .A(add_a), .B(add_b), .result_o(add_res),
-                    .done_o(add_done), .overflow_o(), .underflow_o(), .invalid_o());
-  end else begin : G_FP
-    fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a),
-        .B(mul_b), .result_o(mul_res), .done_o(mul_done), .overflow_o(), .underflow_o(), .invalid_o());
-    fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) TADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid), .A(add_a),
-        .B(add_b), .result_o(add_res), .done_o(add_done), .overflow_o(), .underflow_o(), .invalid_o());
-  end
+  // k's split, on the multiplier's result.
+  logic [ 7:0] sp_n;
+  logic [31:0] sp_f;
+  logic        sp_under;
+  gpnae_exp_split SPLIT (.k_i(mul_res), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
 
   // In-order units: a FIFO of issuing contexts pairs each result with its owner, whatever the latency.
   logic [CW-1:0] mq[C], aq[C];
   logic [CW:0] mq_wr, mq_rd, aq_wr, aq_rd;
   logic [CW-1:0] m_owner, a_owner;
-  assign m_owner = mq[mq_rd[CW-1:0] % C];
-  assign a_owner = aq[aq_rd[CW-1:0] % C];
+  assign m_owner = mq[mq_rd[CW-1:0]];
+  assign a_owner = aq[aq_rd[CW-1:0]];
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -200,13 +142,13 @@ module gpnae_tail #(
       if (mgnt_v) begin
         mul_a <= ma[mgnt];
         mul_b <= mb[mgnt];
-        mq[mq_wr[CW-1:0] % C] <= mgnt;
+        mq[mq_wr[CW-1:0]] <= mgnt;
         mq_wr <= (mq_wr == (CW+1)'(C - 1)) ? '0 : mq_wr + 1'b1;
       end
       if (agnt_v) begin
         add_a <= aa[agnt];
         add_b <= ab[agnt];
-        aq[aq_wr[CW-1:0] % C] <= agnt;
+        aq[aq_wr[CW-1:0]] <= agnt;
         aq_wr <= (aq_wr == (CW+1)'(C - 1)) ? '0 : aq_wr + 1'b1;
       end
       if (mul_done) mq_rd <= (mq_rd == (CW+1)'(C - 1)) ? '0 : mq_rd + 1'b1;
@@ -222,10 +164,10 @@ module gpnae_tail #(
       for (int c = 0; c < C; c++) begin
         st[c] <= T_IDLE;
         issued[c] <= 1'b0;
-        {x[c], z[c], acc[c], d[c], e[c], s[c], tmp[c], res[c]} <= '0;
-        fn[c] <= '0;
+        {x[c], f[c], acc[c], e[c], d[c], y[c], tmp[c], res[c]} <= '0;
+        n[c]  <= '0;
+        j[c]  <= '0;
         k[c]  <= '0;
-        m[c]  <= '0;
         id[c] <= '0;
       end
     end else begin
@@ -240,154 +182,67 @@ module gpnae_tail #(
         automatic logic ares = add_done && (a_owner == CW'(c));
         if ((mgnt_v && mgnt == CW'(c)) || (agnt_v && agnt == CW'(c))) issued[c] <= 1'b1;
         case (st[c])
-          T_IDLE: begin
+          T_IDLE:
             if (start_i && free_v && free_c == CW'(c)) begin
-              automatic logic [W-1:0] a;
-              // a = x (SELU), -|x| (sigmoid), -2|x| (tanh)
-              case (func_i)
-                2'b01:   a = x_i;
-                2'b10:   a = {1'b1, x_i[W-2:0]};
-                default: a = (x_i[W-2:MAN_W] >= EXP_W'(BIAS + 6)) ? {1'b1, BIG + (W-1)'(1)} : {1'b1, x_i[W-2:MAN_W] + EXP_W'(1), x_i[MAN_W-1:0]};
-              endcase
-              x[c]  <= x_i;
-              fn[c] <= func_i;
-              id[c] <= idx_i;
-              if (a[W-2:0] > BIG) begin
-                // e^a underflows: e^a - 1 = -1 and e^a = 0
-                d[c]  <= {1'b1, ONE[W-2:0]};
-                e[c]  <= '0;
-                st[c] <= (func_i == 2'b01) ? T_SELU_OUT : (NWT ? ((func_i == 2'b10 && x_i[W-1]) ? T_ND : T_U) : T_U);
-              end else begin
-                if (a[W-2:MAN_W] < EXP_W'(BIAS)) begin
-                  z[c] <= a;
-                  m[c] <= '0;
-                end else begin
-                  z[c] <= {a[W-1], EXP_W'(BIAS - 1), a[MAN_W-1:0]};  // |z| in [0.5, 1)
-                  m[c] <= 4'(a[W-2:MAN_W] - EXP_W'(BIAS - 1));
-                end
-                acc[c] <= cinv[10];
-                k[c]   <= 4'd9;
-                st[c]  <= T_TAY_MUL;
-              end
+              x[c]      <= x_i;
+              id[c]     <= idx_i;
               issued[c] <= 1'b0;
+              st[c]     <= T_K;
+            end
+
+          T_K: if (mres) begin
+            issued[c] <= 1'b0;
+            n[c]      <= sp_n;
+            f[c]      <= sp_f;
+            acc[c]    <= '0;
+            j[c]      <= set_i.deg;
+            e[c]      <= '0;
+            st[c]     <= sp_under ? T_ND : T_HMUL;  // E below every normal value: 0
+          end
+
+          T_HMUL: if (mres) begin
+            tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_HADD;
+          end
+
+          T_HADD: if (ares) begin
+            issued[c] <= 1'b0;
+            if (j[c] == 3'd0) begin
+              e[c]  <= scale(add_res, n[c]);
+              st[c] <= T_ND;
+            end else begin
+              acc[c] <= add_res;
+              j[c]   <= j[c] - 3'd1;
+              st[c]  <= T_HMUL;
             end
           end
 
-          T_TAY_MUL: if (mres) begin
-            tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_TAY_ADD;
-          end
-
-          T_TAY_ADD: if (ares) begin
-            acc[c] <= add_res;
-            issued[c] <= 1'b0;
-            if (k[c] == 0) st[c] <= T_TAY_FIN;
-            else begin
-              k[c]  <= k[c] - 1'b1;
-              st[c] <= T_TAY_MUL;
-            end
-          end
-
-          T_TAY_FIN: if (mres) begin
-            d[c] <= mul_res;
-            issued[c] <= 1'b0;
-            if (fn[c] == 2'b01) st[c] <= (m[c] == 0) ? T_SELU_OUT : T_SELU_ADD;
-            else st[c] <= T_E1;
-          end
-
-          T_SELU_ADD: if (ares) begin
-            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_SELU_MUL;
-          end
-
-          T_SELU_MUL: if (mres) begin
-            d[c] <= mul_res;
-            issued[c] <= 1'b0;
-            m[c] <= m[c] - 1'b1;
-            st[c] <= (m[c] == 4'd1) ? T_SELU_OUT : T_SELU_ADD;
-          end
-
-          T_SELU_OUT: if (mres) begin
-            res[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_DONE;
-          end
-
-          T_E1: if (ares) begin
-            e[c] <= add_res; issued[c] <= 1'b0; st[c] <= (m[c] == 0) ? (NWT ? ((fn[c] == 2'b10 && x[c][W-1]) ? T_ND : T_U) : T_U) : T_SQ;
-          end
-
-          T_SQ: begin
-            if (!issued[c] && e[c][W-2:MAN_W] < EXP_W'((BIAS + 1) / 2)) begin
-              // E^2 would fall below the normal range, and the chain is exact at 0
-              e[c]  <= '0;
-              m[c]  <= '0;
-              st[c] <= (NWT ? ((fn[c] == 2'b10 && x[c][W-1]) ? T_ND : T_U) : T_U);
-            end else if (mres) begin
-              e[c] <= mul_res;
-              issued[c] <= 1'b0;
-              m[c] <= m[c] - 1'b1;
-              st[c] <= (m[c] == 4'd1) ? (NWT ? ((fn[c] == 2'b10 && x[c][W-1]) ? T_ND : T_U) : T_U) : T_SQ;
-            end
-          end
-
-          T_U: if (ares) begin
-            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_V;
-          end
-
-          T_V: if (mres) begin
-            tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_W;
-          end
-
-          T_W: if (ares) begin
-            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_S;
-          end
-
-          T_S: if (mres) begin
-            s[c] <= mul_res;
-            issued[c] <= 1'b0;
-            if (fn[c] == 2'b10) begin
-              if (x[c][W-1]) begin
-                res[c] <= mul_res;
-                st[c]  <= T_DONE;
-              end else st[c] <= T_SIG_OUT;
-            end else st[c] <= T_TANH_OUT;
-          end
-
-          T_SIG_OUT: if (ares) begin
-            res[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_DONE;
-          end
-
-          T_TANH_OUT: if (ares) begin
-            res[c] <= {x[c][W-1], add_res[W-2:0]}; issued[c] <= 1'b0; st[c] <= T_DONE;
-          end
-
-          T_ND: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
-          else if (ares) begin
+          T_ND: if (ares) begin
             d[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NY0;
           end
 
-          T_NY0: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
-          else if (ares) begin
-            acc[c] <= add_res; k[c] <= 4'(NEWTON); issued[c] <= 1'b0; st[c] <= T_NDY;
+          T_NY0: if (ares) begin
+            y[c]      <= add_res;
+            k[c]      <= set_i.newton;
+            issued[c] <= 1'b0;
+            st[c]     <= (set_i.newton == 2'd0) ? T_NS : T_NDY;
           end
 
-          T_NDY: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
-          else if (mres) begin
+          T_NDY: if (mres) begin
             tmp[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_NT;
           end
 
-          T_NT: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
-          else if (ares) begin
+          T_NT: if (ares) begin
             tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NYT;
           end
 
-          T_NYT: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
-          else if (mres) begin
-            acc[c] <= mul_res;
+          T_NYT: if (mres) begin
+            y[c]      <= mul_res;
             issued[c] <= 1'b0;
-            k[c] <= k[c] - 1'b1;
-            st[c] <= (k[c] == 4'd1) ? T_NS : T_NDY;
+            k[c]      <= k[c] - 2'd1;
+            st[c]     <= (k[c] == 2'd1) ? T_NS : T_NDY;
           end
 
-          T_NS: if (!NWT) st[c] <= T_IDLE;  // unreachable then, and handled as the default
-          else if (mres) begin
+          T_NS: if (mres) begin
             res[c] <= mul_res; issued[c] <= 1'b0; st[c] <= T_DONE;
           end
 
@@ -405,25 +260,22 @@ module gpnae_tail #(
     for (int c = 0; c < C; c++) if (st[c] != T_IDLE) busy_o = 1'b1;
   end
 
-  if (NEWTON < 0 || NEWTON > 15) begin : G_BAD_NEWTON
-    $fatal(1, "gpnae_tail: NEWTON=%0d, must be 0..15 (a 4-bit step count)", NEWTON);
-  end
-
 `ifndef SYNTHESIS
   // x of the element whose result done_o returns, beside idx_o, for the caller's pairing check.
-  logic [W-1:0] x_out;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [31:0] x_out;  // gpnae's a_tail_pair reads it
+  /* verilator lint_on UNUSEDSIGNAL */
   always_ff @(posedge clk_i) if (out_v) x_out <= x[out_c];
 
   a_start_free: assert property (@(posedge clk_i) disable iff (!rstn_i) start_i |-> ready_o)
-    else $error("gpnae_tail: start with no free context");
-  // A busy context keeps its element's x, function and index through every state, the Newton states included.
-  if (NWT) begin : G_HOLD
-    for (genvar c = 0; c < C; c++) begin : G_CTX
-      a_ctx_hold: assert property (@(posedge clk_i) disable iff (!rstn_i)
-          (st[c] != T_IDLE && $past(st[c]) != T_IDLE) |-> ($stable(x[c]) && $stable(fn[c]) && $stable(id[c])))
-        else $error("gpnae_tail: context %0d changed its element while busy", c);
-    end
+    else $error("gpnae_tail: a_start_free: a start with no free context");
+  // A busy context keeps its element's x and tag through every state, and the set it computes with does not change under it.
+  for (genvar c = 0; c < C; c++) begin : G_CTX
+    a_ctx_hold: assert property (@(posedge clk_i) disable iff (!rstn_i)
+        (st[c] != T_IDLE && $past(st[c]) != T_IDLE) |-> ($stable(x[c]) && $stable(id[c])))
+      else $error("gpnae_tail: a_ctx_hold: context %0d changed its element while busy", c);
   end
+  a_set_stable: assert property (@(posedge clk_i) disable iff (!rstn_i) (busy_o && $past(busy_o)) |-> $stable(set_i))
+    else $error("gpnae_tail: a_set_stable: the tier's set changed while an element was in the tail");
 `endif
-
 endmodule

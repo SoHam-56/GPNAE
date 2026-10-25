@@ -1,156 +1,100 @@
 `timescale 1ns / 100ps
 
-// Barrel TYTAN MAC: K elements share one datapath, round-robin, in lockstep on the term
-// index. Same idea as a barrel processor -- rotate through contexts to fill pipeline latency.
-//
-// The format's multiplier and adder accept a new operation every cycle (II=1) but the original
-// controller issues one every 15, so the multiplier runs at ~6%. Horner carries a 13-cycle
-// loop dependency WITHIN an element (MUL_LAT + ADD_LAT: 13 in fp32, 8 in bf16), but elements are independent, so K
-// of them can share the units in lockstep on the term index.
-//
-// Per round every slot issues one multiply and one add, so a round costs K cycles instead of
-// 15 per element. The arithmetic each element sees is unchanged in value and in order, so
-// results are bit-identical to mac.sv.
-//
-// K must be >= 14 or a slot's accumulator would not be back before it is needed again.
-// int8 (EXP_W = 0): one fxMac, a Q4.11 multiply-add in 2 cycles, behind a register stage; the loop is 3 cycles, K >= 4.
+// Barrel TYTAN MAC: up to K elements share one Horner step (gpnae_horner), round-robin, in lockstep on the round index, like a barrel
+// processor that rotates through contexts to fill the step's pipeline. Each slot has its own coefficient set (base and degree) and,
+// in int8, its own fraction shift; a round issues one step per slot, so it costs max(n, LOOP + 1) cycles. The group runs
+// max(degree) + 1 rounds; a slot of lower degree joins at its own degree, its earlier rounds writing its accumulator back as 0, so its
+// result never depends on its group. Coefficients come from the lane's memory on coeff_addr_o, read back on coeff_data_i a cycle later.
+// No format here: the step's latency and coefficient lag are the package's.
 module barrel_mac #(
-    parameter int EXP_W      = 8,
-    parameter int MAN_W      = 23,
-    parameter int DATA_WIDTH = sienna_fmt_pkg::is_int(EXP_W) ? 16 : 1 + EXP_W + MAN_W,  // int8 works in Q4.11
-    parameter int ADDR_LINES = 5,
-    parameter int K          = 16,
-    parameter     INIT_FILE  = "taylor_coeffs.mem"
+    parameter int  K           = 16,
+    parameter int  COEF_ADDR_W = 7,
+    localparam int ACT_W       = sienna_fmt_pkg::ACTIVATION_DATA_WIDTH
 ) (
     input logic clk_i,
     input logic rstn_i,
 
-    // Load phase: one operand per ld_valid_i, then a start_i pulse to run the group.
-    input logic                  ld_valid_i,
-    input logic [DATA_WIDTH-1:0] ld_data_i,
-    input logic                  start_i,
+    // Load phase: one operand and its set per ld_valid_i, then a start_i pulse to run the group.
+    input logic                   ld_valid_i,
+    input logic [      ACT_W-1:0] ld_data_i,
+    input logic [COEF_ADDR_W-1:0] ld_base_i,  // the slot's coefficient set: c_j at base + j
+    input logic [            3:0] ld_deg_i,
+    input logic [            1:0] ld_frac_i,  // int8: fixedPointMultiplyAdd's extra fraction bits; floats ignore it
+    input logic                   start_i,
 
-    input logic [ADDR_LINES-1:0] terms_i,       // polynomial degree; NCOEF = terms_i + 1
-    input logic [ADDR_LINES-1:0] coeff_base_i,  // where this lane's coefficient set starts
+    // Coefficient memory read: the word at coeff_addr_o is on coeff_data_i the next cycle.
+    output logic [COEF_ADDR_W-1:0] coeff_addr_o,
+    input  logic [      ACT_W-1:0] coeff_data_i,
 
     // Result phase: one per cycle, in load order.
-    output logic                  res_valid_o,
-    output logic [DATA_WIDTH-1:0] res_data_o,
-    output logic                  busy_o,
-    output logic                  done_o
+    output logic             res_valid_o,
+    output logic [ACT_W-1:0] res_data_o,
+    output logic             busy_o,
+    output logic             done_o
 );
-
-  localparam bit INT     = sienna_fmt_pkg::is_int(EXP_W);  // int8: Q4.11 on fxMac
-  localparam int FX_LAT  = sienna_fmt_pkg::fx_lat();  // fxMac valid_i -> done_o
-  localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(EXP_W, MAN_W);  // valid_i -> done_o of the format's multiplier
-  localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // and adder
-  localparam int LOOP    = INT ? FX_LAT + 1 : MUL_LAT + ADD_LAT;  // the Horner recurrence: 13 in fp32, 8 in bf16, 3 in int8
-  localparam int MIN_PER = LOOP + 1;               // write-back lands a cycle after that
+  localparam int LOOP    = sienna_fmt_pkg::HORNER_STEP_LATENCY;  // the Horner recurrence: issue to write-back
+  localparam int LAG     = sienna_fmt_pkg::HORNER_COEFFICIENT_LAG;  // the coefficient is wanted this long after the issue
+  localparam int MIN_PER = LOOP + 1;  // write-back lands a cycle after that
   localparam int SW      = $clog2(K);
 
-  initial if (K < MIN_PER) $error("barrel_mac: K must be >= %0d", MIN_PER);
+  if (K < MIN_PER) begin : G_BAD_K
+    $fatal(1, "barrel_mac: K %0d is below %0d, so a slot's accumulator would not be back before its next round", K, MIN_PER);
+  end
+  if (LAG < 1 || LAG >= LOOP) begin : G_BAD_LAG
+    $fatal(1, "barrel_mac: the coefficient lag %0d must be 1 to %0d", LAG, LOOP - 1);
+  end
 
-  logic [DATA_WIDTH-1:0] xop  [K];  // operands, one per slot
-  logic [DATA_WIDTH-1:0] acc  [K];  // accumulators, one per slot
+  logic [      ACT_W-1:0] xop  [K];  // operands, one per slot
+  logic [      ACT_W-1:0] acc  [K];  // accumulators, one per slot
+  logic [COEF_ADDR_W-1:0] sbase[K];
+  logic [            3:0] sdeg [K];
+  logic [            1:0] sfrac[K];
 
-  logic [SW:0] n_elems;             // how many slots this group actually uses
-  logic [ADDR_LINES:0] ncoef;
-  assign ncoef = {1'b0, terms_i} + 1;
+  logic [SW:0] n_elems;  // how many slots this group uses
+  logic [ 3:0] max_deg;  // the group's highest degree: it runs max_deg + 1 rounds
 
   typedef enum logic [1:0] {LOAD, RUN, DRAIN, EMIT} state_t;
   state_t state;
 
-  logic [SW:0]         slot;        // slot being issued this cycle
-  logic [SW+1:0]       period;      // max(n_elems, LOOP): a round never shortens below LOOP
-  logic [ADDR_LINES:0] round;       // coefficient round, 0 .. ncoef-1
-  logic [SW:0]         emit_idx;
+  logic [SW:0]   slot;  // slot being issued this cycle
+  logic [SW+1:0] period;  // max(n_elems, LOOP + 1): a round never shortens below the recurrence
+  logic [   3:0] round;  // 0 .. max_deg; round r reads c_(max_deg - r)
+  logic [  SW:0] emit_idx;
   logic [$clog2(LOOP+2):0] drain_cnt;
 
-  // Issue pipeline. Stage 7 addresses the ROM so the value lands for the add at stage 8;
-  // stage 13 is when the sum is back and the accumulator is rewritten.
-  logic                v_dly    [LOOP+1];
-  logic [SW:0]         slot_dly [LOOP+1];
-  logic [ADDR_LINES:0] rnd_dly  [LOOP+1];
+  // Issue pipeline: slot, round and pad ride with each step, to address its coefficient at stage LAG - 1 and write back at LOOP - 1.
+  logic          v_dly   [LOOP];
+  logic [SW-1:0] slot_dly[LOOP];
+  logic [   3:0] rnd_dly [LOOP];
+  logic          pad_dly [LOOP];  // the step is a round before the slot's own degree: its result is replaced by 0
 
-  logic                  mul_valid, add_valid;
-  logic [DATA_WIDTH-1:0] mul_a, mul_b, add_a, add_b;
-  logic [DATA_WIDTH-1:0] mul_res, add_res;
-  logic                  mul_done, add_done;
-  logic [DATA_WIDTH-1:0] coeff_data;
-  logic [ADDR_LINES-1:0] coeff_addr;
+  logic             step_valid, step_done;
+  logic [ACT_W-1:0] step_y, step_c;
 
-  // ROM address comes from stage 7 so coeff_data is valid at stage 8, where the add issues.
-  logic [ADDR_LINES:0] coeff_addr_full;
-  if (INT) begin : G_ADDR_INT
-    // int8: addressed at issue, so the coefficient lands with the registered operands a cycle later.
-    assign coeff_addr_full = {1'b0, coeff_base_i} + ncoef - 1 - round;
-  end else begin : G_ADDR_FP
-    assign coeff_addr_full = {1'b0, coeff_base_i} + ncoef - 1 - rnd_dly[MUL_LAT-2];
+  // The issuing slot's coefficient index is max_deg - round; a round whose index is above the slot's degree is a pad.
+  logic iss_pad;
+  assign step_valid = (state == RUN) && (slot < n_elems);
+  assign iss_pad    = (max_deg - round) > sdeg[slot[SW-1:0]];
+
+  // The coefficient for the step issued LAG cycles ago, addressed at stage LAG - 1 so the memory's registered read lands at LAG.
+  logic [SW-1:0] a_slot;
+  logic [   3:0] a_round;
+  logic          a_pad, c_pad;
+  if (LAG == 1) begin : G_ADDR_AT_ISSUE
+    assign a_slot  = slot[SW-1:0];
+    assign a_round = round;
+    assign a_pad   = iss_pad;
+  end else begin : G_ADDR_DELAYED
+    assign a_slot  = slot_dly[LAG-2];
+    assign a_round = rnd_dly[LAG-2];
+    assign a_pad   = pad_dly[LAG-2];
   end
-  assign coeff_addr      = coeff_addr_full[ADDR_LINES-1:0];
+  assign coeff_addr_o = sbase[a_slot] + COEF_ADDR_W'(max_deg - a_round);
+  always_ff @(posedge clk_i) c_pad <= a_pad;
+  assign step_c = c_pad ? '0 : coeff_data_i;
 
-  CoeffROM #(
-      .DATA_WIDTH(DATA_WIDTH),
-      .ADDR_LINES(ADDR_LINES),
-      .INIT_FILE (INIT_FILE)
-  ) coeff_rom_inst (
-      .clk_i       (clk_i),
-      .rd_en_i     (1'b1),
-      .coeff_addr_i(coeff_addr),
-      .data_o      (coeff_data)
-  );
-
-  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
-    $fatal(1, "barrel_mac: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
-  end else if (INT) begin : G_INT
-    if (DATA_WIDTH != 16) begin : G_BAD_WIDTH
-      $fatal(1, "barrel_mac: int8 evaluates in Q4.11, DATA_WIDTH must be 16, not %0d", DATA_WIDTH);
-    end
-    // One Horner step, sat(((x * acc) >>> 11) + c), on the slot's operand and accumulator read at stage 0.
-    fxMac #(.W(DATA_WIDTH), .FRAC(11)) MAC (
-        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_dly[0]),
-        .A(xop[slot_dly[0][SW-1:0]]), .X(acc[slot_dly[0][SW-1:0]]), .C(coeff_data),
-        .result_o(add_res), .done_o(add_done)
-    );
-    assign mul_res  = '0;
-    assign mul_done = 1'b0;
-`ifndef SYNTHESIS
-    always @(posedge clk_i)
-      if (rstn_i && (add_done != v_dly[LOOP-1])) $fatal(1, "barrel_mac: fxMac latency is not %0d", FX_LAT);
-`endif
-  end else if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
-    fp32Multiplier MUL (
-        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid),
-        .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
-        .overflow_o(), .underflow_o(), .invalid_o()
-    );
-    fp32Adder ADD (
-        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid),
-        .A(add_a), .B(add_b), .result_o(add_res), .done_o(add_done),
-        .overflow_o(), .underflow_o(), .invalid_o()
-    );
-  end else begin : G_FP
-    fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) MUL (
-        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid),
-        .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
-        .overflow_o(), .underflow_o(), .invalid_o()
-    );
-    fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) ADD (
-        .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid),
-        .A(add_a), .B(add_b), .result_o(add_res), .done_o(add_done),
-        .overflow_o(), .underflow_o(), .invalid_o()
-    );
-  end
-
-  // Issue: multiply x[slot] by acc[slot] every cycle while running.
-  assign mul_valid = (state == RUN) && (slot < n_elems);
-  assign mul_a     = xop[slot[SW-1:0]];
-  assign mul_b     = acc[slot[SW-1:0]];
-
-  // Add: coeff for this slot's round, plus the product issued MUL_LAT cycles ago.
-  assign add_valid = v_dly[MUL_LAT-1];
-  assign add_a     = coeff_data;
-  assign add_b     = mul_res;
+  gpnae_horner STEP (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(step_valid), .x_i(xop[slot[SW-1:0]]), .acc_i(acc[slot[SW-1:0]]),
+                     .frac_i(sfrac[slot[SW-1:0]]), .c_i(step_c), .y_o(step_y), .done_o(step_done));
 
   assign busy_o = (state != LOAD);
   assign period = (n_elems >= MIN_PER[SW:0]) ? {1'b0, n_elems} : MIN_PER[SW+1:0];
@@ -159,6 +103,7 @@ module barrel_mac #(
     if (!rstn_i) begin
       state       <= LOAD;
       n_elems     <= '0;
+      max_deg     <= '0;
       slot        <= '0;
       round       <= '0;
       emit_idx    <= '0;
@@ -167,33 +112,47 @@ module barrel_mac #(
       res_data_o  <= '0;
       done_o      <= 1'b0;
       for (int i = 0; i < K; i++) begin
-        xop[i] <= '0;
-        acc[i] <= '0;
+        xop[i]   <= '0;
+        acc[i]   <= '0;
+        sbase[i] <= '0;
+        sdeg[i]  <= '0;
+        sfrac[i] <= '0;
       end
-      for (int i = 0; i <= LOOP; i++) v_dly[i] <= 1'b0;
+      for (int i = 0; i < LOOP; i++) begin
+        v_dly[i]    <= 1'b0;
+        slot_dly[i] <= '0;
+        rnd_dly[i]  <= '0;
+        pad_dly[i]  <= 1'b0;
+      end
     end else begin
       res_valid_o <= 1'b0;
       done_o      <= 1'b0;
 
-      // Issue pipeline advances every cycle.
-      v_dly[0]    <= mul_valid;
-      slot_dly[0] <= slot;
+      // The issue pipeline advances every cycle.
+      v_dly[0]    <= step_valid;
+      slot_dly[0] <= slot[SW-1:0];
       rnd_dly[0]  <= round;
-      for (int i = 1; i <= LOOP; i++) begin
+      pad_dly[0]  <= iss_pad;
+      for (int i = 1; i < LOOP; i++) begin
         v_dly[i]    <= v_dly[i-1];
         slot_dly[i] <= slot_dly[i-1];
         rnd_dly[i]  <= rnd_dly[i-1];
+        pad_dly[i]  <= pad_dly[i-1];
       end
 
-      // Accumulator write-back, LOOP cycles after the multiply was issued.
-      if (v_dly[LOOP-1]) acc[slot_dly[LOOP-1][SW-1:0]] <= add_res;
+      // Accumulator write-back, LOOP cycles after the issue; a pad round writes 0, the accumulator's start.
+      if (v_dly[LOOP-1]) acc[slot_dly[LOOP-1]] <= pad_dly[LOOP-1] ? '0 : step_y;
 
       case (state)
         LOAD: begin
           if (ld_valid_i) begin
-            xop[n_elems[SW-1:0]] <= ld_data_i;
-            acc[n_elems[SW-1:0]] <= '0;   // matches mac.sv: first product is x*0
-            n_elems              <= n_elems + 1;
+            xop[n_elems[SW-1:0]]   <= ld_data_i;
+            acc[n_elems[SW-1:0]]   <= '0;  // the first product is x * 0
+            sbase[n_elems[SW-1:0]] <= ld_base_i;
+            sdeg[n_elems[SW-1:0]]  <= ld_deg_i;
+            sfrac[n_elems[SW-1:0]] <= ld_frac_i;
+            n_elems                <= n_elems + 1;
+            if (n_elems == '0 || ld_deg_i > max_deg) max_deg <= ld_deg_i;
           end
           if (start_i && (n_elems != '0 || ld_valid_i)) begin
             state <= RUN;
@@ -203,10 +162,10 @@ module barrel_mac #(
         end
 
         RUN: begin
-          // One slot per cycle, padded to `period` so a round is never shorter than LOOP.
+          // One slot per cycle, padded to `period` so a round is never shorter than the recurrence.
           if ({1'b0, slot} == period - 1) begin
             slot <= '0;
-            if (round == ncoef - 1) state <= DRAIN;
+            if (round == max_deg) state <= DRAIN;
             else round <= round + 1;
           end else begin
             slot <= slot + 1;
@@ -214,8 +173,8 @@ module barrel_mac #(
         end
 
         DRAIN: begin
-          // Count out the in-flight operations rather than watching the valid pipeline.
-          if (drain_cnt == LOOP + 1) begin
+          // Count out the in-flight steps rather than watching the valid pipeline.
+          if (int'(drain_cnt) == LOOP + 1) begin
             state     <= EMIT;
             emit_idx  <= '0;
             drain_cnt <= '0;
@@ -239,4 +198,17 @@ module barrel_mac #(
     end
   end
 
+`ifdef SYNTHESIS
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_done;
+  assign unused_done = step_done;  // checked below in simulation only
+  /* verilator lint_on UNUSEDSIGNAL */
+`else
+  // The step's done is the write-back's valid: a step whose result landed on another cycle would pair it with the wrong slot.
+  a_step_pairs: assert property (@(posedge clk_i) disable iff (!rstn_i) step_done == v_dly[LOOP-1])
+    else $error("barrel_mac: a_step_pairs: the Horner step's done_o is not the write-back's valid");
+  // A load comes only while loading, and a group never takes more than K slots.
+  a_load_room: assert property (@(posedge clk_i) disable iff (!rstn_i) ld_valid_i |-> (state == LOAD && int'(n_elems) < K))
+    else $error("barrel_mac: a_load_room: a load while busy or into a full group (%0d slots)", n_elems);
+`endif
 endmodule

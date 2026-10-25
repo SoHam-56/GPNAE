@@ -2,41 +2,47 @@
 PRJ_DIR = $(shell pwd)
 SRC_DIR = $(PRJ_DIR)/src
 TB_DIR = $(PRJ_DIR)/testbenches
+ARIL = $(PRJ_DIR)/ArithmeticLibrary
+
+# The build's precision: FMT=fp32 (default), bf16 or int8; FMT_DEF is the define sienna_fmt_pkg reads (ArithmeticLibrary's fmt.mk).
+include $(ARIL)/Common/fmt.mk
 
 VERILATOR = verilator
-IVERILOG = iverilog
-VCS = vcs
-VVP = vvp
-WAVE = gtkwave
 
+# The lane: the format package, the credit interface, the units every format's math modules may pick, then gpnae's own files.
 DESIGN_FILES = \
-	../ArithmeticLibrary/Common/src/sienna_fmt_pkg.sv \
-	../ArithmeticLibrary/Common/src/credit_link_if.sv \
-	../ArithmeticLibrary/Common/src/credit_counter.sv \
-	../ArithmeticLibrary/Common/src/credit_link_checker.sv \
-	lane_fifo.sv \
-	lane_link.sv \
-	TYTAN/Memory/CoeffROM.v \
-	TYTAN/Memory/ROM.v \
-	TYTAN/LZC.v \
-	../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
-	../ArithmeticLibrary/Adders/FP32/src/LZC.sv \
-	../ArithmeticLibrary/Multipliers/Radix4Booth/src/R4Booth.sv \
-	../ArithmeticLibrary/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
-	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
-	../ArithmeticLibrary/Multipliers/FP/src/fpMultiplier.sv \
-	../ArithmeticLibrary/Adders/FP/src/fpAdder.sv \
-	../ArithmeticLibrary/Converters/FPNarrow/src/fpNarrow.sv \
-	../ArithmeticLibrary/Multipliers/Int/src/intMultiplier.sv \
-	../ArithmeticLibrary/Multipliers/Fx/src/fxMac.sv \
-	../ArithmeticLibrary/Requantizer/src/int8Requantizer.sv \
-	../ArithmeticLibrary/Divider/FP32/src/fp32Divider.sv \
-	../ArithmeticLibrary/Divider/FP32/src/divu.sv \
-	fp32_down.sv \
-	TYTAN/barrel_mac.sv \
-	gpnae_tail.sv \
-	gpnae_poly_int8.sv \
-	gpnae_poly.sv
+	$(ARIL)/Common/src/sienna_fmt_pkg.sv \
+	$(ARIL)/Common/src/credit_link_if.sv \
+	$(ARIL)/Common/src/credit_counter.sv \
+	$(ARIL)/Common/src/credit_link_checker.sv \
+	$(ARIL)/Fmt/src/fmt_mul.sv \
+	$(ARIL)/Fmt/src/fmt_add.sv \
+	$(ARIL)/Multipliers/Radix4Booth/src/R4Booth.sv \
+	$(ARIL)/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
+	$(ARIL)/Multipliers/FP32/src/fp32Multiplier.sv \
+	$(ARIL)/Adders/FP32/src/LZC.sv \
+	$(ARIL)/Adders/FP32/src/fp32Adder.sv \
+	$(ARIL)/Multipliers/BF16/src/bf16Multiplier.sv \
+	$(ARIL)/Multipliers/BF16Wide/src/bf16WideMultiplier.sv \
+	$(ARIL)/Adders/BF16/src/bf16Adder.sv \
+	$(ARIL)/Converters/FP32ToBF16/src/fp32ToBf16.sv \
+	$(ARIL)/Multipliers/Int8/src/int8Multiplier.sv \
+	$(ARIL)/Adders/Int32/src/int32Adder.sv \
+	$(ARIL)/Multipliers/Int16/src/int16Multiplier.sv \
+	$(ARIL)/Multipliers/Int24/src/int24Multiplier.sv \
+	$(ARIL)/Requantizer/src/int8Requantizer.sv \
+	$(SRC_DIR)/gpnae_pkg.sv \
+	$(SRC_DIR)/lane_fifo.sv \
+	$(SRC_DIR)/lane_link.sv \
+	$(SRC_DIR)/fixedPointMultiplyAdd.sv \
+	$(SRC_DIR)/gpnae_horner.sv \
+	$(SRC_DIR)/TYTAN/barrel_mac.sv \
+	$(SRC_DIR)/gpnae_exp_split.sv \
+	$(SRC_DIR)/gpnae_coef_mem.sv \
+	$(SRC_DIR)/gpnae_act_in.sv \
+	$(SRC_DIR)/gpnae_post.sv \
+	$(SRC_DIR)/gpnae_tail.sv \
+	$(SRC_DIR)/gpnae.sv
 
 # ccache 3.7 here served corrupted objects that segfaulted at start-up; USE_CCACHE=1 opts back in.
 USE_CCACHE ?= 0
@@ -44,14 +50,12 @@ ifeq ($(USE_CCACHE),0)
 export CCACHE_DISABLE := 1
 endif
 
-TESTBENCH = TB_gpnae_poly.sv
-TOP_MODULE = TB_gpnae_poly
+TESTBENCH = TB_gpnae.sv
+TOP_MODULE = TB_gpnae
 
 VERILATOR_DIR = $(PRJ_DIR)/Verilator
-IVERILOG_DIR = $(PRJ_DIR)/Icarus
-VCS_DIR = $(PRJ_DIR)/VCS
 
-# Waveforms as in SIENNA: TRACE=1 or vcd writes tb_gpnae.vcd, fst writes tb_gpnae.fst (Verilator); the default 0 writes none.
+# Waveforms as in SIENNA: TRACE=1 or vcd writes tb_gpnae.vcd, fst writes tb_gpnae.fst; the default 0 writes none.
 TRACE ?= 0
 ifeq ($(filter $(TRACE),0 1 vcd fst),)
 $(error Invalid TRACE=$(TRACE): must be one of 0, 1, vcd, fst)
@@ -70,16 +74,16 @@ VERILATOR_FLAGS = \
 	-j $(shell nproc) \
 	--build-jobs $(shell nproc) \
 	--sv \
+	$(FMT_DEF) \
 	-I$(SRC_DIR) \
 	-I$(TB_DIR) \
 	--Mdir $(VERILATOR_DIR) \
 	--Wno-WIDTHTRUNC \
 	--Wno-WIDTHEXPAND \
 	--Wno-CASEINCOMPLETE \
-	--Wno-MODDUP \
 	--Wno-UNOPTTHREADS
 
-# Hooks as in SIENNA: one-off defines (EXTRA_FLAGS) and simulator arguments (SIM_ARGS).
+# Hooks as in SIENNA: one-off defines or -G overrides (EXTRA_FLAGS) and simulator arguments (SIM_ARGS).
 VERILATOR_FLAGS += $(EXTRA_FLAGS)
 ifeq ($(TRACE),fst)
 VERILATOR_FLAGS += --trace-fst -DENABLE_TRACE -DTRACE_FST
@@ -87,98 +91,57 @@ else ifneq ($(TRACE_ON),)
 VERILATOR_FLAGS += --trace -DENABLE_TRACE
 endif
 
-IVERILOG_FLAGS = \
-	-g2012 \
-	-Wall \
-	-Wno-timescale \
-	-I$(SRC_DIR) \
-	-I$(TB_DIR) \
-	$(if $(TRACE_ON),-DENABLE_TRACE)
-
-VCS_FLAGS = \
-	-full64 \
-	-sverilog \
-	-debug_all \
-	-timescale=1ns/1ps \
-	-Mdir=$(VCS_DIR) \
-	+v2k \
-	+incdir+$(SRC_DIR) \
-	+incdir+$(TB_DIR) \
-	$(if $(TRACE_ON),+define+ENABLE_TRACE)
-
 default: help
 
 help:
-	@echo "Simulation Targets:"
-	@echo "  make verilator    - Simulate using Verilator (TRACE=1: also write tb_gpnae.vcd)"
-	@echo "  make iverilog     - Simulate using Icarus Verilog"
-	@echo "  make vcs          - Simulate using Synopsys VCS"
-	@echo "  make clean        - Remove all simulation artifacts"
-	@echo "  make regression   - The model checks, the Taylor lane (fp32), the poly lane in fp32, bf16, int8 (FMT=<f>: one), then one table"
-	@echo "  make regression/<point>, make regression-summary - one point (regression.py --action points), the table again"
+	@echo "  make verilator [FMT=f]  - build and run TB_gpnae (regression.py writes its stimulus; the run size and tier are SIM_ARGS)"
+	@echo "  make barrel-mac [FMT=f] - TB_barrel_mac on barrel_mac_vectors.py's groups, bit for bit"
+	@echo "  make check-fmt          - no RTL outside the allowlist names a precision (C4: a planted EXP_W must fail it)"
+	@echo "  make check-hier         - at each define, the lane elaborates only that precision's units"
+	@echo "  make fit                - fit_poly_coeffs.py: every tier, then the default JSON and gpnae_coef_mem.sv's tables"
+	@echo "  make clean              - remove the simulation artifacts"
+	@echo "  make regression [FMT=f] - every point (regression.py --action points), one table; make regression/<point>, make regression-summary"
 
 verilator:
-	@echo "-- Verilator simulation for GPNAE"
+	@echo "-- Verilator simulation for GPNAE, $(FMT)"
 	@mkdir -p $(VERILATOR_DIR)
-	$(VERILATOR) $(VERILATOR_FLAGS) \
-		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES)) \
-		$(TB_DIR)/$(TESTBENCH) \
-		-o $(TOP_MODULE)_sim
-	@echo "-- Compiling Verilator simulation"
-	make -C $(VERILATOR_DIR) -f V$(TOP_MODULE).mk
-	@echo "-- Running Verilator simulation"
+	$(VERILATOR) $(VERILATOR_FLAGS) $(DESIGN_FILES) $(TB_DIR)/$(TESTBENCH) -o $(TOP_MODULE)_sim
 	$(VERILATOR_DIR)/./$(TOP_MODULE)_sim $(SIM_ARGS)
 
-iverilog:
-	@echo "-- Icarus Verilog simulation for GPNAE"
-	@mkdir -p $(IVERILOG_DIR)
-	$(IVERILOG) $(IVERILOG_FLAGS) \
-		-o $(IVERILOG_DIR)/$(TOP_MODULE)_sim \
-		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES)) \
-		$(TB_DIR)/$(TESTBENCH)
-	@echo "-- Running Icarus Verilog simulation"
-	cd $(IVERILOG_DIR) && $(VVP) ./$(TOP_MODULE)_sim
-	@$(if $(TRACE_ON),echo "-- Waveform generated at $(IVERILOG_DIR)/tb_gpnae.vcd",true)
+PYTHON ?= python3
 
-vcs:
-	@echo "-- VCS simulation for GPNAE"
-	@mkdir -p $(VCS_DIR)
-	$(VCS) $(VCS_FLAGS) \
-		-o $(VCS_DIR)/$(TOP_MODULE)_sim \
-		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES)) \
-		$(TB_DIR)/$(TESTBENCH)
-	@echo "-- Running VCS simulation"
-	cd $(VCS_DIR) && ./$(TOP_MODULE)_sim -visualize
-	@echo "-- Simulation complete"
+barrel-mac:
+	@mkdir -p $(VERILATOR_DIR)_bm
+	$(PYTHON) barrel_mac_vectors.py $(FMT)
+	$(VERILATOR) --binary --timing --assert -j $(shell nproc) --build-jobs $(shell nproc) -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND $(FMT_DEF) \
+	  --top-module TB_barrel_mac --Mdir $(VERILATOR_DIR)_bm $(DESIGN_FILES) $(TB_DIR)/TB_barrel_mac.sv -o sim
+	$(VERILATOR_DIR)_bm/sim
 
-view:
-	$(MAKE) iverilog TRACE=1
-	@echo "-- Opening waveform"
-	$(WAVE) $(IVERILOG_DIR)/tb_gpnae.vcd
+# check-fmt: the allowlist is the package and ArithmeticLibrary's units, and GPNAE's define-selected math modules.
+FMT_ALLOW = ^(ArithmeticLibrary/.*|src/(gpnae_act_in|gpnae_post|gpnae_coef_mem|gpnae_horner)\.sv)$$
+check-fmt:
+	@bash $(ARIL)/Common/check_fmt.sh $(PRJ_DIR) '$(FMT_ALLOW)' && echo "check-fmt OK: the tree passes" || { echo "check-fmt FAIL: the tree"; exit 1; }
+	@t=$$(mktemp -d); mkdir -p $$t/src; cp $(SRC_DIR)/gpnae.sv $$t/src/; echo '// EXP_W' >> $$t/src/gpnae.sv; \
+	if bash $(ARIL)/Common/check_fmt.sh $$t '$(FMT_ALLOW)' > $$t/c4.log; then echo "check-fmt FAIL: C4 planted EXP_W passed"; exit 1; \
+	elif ! /usr/bin/grep -q '^check-fmt: 1 RTL files outside the allowlist, 1 naming a precision$$' $$t/c4.log; then echo "check-fmt FAIL: C4 failed for another reason"; cat $$t/c4.log; exit 1; \
+	else echo "check-fmt OK: C4 planted EXP_W in gpnae.sv fails"; fi; rm -rf $$t
+
+check-hier:
+	@$(PYTHON) $(PRJ_DIR)/check_hier.py --verilator $(VERILATOR) --out $(PRJ_DIR)/Verilator_hier --files $(DESIGN_FILES)
+
+fit:
+	$(PYTHON) fit_poly_coeffs.py
 
 clean:
-	@echo "-- Cleaning simulation artifacts"
-	-rm -rf $(VERILATOR_DIR) $(IVERILOG_DIR) $(VCS_DIR)
-	-rm -f *.vpd *.vcd
+	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier
+	-rm -f *.vcd *.fst
 
-# Elaboration of one block in one format, e.g. make lint_fmt TOP=barrel_mac FMT="-GEXP_W=8 -GMAN_W=7".
-lint_fmt:
-	$(VERILATOR) --lint-only -Wno-fatal -Werror-USERFATAL -DSYNTHESIS --top-module $(TOP) $(FMT) -I$(SRC_DIR) -I$(SRC_DIR)/TYTAN/Memory \
-		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES))
+.PHONY: default help verilator barrel-mac check-fmt check-hier fit clean regression regression-summary
 
-.PHONY: default help verilator iverilog vcs view clean lint_fmt regression regression-summary
-
-# make regression: the model checks, the published Taylor lane (fp32), gpnae_poly bit-exact and against the functions (fp32 gated, bf16 reported); one target per point, then one table.
-PYTHON  ?= python3
+# make regression: selftest, check-model and per format the barrel MAC, each tier's gate, protocol, load, cycles and the two faults.
 FORMATS  = fp32 bf16 int8
 # Only FMT= on make's command line narrows it, not an exported FMT.
 REG_FMT  = $(if $(filter command line,$(origin FMT)),$(FMT))
-# The check holds for the regression targets only: lint_fmt's FMT is Verilator -G overrides.
-ifneq ($(and $(REG_FMT),$(filter regression%,$(MAKECMDGOALS))),)
-ifneq ($(filter-out $(FORMATS),$(REG_FMT))$(words $(REG_FMT)),1)
-$(error Invalid FMT=$(FMT): must be one of fp32, bf16, int8)
-endif
-endif
 comma := ,
 empty :=
 space := $(empty) $(empty)
@@ -192,7 +155,7 @@ endif
 REG_POINTS := $(shell $(PYTHON) regression.py --action points $(REG_SELECT))
 endif
 
-# One point, e.g. make regression/bf16/lane: runs in a private copy of the tree, writes $(REG_DIR)/<point>.log and .json.
+# One point, e.g. make regression/bf16/lane-t0: runs in a private copy of the tree, writes $(REG_DIR)/<point>.log and .json.
 regression/%:
 	@$(PYTHON) regression.py --action point --name $* --results $(REG_DIR)$(if $(REG_RUN), --run $(REG_RUN))$(if $(filter regression,$(MAKECMDGOALS)), --keep-going)
 
