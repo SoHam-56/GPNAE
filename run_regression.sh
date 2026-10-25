@@ -1,18 +1,13 @@
 #!/bin/bash
-# Toolchain setup for the GPNAE regression, then run it. Arguments pass through to regression.py.
-# Needs VERILATOR_ROOT (verilator lives under ~/.local), gcc-toolset-13 (--timing needs C++20
-# coroutines) and -fcoroutines (this verilator was built against g++ 8 and omits the flag).
+# Runs regression.py (arguments pass through) with an optional toolchain fix-up for a Verilator built against an older g++ than the one that runs it.
+# CXX_COROUTINES=<g++ path>: wrap that g++ with -fcoroutines (--timing needs C++20 coroutines); VERILATOR_ROOT is used as the environment sets it.
 set -e
-export VERILATOR_ROOT="$HOME/.local/share/verilator"
-
-WRAP="$(mktemp -d)/toolchain"
-mkdir -p "$WRAP"
-cat > "$WRAP/g++" <<'WRAPPER'
-#!/bin/bash
-exec /opt/rh/gcc-toolset-13/root/usr/bin/g++ -fcoroutines "$@"
-WRAPPER
-chmod +x "$WRAP/g++"
-export PATH="$WRAP:/opt/rh/gcc-toolset-13/root/usr/bin:$PATH"
-
+if [ -n "$CXX_COROUTINES" ]; then
+  WRAP="$(mktemp -d)/toolchain"
+  mkdir -p "$WRAP"
+  printf '#!/bin/bash\nexec %s -fcoroutines "$@"\n' "$CXX_COROUTINES" > "$WRAP/g++"
+  chmod +x "$WRAP/g++"
+  export PATH="$WRAP:$(dirname "$CXX_COROUTINES"):$PATH"
+fi
 cd "$(dirname "$0")"
 exec python3 regression.py "$@"
