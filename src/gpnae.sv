@@ -472,6 +472,19 @@ module gpnae
     end
   a_load_idle: assert property (@(posedge clk_i) disable iff (!rstn_i) we_seen |-> idle_seen)
     else $error("gpnae: a_load_idle: a coefficient memory write landed while the lane is busy");
+  // a_coef_quiet: the memory takes a write only while no element is in the lane, counted from the links apart from lane_idle.
+  logic [ADDR_LINES+4:0] occ;  // elements put in, less results put out
+  logic occ_zero;  // registered: no element in the lane before this edge
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) begin
+      occ      <= '0;
+      occ_zero <= 1'b1;
+    end else begin
+      occ      <= occ + (ADDR_LINES + 5)'(in.put) - (ADDR_LINES + 5)'(out.put);
+      occ_zero <= (occ == '0);
+    end
+  a_coef_quiet: assert property (@(posedge clk_i) disable iff (!rstn_i) we_seen |-> occ_zero)
+    else $error("gpnae: a_coef_quiet: a coefficient memory write landed while %0d elements were in the lane", occ);
   // A group's tier is one of the three.
   logic start_seen;
   always_ff @(posedge clk_i or negedge rstn_i)
