@@ -117,6 +117,8 @@ python3 regression.py --format bf16 --run gate --tier 0   # one lane gate: every
 make fit                                            # refit every tier; writes gpnae_coef_default.json and gpnae_coef_mem.sv's reset contents
 ```
 
+Activate the venv in the shell that runs make: some checks call `python3` directly, and without the venv that is the system's Python, which may lack NumPy.
+
 `regression.py` writes the stimulus, builds the testbench and judges every output against the true function. `gpnae_model.py` is the bit-exact model of the hardware, and `fit_poly_coeffs.py` fits the coefficient sets of every tier. `make regression` runs each point in a private copy of the tree and passes only on each point's own verdict; the table is `testbenches/results/regression/regression.log`.
 
 The published Taylor lane was removed from this tree; the last commit that builds it carries the tag `gpnae_taylor_final`.
@@ -129,8 +131,8 @@ Everything here runs on any Linux machine; nothing depends on the authors' serve
 
 ```bash
 git clone --recursive https://github.com/SoHam-56/GPNAE.git && cd GPNAE
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-make -j8 regression PYTHON=$PWD/.venv/bin/python
+python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt   # every make below runs in this shell
+make -j8 regression
 ```
 
 **Choosing N in `make -jN`:** the largest process of the whole regression peaked at 2.1 GB (measured: `make -j8` on an 8-core, 64 GB machine, 3 minutes 26 seconds; the fp32 gates' Python check is the largest), so `-j8` needs about 8 GB plus room for the builds. Nothing is skipped.
