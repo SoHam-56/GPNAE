@@ -1,14 +1,12 @@
 Verilator/
-VIVADO/
 
 # Python and simulation artifacts
 __pycache__/
 *.pyc
 *.vcd
 *.log
-# Waveform viewer state (Surfer, Vivado)
+# Waveform viewer state (Surfer)
 *.ron
-*.wcfg
 testbenches/results/regression/
 # the RTL words TB_gpnae dumps with +dump_got
 testbenches/stimulus/*_got.mem
