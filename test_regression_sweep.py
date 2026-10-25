@@ -64,10 +64,13 @@ def test_verdicts():
     assert v("fp32/fault-load", f) == "PASS" and v("fp32/fault-load", f.replace("CAUGHT", "NOT CAUGHT").replace("PASS", "FAIL")).startswith("FAIL")
     assert v("selftest", "ALL 4 PASSED\n") == "PASS" and v("check-model", "RESULT: PASSED\n") == "PASS" and v("check-model", "RESULT: FAILED\n").startswith("FAIL")
     assert v("int8/barrel-mac", "TB_barrel_mac int8: 256 groups, 0 errors\nRESULT: PASSED\n") == "PASS"
-    lint = "".join(f"lint {t} int8{s}: 0 warnings, 0 errors\n" for t in reg.LINT_TOPS for s in ("", " sim")) + "lint control OK: a warning planted in gpnae.sv shows through the waivers\n"
-    assert v("int8/lint", lint) == "PASS" and v("int8/lint", "lint control OK: x\n") == f"FAIL (0 of {2 * len(reg.LINT_TOPS)} lint tops clean)"
+    lint = "".join(f"lint {t} int8{s}: 0 warnings, 0 errors\n" for t in reg.LINT_TOPS for s in ("", " sim")) + "lint control OK: a warning planted in gpnae.sv shows through the waivers\n" + \
+        "lint control OK (sim): a warning planted in gpnae.sv shows through the waivers without SYNTHESIS\n"
+    assert v("int8/lint", lint) == "PASS" and v("int8/lint", "lint control OK: x\nlint control OK (sim): x\n") == f"FAIL (0 of {2 * len(reg.LINT_TOPS)} lint tops clean)"
     assert v("int8/lint", lint.replace("lint gpnae int8 sim: 0", "lint gpnae int8 sim: 3")).startswith("FAIL (log: lint gpnae int8 sim: 3 warnings")
     assert v("int8/lint", lint.replace("lint control OK: a warning", "lint control FAIL: a warning")).startswith("FAIL")
+    assert v("int8/lint", lint.replace("lint control OK (sim): a warning", "lint control FAIL (sim): a warning")).startswith("FAIL")
+    assert v("int8/lint", lint.replace("lint control OK (sim)", "lint control skipped (sim)")).startswith("FAIL")  # both controls must report
     assert v("int8/lint", lint.replace("gpnae int8: 0 warnings", "gpnae int8: 2 warnings")).startswith("FAIL (log: lint gpnae int8: 2 warnings")
     assert v("bf16/lint", lint.replace("int8", "bf16")) == f"FAIL ({2 * len(reg.LINT_TOPS)} of {2 * len(reg.LINT_TOPS) + 2} lint tops clean)"  # bf16 also lints gpnae_tail
     hier = "check-hier fp32: OK: units fp32Adder, fp32Multiplier\ncheck-hier control (int8 hierarchy judged as fp32): FAIL, as it must\ncheck-hier: 3 elaborations, 0 failing\n"

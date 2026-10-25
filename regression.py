@@ -715,7 +715,7 @@ class LaneSpec(regress.Spec):
                                           (r"^check-hier \w+: FAIL",))
         f, _, r = name.partition("/")
         if r == "lint":  # a clean exit is not a lint: each top's count line, 0 warnings and 0 errors
-            v = regress.marker_verdict(text, rc, (r"^lint control OK: ",), (r"^lint .*: [1-9]\d* warnings", r"^lint .*: \d+ warnings, [1-9]\d* errors", r"lint control FAIL"))
+            v = regress.marker_verdict(text, rc, (r"^lint control OK: ", r"^lint control OK \(sim\): "), (r"^lint .*: [1-9]\d* warnings", r"^lint .*: \d+ warnings, [1-9]\d* errors", r"lint control FAIL"))
             want = [f"lint {t} {f}{s}" for t in LINT_TOPS + (("gpnae_tail",) if f == "bf16" else ()) for s in ("", " sim")]  # with and without SYNTHESIS
             got = re.findall(r"^(lint \S+ \w+(?: sim)?): 0 warnings, 0 errors$", regress.ANSI.sub("", text), re.M)
             return v if v != "PASS" else ("PASS" if sorted(got) == sorted(want) else f"FAIL ({len(got)} of {len(want)} lint tops clean)")
