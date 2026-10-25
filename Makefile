@@ -34,18 +34,18 @@ DESIGN_FILES = \
 	$(ARIL)/Multipliers/Int16/src/int16Multiplier.sv \
 	$(ARIL)/Multipliers/Int24/src/int24Multiplier.sv \
 	$(ARIL)/Requantizer/src/int8Requantizer.sv \
-	$(SRC_DIR)/gpnae_pkg.sv \
-	$(SRC_DIR)/lane_fifo.sv \
-	$(SRC_DIR)/lane_link.sv \
-	$(SRC_DIR)/fixedPointMultiplyAdd.sv \
-	$(SRC_DIR)/gpnae_horner.sv \
-	$(SRC_DIR)/TYTAN/barrel_mac.sv \
-	$(SRC_DIR)/gpnae_exp_split.sv \
-	$(SRC_DIR)/gpnae_coef_mem.sv \
-	$(SRC_DIR)/gpnae_act_in.sv \
-	$(SRC_DIR)/gpnae_post.sv \
-	$(SRC_DIR)/gpnae_tail.sv \
-	$(SRC_DIR)/gpnae.sv
+	$(SRC_DIR)/lane/gpnae_pkg.sv \
+	$(SRC_DIR)/link/lane_fifo.sv \
+	$(SRC_DIR)/link/lane_link.sv \
+	$(SRC_DIR)/mac/fixedPointMultiplyAdd.sv \
+	$(SRC_DIR)/lane/gpnae_horner.sv \
+	$(SRC_DIR)/mac/barrel_mac.sv \
+	$(SRC_DIR)/lane/gpnae_exp_split.sv \
+	$(SRC_DIR)/memory/gpnae_coef_mem.sv \
+	$(SRC_DIR)/lane/gpnae_act_in.sv \
+	$(SRC_DIR)/lane/gpnae_post.sv \
+	$(SRC_DIR)/lane/gpnae_tail.sv \
+	$(SRC_DIR)/lane/gpnae.sv
 
 # ccache 3.7 here served corrupted objects that segfaulted at start-up; USE_CCACHE=1 opts back in.
 USE_CCACHE ?= 0
@@ -110,7 +110,7 @@ help:
 verilator:
 	@echo "-- Verilator simulation for GPNAE, $(FMT)"
 	@mkdir -p $(VERILATOR_DIR)
-	$(VERILATOR) $(VERILATOR_FLAGS) $(DESIGN_FILES) $(TB_DIR)/$(TESTBENCH) -o $(TOP_MODULE)_sim
+	$(VERILATOR) $(VERILATOR_FLAGS) $(DESIGN_FILES) $(TB_DIR)/top/$(TESTBENCH) -o $(TOP_MODULE)_sim
 	$(VERILATOR_DIR)/./$(TOP_MODULE)_sim $(SIM_ARGS)
 
 # VCS: TB_gpnae with the same define, include paths and plusargs; EXTRA_FLAGS' -G overrides become -pvalue+, its -D defines +define+.
@@ -118,20 +118,20 @@ VCS_DIR  = $(PRJ_DIR)/VCS
 VCS_XTRA = $(call vcs_g,$(TOP_MODULE),$(EXTRA_FLAGS)) $(patsubst -D%,+define+%,$(filter -D%,$(EXTRA_FLAGS))) $(filter +define+%,$(EXTRA_FLAGS))
 vcs:
 	@echo "-- VCS simulation for GPNAE, $(FMT)"
-	$(call vcs_build,$(TOP_MODULE),$(VCS_DIR),$(DESIGN_FILES) $(TB_DIR)/$(TESTBENCH),$(FMT_DEF) +incdir+$(SRC_DIR) +incdir+$(TB_DIR) $(VCS_XTRA))
+	$(call vcs_build,$(TOP_MODULE),$(VCS_DIR),$(DESIGN_FILES) $(TB_DIR)/top/$(TESTBENCH),$(FMT_DEF) +incdir+$(SRC_DIR) +incdir+$(TB_DIR) $(VCS_XTRA))
 	$(VCS_DIR)/sim $(VCS_RUN) $(SIM_ARGS)
 
 PYTHON ?= python3
 
 barrel-mac:
 	@mkdir -p $(VERILATOR_DIR)_bm
-	$(PYTHON) barrel_mac_vectors.py $(FMT)
+	$(PYTHON) scripts/barrel_mac_vectors.py $(FMT)
 ifeq ($(SIM),vcs)
-	$(call vcs_build,TB_barrel_mac,$(VCS_DIR)_bm,$(DESIGN_FILES) $(TB_DIR)/TB_barrel_mac.sv,$(FMT_DEF))
+	$(call vcs_build,TB_barrel_mac,$(VCS_DIR)_bm,$(DESIGN_FILES) $(TB_DIR)/units/TB_barrel_mac.sv,$(FMT_DEF))
 	$(VCS_DIR)_bm/sim $(VCS_RUN)
 else
 	$(VERILATOR) --binary --timing --assert -j $(shell nproc) --build-jobs $(shell nproc) -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND $(FMT_DEF) \
-	  --top-module TB_barrel_mac --Mdir $(VERILATOR_DIR)_bm $(DESIGN_FILES) $(TB_DIR)/TB_barrel_mac.sv -o sim
+	  --top-module TB_barrel_mac --Mdir $(VERILATOR_DIR)_bm $(DESIGN_FILES) $(TB_DIR)/units/TB_barrel_mac.sv -o sim
 	$(VERILATOR_DIR)_bm/sim
 endif
 
@@ -144,31 +144,31 @@ ifeq ($(SIM),vcs)
 	  $(call vcs_lint,$$t $(FMT) sim,$$t,$(DESIGN_FILES),$(FMT_DEF)) || rc=1; done; exit $$rc
 else
 	@for t in $(LINT_TOPS) $(if $(filter bf16,$(FMT)),gpnae_tail); do \
-	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT)" -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module $$t $(PRJ_DIR)/lint_waivers.vlt $(DESIGN_FILES) || exit 1; \
-	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT) sim" -Wall -Wno-fatal $(FMT_DEF) --top-module $$t $(PRJ_DIR)/lint_waivers.vlt $(DESIGN_FILES) || exit 1; done
-	@t=$$(mktemp -d); sed 's/^endmodule/  logic lint_planted;\nendmodule/' $(SRC_DIR)/gpnae.sv > $$t/gpnae.sv; \
-	if verilator --lint-only -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/lint_waivers.vlt $(filter-out $(SRC_DIR)/gpnae.sv,$(DESIGN_FILES)) \
+	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT)" -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; \
+	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT) sim" -Wall -Wno-fatal $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; done
+	@t=$$(mktemp -d); sed 's/^endmodule/  logic lint_planted;\nendmodule/' $(SRC_DIR)/lane/gpnae.sv > $$t/gpnae.sv; \
+	if verilator --lint-only -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/scripts/lint_waivers.vlt $(filter-out $(SRC_DIR)/lane/gpnae.sv,$(DESIGN_FILES)) \
 	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK: a warning planted in gpnae.sv shows through the waivers"; \
 	else echo "lint control FAIL: a warning planted in gpnae.sv did not show"; rm -rf $$t; exit 1; fi; \
-	if verilator --lint-only -Wall -Wno-fatal $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/lint_waivers.vlt $(filter-out $(SRC_DIR)/gpnae.sv,$(DESIGN_FILES)) \
+	if verilator --lint-only -Wall -Wno-fatal $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/scripts/lint_waivers.vlt $(filter-out $(SRC_DIR)/lane/gpnae.sv,$(DESIGN_FILES)) \
 	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK (sim): a warning planted in gpnae.sv shows through the waivers without SYNTHESIS"; \
 	else echo "lint control FAIL (sim): a warning planted in gpnae.sv did not show without SYNTHESIS"; rm -rf $$t; exit 1; fi; rm -rf $$t
 endif
 
 # check-fmt: the allowlist is the package and ArithmeticLibrary's units, and GPNAE's define-selected math modules.
-FMT_ALLOW = ^(ArithmeticLibrary/.*|src/(gpnae_act_in|gpnae_post|gpnae_coef_mem|gpnae_horner)\.sv)$$
+FMT_ALLOW = ^(ArithmeticLibrary/.*|src/(lane/gpnae_act_in|lane/gpnae_post|memory/gpnae_coef_mem|lane/gpnae_horner)\.sv)$$
 check-fmt:
 	@bash $(ARIL)/Common/check_fmt.sh $(PRJ_DIR) '$(FMT_ALLOW)' && echo "check-fmt OK: the tree passes" || { echo "check-fmt FAIL: the tree"; exit 1; }
-	@t=$$(mktemp -d); mkdir -p $$t/src; cp $(SRC_DIR)/gpnae.sv $$t/src/; echo '// EXP_W' >> $$t/src/gpnae.sv; \
+	@t=$$(mktemp -d); mkdir -p $$t/src/lane; cp $(SRC_DIR)/lane/gpnae.sv $$t/src/lane/; echo '// EXP_W' >> $$t/src/lane/gpnae.sv; \
 	if bash $(ARIL)/Common/check_fmt.sh $$t '$(FMT_ALLOW)' > $$t/c4.log; then echo "check-fmt FAIL: C4 planted EXP_W passed"; exit 1; \
 	elif ! /usr/bin/grep -q '^check-fmt: 1 RTL files outside the allowlist, 1 naming a precision$$' $$t/c4.log; then echo "check-fmt FAIL: C4 failed for another reason"; cat $$t/c4.log; exit 1; \
 	else echo "check-fmt OK: C4 planted EXP_W in gpnae.sv fails"; fi; rm -rf $$t
 
 check-hier:
-	@$(PYTHON) $(PRJ_DIR)/check_hier.py --verilator $(VERILATOR) --out $(PRJ_DIR)/Verilator_hier --files $(DESIGN_FILES)
+	@$(PYTHON) $(PRJ_DIR)/scripts/check_hier.py --verilator $(VERILATOR) --out $(PRJ_DIR)/Verilator_hier --files $(DESIGN_FILES)
 
 fit:
-	$(PYTHON) fit_poly_coeffs.py
+	$(PYTHON) scripts/fit_poly_coeffs.py
 
 clean:
 	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier $(PRJ_DIR)/VCS $(PRJ_DIR)/VCS_bm
