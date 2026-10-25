@@ -137,7 +137,7 @@ def test_truth_wiring():
         ok, lines, res = reg.run_float("bf16", 0, x, list(reg.ALL_ACTS))
         assert not ok and not res["tanh"].ok and res["selu"].ok, lines
         keep = reg.rtl_words
-        reg.rtl_words = lambda a, n: None  # the TB wrote no dump
+        reg.rtl_words = lambda a, n, *t: None  # the TB wrote no dump
         reg.run_make = fake_tb("bf16", lambda a, x, e: e)
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -189,7 +189,72 @@ def test_loaded_image():
         assert m.desc[0][3].base != gm.default_mem(f).desc[0][3].base
 
 
-MIN_TESTS = 10  # tests this file holds; fewer run means one was lost, which is a failure
+def test_vcs_commands():
+    """SIM=vcs: each lane run asks regression.py for VCS, each make point names SIM=vcs, check-hier is N/A, a VCS lint reports until recorded."""
+    import copy
+    spec = copy.copy(reg.SPEC)
+    spec.sim = "vcs"
+    py, rg = sys.executable, [sys.executable, "regression.py", "--format"]
+    assert spec.argv("bf16/lane-t1", None) == rg + ["bf16", "--run", "gate", "--tier", "1", "--sim", "vcs"]
+    assert spec.argv("int8/barrel-mac", None) == ["make", "barrel-mac", "FMT=int8", f"PYTHON={py}", "SIM=vcs"]
+    assert spec.argv("selftest", None) == [py, "test_regression_sweep.py"] and spec.argv("check-model", None) == [py, "check_gpnae_model.py"]
+    assert spec.not_applicable("check-hier") and not reg.SPEC.not_applicable("check-hier") and not spec.not_applicable("check-fmt")
+    assert reg.SPEC.argv("bf16/lane-t1", None)[-1] == "1"  # Verilator's commands as before
+    env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE") and k != "SIM"}
+    run = lambda *a: subprocess.run(["make", "-s", "-n", *a, f"PYTHON={py}"], cwd=reg.ROOT, capture_output=True, text=True, env=env)
+    for args in (("vcs", "FMT=int8", "EXTRA_FLAGS=-GFAULT=5", "SIM_ARGS=+no_stream"), ("barrel-mac", "SIM=vcs"), ("lint", "SIM=vcs", "FMT=bf16")):
+        r = run(*args)
+        assert r.returncode == 0 and "verilator " not in r.stdout.replace("--lint-only", "") and ("vcs -full64" in r.stdout), (args, r.stdout[-300:])
+    r = run("vcs", "FMT=int8", "EXTRA_FLAGS=-GFAULT=5", "SIM_ARGS=+no_stream")
+    assert "-pvalue+TB_gpnae.FAULT=5" in r.stdout and "+define+FMT_INT8" in r.stdout and "/VCS/sim  +vcs+dumpvarsoff +no_stream" in r.stdout, r.stdout
+    assert "-debug" not in r.stdout and "-debug_access+all" in run("vcs", "TRACE=1").stdout
+    r = run("lint", "SIM=vcs", "FMT=bf16")
+    assert r.stdout.count("vcs_lint.py") == 2 and "gpnae_tail" in r.stdout and "lint_waivers.vlt" not in r.stdout, r.stdout[-300:]
+    lint = "".join(f"vcs lint {x}: 3 warnings, 0 errors\n" for x in reg.vcs_lint_labels("int8"))
+    assert spec.verdict("int8/lint", lint, 0) == "PASS" and spec.verdict("int8/lint", lint.split("\n", 1)[1], 0).startswith("FAIL (")
+    assert spec.gated("int8/lint") == reg.vcs_lint_recorded(reg.vcs_lint_labels("int8")) and reg.SPEC.gated("int8/lint") and spec.gated("int8/lane-t0")
+    r = run("regression", "SIM=vcs")
+    assert all(x.split("--name ")[1].split()[0] and " --sim vcs" in x for x in r.stdout.splitlines() if "--action point " in x), r.stdout[-300:]
+
+
+def test_x_words():
+    """A 4-state simulator's x or z: a dumped word, a result count or a cycle count fails its test by name, never a crash."""
+    x = gm.finite_inputs(gm.fpu.BF16)[::64][:64]
+    with scratch_dirs():
+        def tb(fmt):
+            run = fake_tb(fmt, lambda a, x, e: e)
+
+            def bad(f, sim_args="", extra=""):
+                out = run(f, sim_args, extra)
+                p = os.path.join(reg.STIM_DIR, "tanh_got.mem")
+                if os.path.exists(p):
+                    w = open(p).read().splitlines()
+                    w[37] = "xxxx"
+                    open(p, "w").write("\n".join(w) + "\n")
+                return out
+            return bad
+        reg.run_make = tb("bf16")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ok, lines, res = reg.run_float("bf16", 0, x, list(reg.ALL_ACTS))
+        assert not ok and "tanh" not in res and "FAIL: X in output word 37 of test run bf16 tier 0 tanh" in buf.getvalue(), buf.getvalue()
+    r = reg.parse_log("  RESULT tanh : total 32  exact x  failed 0  missing 0\n RESULT: PASSED\n", 32, ["tanh"])
+    assert r["status"] == "FAIL" and r["short"] == ["FAIL: X in result count of test tanh ('x')"], r
+    assert reg.parse_log("  RESULT tanh : total 32  exact 32  failed 0  missing 0\n RESULT: PASSED\n", 32, ["tanh"])["status"] == "PASS"
+    import fourstate
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".mem", delete=False) as fh:
+            fh.write("0001\n00z2\n")
+        reg.read_words(fh.name, "load fp32")
+        raise AssertionError("read_words accepted a z word")
+    except fourstate.Unknown as e:
+        assert str(e).startswith("Z in output word 1 of test load fp32"), e
+    finally:
+        os.remove(fh.name)
+    assert fourstate.field(rf"OVERLAP tanh : cycles to the last result ({fourstate.DEC})", "OVERLAP tanh : cycles to the last result 812", "t", "c") == 812
+
+
+MIN_TESTS = 12  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]

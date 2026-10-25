@@ -23,6 +23,7 @@ import gpnae_model as gm
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "ArithmeticLibrary", "Common", "models"))
 import truefn  # noqa: E402  the true-function gate library
+import fourstate  # noqa: E402  4-state safe parsing: an x or z word fails its test by name
 TB_DIR = os.path.join(ROOT, "testbenches")
 STIM_DIR = os.path.join(TB_DIR, "stimulus")
 RESULTS_DIR = os.path.join(TB_DIR, "results")
@@ -32,6 +33,7 @@ FLOAT_ACTS = ("selu", "sigmoid", "tanh")
 ALL_ACTS = FLOAT_ACTS + ("relu", "linear")
 CODES = {"selu": 1, "sigmoid": 2, "tanh": 3, "relu": 4, "linear": 5}
 INT8_ACTS = tuple((a, CODES[a]) for a in ALL_ACTS)  # the TB's order
+SIM = "verilator"  # --sim: the simulator make runs TB_gpnae on (make verilator or make vcs)
 
 
 def run_args(batches, per_batch, tier=0, timeout=400000):
@@ -49,16 +51,17 @@ def write_words(path, v, w):
         fh.write("".join(f"{int(b) & m:0{nd}x}\n" for b in v))
 
 
-def read_words(path):
+def read_words(path, test=None):
+    """The words of a .mem file; fourstate.Unknown names the first x or z word (test: the test it belongs to)."""
     with open(path) as fh:
-        return np.array([int(ln, 16) for ln in fh if ln.strip()], dtype=np.int64)
+        return np.array(fourstate.words([ln for ln in fh if ln.strip()], test or os.path.basename(path)), dtype=np.int64)
 
 
 def run_make(fmt, sim_args="", extra=""):
     """Build (once per format and EXTRA_FLAGS: Verilator skips an identical rebuild) and run TB_gpnae in fmt through make verilator; returns
     (log, seconds)."""
     t0 = time.time()
-    cmd = ["make", "verilator", f"FMT={fmt}", f"SIM_ARGS={(os.environ.get('SIM_ARGS', '') + ' ' + sim_args).strip()}"]
+    cmd = ["make", "vcs" if SIM == "vcs" else "verilator", f"FMT={fmt}", f"SIM_ARGS={(os.environ.get('SIM_ARGS', '') + ' ' + sim_args).strip()}"]
     if extra:
         cmd.append(f"EXTRA_FLAGS={extra}")
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
@@ -67,10 +70,14 @@ def run_make(fmt, sim_args="", extra=""):
 
 def parse_log(raw, expect_total, acts):
     """The per-activation RESULT lines and the overall verdict; a short or absent run is NO-RESULTS."""
-    per = {}
-    for m in re.finditer(r"RESULT (\w+) : total (\d+)\s+exact (\d+)\s+failed (\d+)\s+missing (\d+)", raw):
-        a, tot, ex, fail, miss = m.groups()
-        per[a] = dict(total=int(tot), exact=int(ex), failed=int(fail), missing=int(miss))
+    per, D = {}, fourstate.DEC
+    for m in re.finditer(rf"RESULT (\w+) : total ({D})\s+exact ({D})\s+failed ({D})\s+missing ({D})", raw):
+        a = m.group(1)
+        try:
+            tot, ex, fail, miss = (fourstate.word(g, a, None, "result count", 10) for g in m.groups()[1:])
+        except fourstate.Unknown as e:
+            return dict(status="FAIL", per=per, short=[fourstate.fail_line(e)])
+        per[a] = dict(total=tot, exact=ex, failed=fail, missing=miss)
     short = [f"{len(per)} of {len(acts)} activations reported"] if set(per) != set(acts) else []
     short += [f"{a} checked {p['total']} of {expect_total}" for a, p in per.items() if p["total"] != expect_total]
     status = "NO-RESULTS" if short else ("PASS" if "RESULT: PASSED" in raw and all(p["failed"] + p["missing"] == 0 for p in per.values())
@@ -304,9 +311,12 @@ def write_stream_int8(lane, rng, tier):
 
 # ── one TB run ──
 
-def rtl_words(act, n):
+def rtl_words(act, n, test=None):
     try:
-        got = read_words(os.path.join(STIM_DIR, f"{act}_got.mem"))
+        got = read_words(os.path.join(STIM_DIR, f"{act}_got.mem"), test or act)
+    except fourstate.Unknown as e:
+        print(f"      TRUTH {act}: {fourstate.fail_line(e)}")
+        return None
     except (OSError, ValueError) as e:
         print(f"      TRUTH {act}: FAIL, no RTL words ({e})")
         return None
@@ -352,7 +362,7 @@ def run_float(fmt, tier, x, acts, mem=None, sim_args="", tol=None, label="run", 
     ok = parsed["status"] == "PASS"
     res = {}
     for a in acts:
-        got = rtl_words(a, x.size)
+        got = rtl_words(a, x.size, f"{label} {fmt} tier {tier} {a}")
         if got is None:
             ok = False
             continue
@@ -407,7 +417,7 @@ def run_int8(tier, mem=None, sets=None, sim_args="", tol=None, label="int8", str
         ok &= s_ok
     res = {}
     for act, code in INT8_ACTS:
-        got = rtl_words(act, batches * MAX_SIGNALS)
+        got = rtl_words(act, batches * MAX_SIGNALS, f"{label} int8 tier {tier} {act}")
         if got is None:
             ok = False
             continue
@@ -424,7 +434,7 @@ def run_int8(tier, mem=None, sets=None, sim_args="", tol=None, label="int8", str
         lines += show_misses(r) if not r.ok else []
         ok &= r.ok
     if stream:
-        got = rtl_words("stream", st["elements"])
+        got = rtl_words("stream", st["elements"], f"{label} int8 tier {tier} stream")
         ok &= got is not None
         for act, _ in INT8_ACTS:
             if got is None:
@@ -570,11 +580,17 @@ def do_cycles(fmt, seed):
                     tot = x.size
                 raw, _ = run_make(fmt, sz + " +overlap_only")
                 save_log(f"cycles_{fmt}_t{tier}_{act}_{DISTS.index(dn)}.log", raw)
-                m = re.search(rf"OVERLAP {act} : cycles to the last result (\d+)", raw)
+                try:
+                    cyc = fourstate.field(rf"OVERLAP {act} : cycles to the last result ({fourstate.DEC})", raw, f"cycles {fmt} tier {tier} {act} {dn}",
+                                          "cycle count")
+                except fourstate.Unknown as e:
+                    L.append(f"  CYCLES {fmt} tier {tier} {act} {dn}: {fourstate.fail_line(e)}")
+                    cyc = None
+                m = cyc is not None
                 d = re.search(rf"OVERLAP {act} : elements (\d+)\s+identical (\d+)\s+differ (\d+)\s+missing (\d+)", raw)
                 good = bool(m and d) and int(d.group(3)) == 0 and int(d.group(4)) == 0 and "RESULT: PASSED" in raw
                 ok &= good
-                row[(act, dn)] = int(m.group(1)) / tot if m else float("nan")
+                row[(act, dn)] = cyc / tot if m else float("nan")
                 if not good:
                     L.append(f"  CYCLES {fmt} tier {tier} {act} {dn}: FAIL (" + (d.group(0) if d else "no overlap result") + ")")
         for act in FLOAT_ACTS:
@@ -616,7 +632,10 @@ def main():
     p.add_argument("--run", required=True, choices=("gate", "held", "protocol", "load", "cycles", "fault4", "fault5"))
     p.add_argument("--tier", type=int, default=0, choices=range(gm.NUM_TIERS))
     p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--sim", choices=("verilator", "vcs"), default="verilator", help="the simulator TB_gpnae runs on")
     a = p.parse_args()
+    global SIM
+    SIM = a.sim
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(STIM_DIR, exist_ok=True)
     t0 = time.time()
@@ -663,10 +682,23 @@ ONCE = ("selftest", "check-model", "check-fmt", "check-hier")
 LINT_TOPS = ("fixedPointMultiplyAdd", "gpnae_horner", "barrel_mac", "gpnae_exp_split", "gpnae_coef_mem", "gpnae_act_in", "gpnae_post", "gpnae")  # the Makefile's, and gpnae_tail in bf16
 
 
+VCS_LINT_BASELINE = os.path.join(ROOT, "vcs_lint_baseline.txt")  # make lint SIM=vcs RECORD=1 FMT=<f> writes it on a real VCS run
+
+
+def vcs_lint_labels(f):
+    """make lint SIM=vcs's labels in format f: each top with and without SYNTHESIS, as the Verilator lint."""
+    return [f"{t} {f}{s}" for t in LINT_TOPS + (("gpnae_tail",) if f == "bf16" else ()) for s in ("", " sim")]
+
+
+def vcs_lint_recorded(labels, path=VCS_LINT_BASELINE):
+    have = {ln.split("\t")[0] for ln in open(path) if ln.strip() and not ln.startswith("#")} if os.path.exists(path) else set()
+    return all(x in have for x in labels)
+
+
 class LaneSpec(regress.Spec):
     title = "GPNAE REGRESSION"
     formats = FORMATS
-    reported = frozenset()  # every point gates
+    reported = frozenset()  # every point gates (under VCS a lint reports until its baseline is recorded)
 
     def points(self, small, formats):
         if not formats:
@@ -681,12 +713,26 @@ class LaneSpec(regress.Spec):
             return {"n": 0, "fmt": f}
         raise ValueError(f"{name}: points are {', '.join(ONCE)} and <fmt>/<run>, fmt one of {', '.join(FORMATS)}, run one of {', '.join(RUNS)}")
 
+    def not_applicable(self, name):
+        if self.sim == "vcs" and name == "check-hier":
+            return "it reads the hierarchy Verilator's --xml-only writes"
+        return None
+
+    def gated(self, name):
+        return not (self.sim == "vcs" and name.endswith("/lint") and not vcs_lint_recorded(vcs_lint_labels(name.split("/")[0])))
+
     def env(self, name, env):
         if "/" in name and not name.endswith("barrel-mac"):  # one lane is too small to share: one simulation thread; make -jN runs points side by side
             env = dict(env, SIM_THREADS="1")
         return env
 
     def argv(self, name, opts):
+        v = self.verilator_argv(name)
+        if self.sim != "vcs":
+            return v
+        return v + (["SIM=vcs"] if v[0] == "make" else ["--sim", "vcs"] if v[1] == "regression.py" else [])
+
+    def verilator_argv(self, name):
         py = sys.executable
         if name == "selftest":
             return [py, "test_regression_sweep.py"]
@@ -714,6 +760,11 @@ class LaneSpec(regress.Spec):
             return regress.marker_verdict(text, rc, (r"^check-hier: \d+ elaborations, 0 failing$", r"^check-hier control .*: FAIL, as it must$"),
                                           (r"^check-hier \w+: FAIL",))
         f, _, r = name.partition("/")
+        if r == "lint" and self.sim == "vcs":  # each top's VCS count line with 0 errors; warnings against the baseline once recorded
+            v = regress.marker_verdict(text, rc, (), (r"NEW WARNING", r"^vcs lint .*: FAIL"))
+            got = re.findall(r"^vcs lint (\S+ \w+(?: sim)?): \d+ warnings, 0 errors$", regress.ANSI.sub("", text), re.M)
+            want = vcs_lint_labels(f)
+            return v if v != "PASS" else ("PASS" if sorted(got) == sorted(want) else f"FAIL ({len(got)} of {len(want)} VCS lint tops counted)")
         if r == "lint":  # a clean exit is not a lint: each top's count line, 0 warnings and 0 errors
             v = regress.marker_verdict(text, rc, (r"^lint control OK: ",), (r"^lint .*: [1-9]\d* warnings", r"^lint .*: \d+ warnings, [1-9]\d* errors", r"lint control FAIL"))
             want = [f"lint {t} {f}{s}" for t in LINT_TOPS + (("gpnae_tail",) if f == "bf16" else ()) for s in ("", " sim")]  # with and without SYNTHESIS

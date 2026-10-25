@@ -1,4 +1,6 @@
 Verilator/
+VCS/
+VCS_bm/
 VIVADO/
 
 # Python and simulation artifacts

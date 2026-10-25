@@ -6,6 +6,9 @@ ARIL = $(PRJ_DIR)/ArithmeticLibrary
 
 # The build's precision: FMT=fp32 (default), bf16 or int8; FMT_DEF is the define sienna_fmt_pkg reads (ArithmeticLibrary's fmt.mk).
 include $(ARIL)/Common/fmt.mk
+# The simulator: SIM ?= verilator, or vcs (ArithmeticLibrary's sim.mk: plain VCS builds, TRACE=1, XPROP=1, RANDINIT=1); make vcs runs TB_gpnae on VCS.
+VCS_LINT_BASELINE = $(PRJ_DIR)/vcs_lint_baseline.txt
+include $(ARIL)/Common/sim.mk
 
 VERILATOR = verilator
 
@@ -94,6 +97,7 @@ endif
 default: help
 
 help:
+	@echo "  make vcs [FMT=f]        - the same on Synopsys VCS (README: Running with VCS); SIM=vcs runs make regression on VCS"
 	@echo "  make verilator [FMT=f]  - build and run TB_gpnae (regression.py writes its stimulus; the run size and tier are SIM_ARGS)"
 	@echo "  make barrel-mac [FMT=f] - TB_barrel_mac on barrel_mac_vectors.py's groups, bit for bit"
 	@echo "  make lint [FMT=f]       - verilator --lint-only -Wall of gpnae and each of its new modules, with and without SYNTHESIS (lint_waivers.vlt: the library's and B's lane_link's own)"
@@ -109,17 +113,36 @@ verilator:
 	$(VERILATOR) $(VERILATOR_FLAGS) $(DESIGN_FILES) $(TB_DIR)/$(TESTBENCH) -o $(TOP_MODULE)_sim
 	$(VERILATOR_DIR)/./$(TOP_MODULE)_sim $(SIM_ARGS)
 
+# VCS: TB_gpnae with the same define, include paths and plusargs; EXTRA_FLAGS' -G overrides become -pvalue+, its -D defines +define+.
+VCS_DIR  = $(PRJ_DIR)/VCS
+VCS_XTRA = $(call vcs_g,$(TOP_MODULE),$(EXTRA_FLAGS)) $(patsubst -D%,+define+%,$(filter -D%,$(EXTRA_FLAGS))) $(filter +define+%,$(EXTRA_FLAGS))
+vcs:
+	@echo "-- VCS simulation for GPNAE, $(FMT)"
+	$(call vcs_build,$(TOP_MODULE),$(VCS_DIR),$(DESIGN_FILES) $(TB_DIR)/$(TESTBENCH),$(FMT_DEF) +incdir+$(SRC_DIR) +incdir+$(TB_DIR) $(VCS_XTRA))
+	$(VCS_DIR)/sim $(VCS_RUN) $(SIM_ARGS)
+
 PYTHON ?= python3
 
 barrel-mac:
 	@mkdir -p $(VERILATOR_DIR)_bm
 	$(PYTHON) barrel_mac_vectors.py $(FMT)
+ifeq ($(SIM),vcs)
+	$(call vcs_build,TB_barrel_mac,$(VCS_DIR)_bm,$(DESIGN_FILES) $(TB_DIR)/TB_barrel_mac.sv,$(FMT_DEF))
+	$(VCS_DIR)_bm/sim $(VCS_RUN)
+else
 	$(VERILATOR) --binary --timing --assert -j $(shell nproc) --build-jobs $(shell nproc) -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND $(FMT_DEF) \
 	  --top-module TB_barrel_mac --Mdir $(VERILATOR_DIR)_bm $(DESIGN_FILES) $(TB_DIR)/TB_barrel_mac.sv -o sim
 	$(VERILATOR_DIR)_bm/sim
+endif
 
 LINT_TOPS = fixedPointMultiplyAdd gpnae_horner barrel_mac gpnae_exp_split gpnae_coef_mem gpnae_act_in gpnae_post gpnae
+# make lint SIM=vcs: VCS's +lint=all of each top, with and without SYNTHESIS (Common/vcs_lint.py; reported until vcs_lint_baseline.txt holds it)
 lint:
+ifeq ($(SIM),vcs)
+	@rc=0; for t in $(LINT_TOPS) $(if $(filter bf16,$(FMT)),gpnae_tail); do \
+	  $(call vcs_lint,$$t $(FMT),$$t,$(DESIGN_FILES),+define+SYNTHESIS $(FMT_DEF)) || rc=1; \
+	  $(call vcs_lint,$$t $(FMT) sim,$$t,$(DESIGN_FILES),$(FMT_DEF)) || rc=1; done; exit $$rc
+else
 	@for t in $(LINT_TOPS) $(if $(filter bf16,$(FMT)),gpnae_tail); do \
 	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT)" -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module $$t $(PRJ_DIR)/lint_waivers.vlt $(DESIGN_FILES) || exit 1; \
 	  bash $(ARIL)/Common/lint.sh "lint $$t $(FMT) sim" -Wall -Wno-fatal $(FMT_DEF) --top-module $$t $(PRJ_DIR)/lint_waivers.vlt $(DESIGN_FILES) || exit 1; done
@@ -127,6 +150,7 @@ lint:
 	if verilator --lint-only -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/lint_waivers.vlt $(filter-out $(SRC_DIR)/gpnae.sv,$(DESIGN_FILES)) \
 	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK: a warning planted in gpnae.sv shows through the waivers"; \
 	else echo "lint control FAIL: a warning planted in gpnae.sv did not show"; rm -rf $$t; exit 1; fi; rm -rf $$t
+endif
 
 # check-fmt: the allowlist is the package and ArithmeticLibrary's units, and GPNAE's define-selected math modules.
 FMT_ALLOW = ^(ArithmeticLibrary/.*|src/(gpnae_act_in|gpnae_post|gpnae_coef_mem|gpnae_horner)\.sv)$$
@@ -144,10 +168,10 @@ fit:
 	$(PYTHON) fit_poly_coeffs.py
 
 clean:
-	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier
+	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier $(PRJ_DIR)/VCS $(PRJ_DIR)/VCS_bm
 	-rm -f *.vcd *.fst
 
-.PHONY: default help verilator barrel-mac lint check-fmt check-hier fit clean regression regression-summary
+.PHONY: default help verilator vcs barrel-mac lint check-fmt check-hier fit clean regression regression-summary
 
 # make regression: selftest, check-model and per format the barrel MAC, each tier's gate, protocol, load, cycles and the two faults.
 FORMATS  = fp32 bf16 int8
@@ -158,7 +182,7 @@ empty :=
 space := $(empty) $(empty)
 REG_SELECT  = --formats $(subst $(space),$(comma),$(strip $(or $(REG_FMT),$(FORMATS))))
 REG_DIR    ?= $(TB_DIR)/results/regression
-REG_SUMMARY = $(PYTHON) regression.py --action summary --results $(REG_DIR) $(REG_SELECT)
+REG_SUMMARY = $(PYTHON) regression.py --action summary --results $(REG_DIR) $(REG_SELECT) --sim $(SIM)
 ifneq ($(filter regression,$(MAKECMDGOALS)),)
 ifeq ($(origin REG_RUN),undefined)
 REG_RUN := $(shell date +%Y%m%d-%H%M%S)-$(shell echo $$PPID)
@@ -168,7 +192,7 @@ endif
 
 # One point, e.g. make regression/bf16/lane-t0: runs in a private copy of the tree, writes $(REG_DIR)/<point>.log and .json.
 regression/%:
-	@$(PYTHON) regression.py --action point --name $* --results $(REG_DIR)$(if $(REG_RUN), --run $(REG_RUN))$(if $(filter regression,$(MAKECMDGOALS)), --keep-going)
+	@$(PYTHON) regression.py --action point --name $* --results $(REG_DIR) --sim $(SIM)$(if $(REG_RUN), --run $(REG_RUN))$(if $(filter regression,$(MAKECMDGOALS)), --keep-going)
 
 regression: $(addprefix regression/,$(REG_POINTS))
 	@$(REG_SUMMARY) --run $(REG_RUN)
