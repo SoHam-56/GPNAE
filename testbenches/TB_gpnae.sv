@@ -432,7 +432,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
           if (mode == M_HOLD) begin
             // Without its last put the set waits in the FIFO.
             repeat (8) tick();
-            if (lane_gs != GS_IDLE || int'(lane_cnt) != n - 1) begin
+            if (lane_gs !== GS_IDLE || $isunknown(lane_cnt) || int'(lane_cnt) != n - 1) begin
               edge_err++;
               $display("  STREAM group %0d: expected %0d elements to wait in the FIFO for the last put, lane state %0d, FIFO %0d",
                        g - 1, n - 1, lane_gs, lane_cnt);
@@ -440,7 +440,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
           end
           put_in(s_in[wr], 1'b1);
           wr++;
-          if (mode == M_BUSY && lane_gs == GS_IDLE) begin
+          if (mode == M_BUSY && ($isunknown(lane_gs) || lane_gs == GS_IDLE)) begin
             edge_err++;
             $display("  STREAM group %0d: the last put did not arrive while the lane was busy", g - 1);
           end
@@ -575,7 +575,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
       missing = (s_n < SIGNALS_PER_BATCH) ? SIGNALS_PER_BATCH - s_n : 0;
       extra   = (s_n > SIGNALS_PER_BATCH) ? s_n - SIGNALS_PER_BATCH : 0;
       wrong   = (s_nobs > s_n) ? s_nobs - s_n : s_n - s_nobs;  // one group start per output
-      for (int i = 0; i < s_nobs && i < S_BND; i++) if (s_obs[i][4:0] != 5'd1) wrong++;
+      for (int i = 0; i < s_nobs && i < S_BND; i++) if (s_obs[i][4:0] !== 5'd1) wrong++;
       s_on = 0;
       $display("  SINGLE %s : groups of one %0d  passed %0d  failed %0d  missing %0d  extra %0d  wrong size %0d", act_name,
                SIGNALS_PER_BATCH, SIGNALS_PER_BATCH - fails - missing, fails, missing, extra, wrong);

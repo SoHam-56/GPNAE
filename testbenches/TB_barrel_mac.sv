@@ -78,7 +78,7 @@ module TB_barrel_mac;
               $display("[FAIL] group %0d slot %0d (n %0d, operand %h base %0d degree %0d frac %0d): got %h, want %h", g, got, n,
                        slot[g*K+got][W-1:0], slot[g*K+got][W+6:W], slot[g*K+got][W+11:W+8], slot[g*K+got][W+13:W+12], res_data, want[g*K+got]);
           end
-          if ((got == n - 1) != done) begin
+          if ((got == n - 1) !== done) begin
             errs++;
             if (shown++ < 20) $display("[FAIL] group %0d slot %0d: done_o %b", g, got, done);
           end
