@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(gm.ROOT, "ArithmeticLibrary", "models"))
 import truefn  # noqa: E402
 
 ROOT = gm.ROOT
+sys.path.append(ROOT)  # regression.py, at the repository root
 SV = os.path.join(ROOT, "src", "memory", "gpnae_coef_mem.sv")
 REPORT = os.path.join(ROOT, "fit_poly_coeffs.log")
 MARGIN = {"fp32": 0.85, "bf16": 0.97, "int8": 0.97}  # a kept candidate's worst, as a share of its tier's tolerance
