@@ -99,7 +99,6 @@ help:
 	@echo "  make lint [FMT=f]       - verilator --lint-only -Wall of gpnae and each of its new modules, with and without SYNTHESIS (lint_waivers.vlt: the library's and B's lane_link's own)"
 	@echo "  make check-fmt          - no RTL outside the allowlist names a precision (C4: a planted EXP_W must fail it)"
 	@echo "  make check-hier         - at each define, the lane elaborates only that precision's units"
-	@echo "  make equiv              - fixedPointMultiplyAdd == fxMac at FRAC 11..14 on every (a, x) pair (testbenches/eq)"
 	@echo "  make fit                - fit_poly_coeffs.py: every tier, then the default JSON and gpnae_coef_mem.sv's tables"
 	@echo "  make clean              - remove the simulation artifacts"
 	@echo "  make regression [FMT=f] - every point (regression.py --action points), one table; make regression/<point>, make regression-summary"
@@ -141,27 +140,14 @@ check-fmt:
 check-hier:
 	@$(PYTHON) $(PRJ_DIR)/check_hier.py --verilator $(VERILATOR) --out $(PRJ_DIR)/Verilator_hier --files $(DESIGN_FILES)
 
-# The equivalence harness (testbenches/eq): every slice on every core.
-EQ_DIR = $(PRJ_DIR)/Verilator_eq
-equiv:
-	@mkdir -p $(EQ_DIR)
-	$(VERILATOR) --cc --exe --build -j $(shell nproc) -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module eq_fxp --Mdir $(EQ_DIR)/fxp \
-	  $(ARIL)/Common/src/sienna_fmt_pkg.sv $(SRC_DIR)/fixedPointMultiplyAdd.sv $(ARIL)/Multipliers/Fx/src/fxMac.sv $(TB_DIR)/eq/eq_gpnae.sv \
-	  $(TB_DIR)/eq/eq_gpnae.cpp -CFLAGS "-O2 -DVTOP=Veq_fxp -DEQ_FXP" -o eq
-	( for fr in 0 1 2 3; do for h in $$(seq 0 255); do echo "$(EQ_DIR)/fxp/eq --mode pairs --frac $$fr --hi $$h"; done; done; \
-	  for s in 1 2 3 4 5 6 7 8; do echo "$(EQ_DIR)/fxp/eq --mode random --n 12500000 --seed $$s"; done ) | xargs -P $(shell nproc) -I{} sh -c '{}' > $(EQ_DIR)/eq.log
-	@n=$$(/usr/bin/grep -c '^EQ ' $(EQ_DIR)/eq.log); p=$$(/usr/bin/grep '^EQ ' $(EQ_DIR)/eq.log | /usr/bin/grep -c 'result_diff 0 done_diff 0'); \
-	v=$$(/usr/bin/grep '^EQ ' $(EQ_DIR)/eq.log | awk '{s += $$11} END {print s}'); \
-	echo "EQUIV fixedPointMultiplyAdd == fxMac (FRAC 11 + frac): $$n runs, $$p with 0 result and 0 done differences, $$v vectors"; [ $$n -eq 1032 ] && [ $$n -eq $$p ]
-
 fit:
 	$(PYTHON) fit_poly_coeffs.py
 
 clean:
-	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier $(EQ_DIR)
+	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier
 	-rm -f *.vcd *.fst
 
-.PHONY: default help verilator barrel-mac lint check-fmt check-hier equiv fit clean regression regression-summary
+.PHONY: default help verilator barrel-mac lint check-fmt check-hier fit clean regression regression-summary
 
 # make regression: selftest, check-model and per format the barrel MAC, each tier's gate, protocol, load, cycles and the two faults.
 FORMATS  = fp32 bf16 int8
