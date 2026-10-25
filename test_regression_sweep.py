@@ -192,6 +192,14 @@ def test_loaded_image():
         assert m.desc[0][3].base != gm.default_mem(f).desc[0][3].base
 
 
+def test_held_sets_disjoint_from_the_fit():
+    """The held-out int8 sets: their forced ends are not the fit sweep's, and no scale is one the fit reads (int8_held_sets asserts it)."""
+    held, sweep = reg.int8_held_sets(1), reg.int8_held_sets(2, reg.SWEEP_ENDS)
+    hs = {round(c.s_in, 15) for v in held.values() for _, c, _, _ in v}
+    assert reg.HELD_ENDS != reg.SWEEP_ENDS and not set(reg.SWEEP_ENDS) & set(reg.HELD_ENDS)
+    assert {round(x, 15) for x in reg.HELD_ENDS} <= hs and not {round(x, 15) for x in reg.SWEEP_ENDS} & hs
+
+
 MIN_TESTS = 10  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":

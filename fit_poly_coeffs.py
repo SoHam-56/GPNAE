@@ -227,7 +227,7 @@ def measure(fmt, mem, tier, code, x=None):
             par = gm.Int8Params(1, 0, 0, mo, so, case.z_out if code == gm.SELU else 0)
             rs.append(int8_ratio(code, DENSE, lane.run(DENSE, code, par, tier), case, tol))
         import regression  # and regression.py's int8 gate sets and a scale sweep of seed 2 (the held-out gate is seed 1's, never read here)
-        for kind, case, p, qq in regression.int8_sets(1)[gm.NAME[code]] + regression.int8_held_sets(2)[gm.NAME[code]]:
+        for kind, case, p, qq in regression.int8_sets(1)[gm.NAME[code]] + regression.int8_held_sets(2, regression.SWEEP_ENDS)[gm.NAME[code]]:
             c = gm.Case(*regression.int8_quant(code, case, p), True)  # the gate's own scales (int8_quant: sigmoid's and tanh's fixed output)
             rs.append(int8_ratio(code, qq, lane.run(qq, code, p, tier), c, tol))
         r = np.concatenate(rs)

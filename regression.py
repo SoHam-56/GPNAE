@@ -205,15 +205,23 @@ def int8_sets(seed):
 
 
 N_HELD_INT8 = 256  # held-out sets per activation: every z_in once, each at its own log-uniform s_in in [2^-20, 15.99] (both ends included)
+SWEEP_ENDS = (2.0 ** -20, 15.99)  # the forced ends of fit_poly_coeffs' seed-2 sweep, which the fit reads
+HELD_ENDS = (1.5 * 2.0 ** -20, 15.98)  # the held-out gate's forced ends: as extreme, at scales no fit set reads
 
 
-def int8_held_sets(seed):
-    """The held-out int8 sets: no fit or gate set chose them (fit_poly_coeffs.py reads int8_sets(1) and the study's sweep, never these)."""
+def int8_held_sets(seed, ends=HELD_ENDS):
+    """The held-out int8 sets: no fit or gate set chose them (fit_poly_coeffs.py reads int8_sets(1) and int8_held_sets(2, SWEEP_ENDS), never
+    these); with ends=SWEEP_ENDS, the fit's own sweep, which skips the check."""
     rng = np.random.default_rng([seed, 31])
     s = np.exp(rng.uniform(np.log(2.0 ** -20), np.log(15.99), N_HELD_INT8))
-    s[:2] = (2.0 ** -20, 15.99)
+    s[:2] = ends
     z = rng.permutation(256) - 128
-    seen = {(round(c.s_in, 12), c.z_in) for v in int8_sets(1).values() for _, c, _, _ in v if c is not None}
+    seen, seen_s = set(), set()
+    if ends != SWEEP_ENDS:  # disjoint from every set the fit reads: the gate's and the seed-2 sweep's, by (s_in, z_in) and by scale
+        fit = [c for v in int8_sets(1).values() for _, c, _, _ in v if c is not None]
+        fit += [c for v in int8_held_sets(2, SWEEP_ENDS).values() for _, c, _, _ in v]
+        seen, seen_s = {(round(c.s_in, 12), c.z_in) for c in fit}, {float(c.s_in) for c in fit}
+        assert not {float(x) for x in s} & seen_s, "a held-out scale is one the fit reads"
     out = {}
     for act, code in INT8_ACTS:
         sets = []
