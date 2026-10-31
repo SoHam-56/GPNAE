@@ -52,8 +52,9 @@ RECORD = {
         gm.SELU: dict(bounds=[1.0, 2.0, 3.0, 4.625, 5.25], deg=2, sets=[H("3fe2", "3f5a", "3e4d"), H("3fd3", "3f22", "3dc2"), H("3fba", "3ee5", "3d4b"),
                                                                           H("3f9b", "3e94", "3cc0"), H("3f78", "3e3e", "3c4a")]),
         "sigp": dict(bounds=[5.0], deg=4, sets=[H("3f00", "3e8b", "bd15", "bb5a", "3a40")]),
+        # sigmoid x < 0 past the Q set: F1 (activation_perf_regression.log 4), a degree-2 tail set with 2 Newton steps, 34 cycles shorter
         "sign": dict(reflect=0, bounds=[1.5], deg=3, sets=[H("3f00", "be83", "3c63", "3c24")],  # the Q set: P ~ sigmoid(-|x|)
-                     tail=dict(deg=4, newton=2, coef=EXP2_FP32_DEG4)),
+                     tail=dict(deg=2, newton=2, coef=H("3f7f8ef8", "bf2a7f7a", "3e2ca418"))),
         gm.TANH: dict(bounds=[0.25, 0.5, 1.0, 1.75, 2.25, 3.0], deg=2, sets=[H("3f81", "beef", "3dbb"), H("3f81", "beb8", "3dd8"),
                                                                              H("3f80", "be9d", "3d91"), H("3f71", "be51", "3cc4"),
                                                                              H("3f4f", "bde3", "3bed"), H("3f2e", "bd7c", "3b27")]),
