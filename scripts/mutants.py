@@ -50,6 +50,19 @@ MUTANTS = (
     ("load_drops_word_writes", "src/memory/gpnae_coef_mem.sv", "  assign w_coef = wr_i && (int'(waddr_i) < A_DESC);", "  assign w_coef = 1'b0;", "int8", "load",
      "LOAD int8: FAIL"),
     ("tier_ignored", "src/lane/gpnae.sv", "            tier_q <= tier_i;", "            tier_q <= 2'd0;", "bf16", "protocol", "PROTOCOL bf16: FAIL"),
+    # the coefficient-image check: a reset default bit flipped in the memory, and one word of the host's load file corrupted after packing
+    ("coef_reset_bit_flips", "src/memory/gpnae_coef_mem.sv", "      for (int i = 0; i < COEF_WORDS; i++) words[i] <= DEF_WORDS[i*ACT_W+:ACT_W];",
+     "      for (int i = 0; i < COEF_WORDS; i++) words[i] <= DEF_WORDS[i*ACT_W+:ACT_W] ^ ACT_W'(i == 7);", "bf16", "protocol",
+     "COEF IMAGE reset: word 7 (load address 7)"),
+    ("coef_load_word_corrupted", "regression.py", "for a, d in mem.writes()) + \"fff00000000\\n\")",
+     "for a, d in [(a, d ^ (a == 5)) for a, d in mem.writes()]) + \"fff00000000\\n\")",
+     "fp32", "load", "COEF IMAGE load: word 5 (load address 5)"),
+    ("coef_load_field_corrupted", "regression.py", "for a, d in mem.writes()) + \"fff00000000\\n\")",
+     "for a, d in [(a, d ^ (a == gm.A_DESC + gm.F_SET)) for a, d in mem.writes()]) + \"fff00000000\\n\")", "int8", "load",
+     "COEF IMAGE load: tier 0 descriptor 0 np (load address 134)"),
+    ("coef_load_tail_corrupted", "regression.py", "for a, d in mem.writes()) + \"fff00000000\\n\")",
+     "for a, d in [(a, d ^ (a == gm.A_TAIL)) for a, d in mem.writes()]) + \"fff00000000\\n\")", "bf16", "load",
+     "COEF IMAGE load: tail 0 coef 0 (load address 320)"),
 )
 
 
