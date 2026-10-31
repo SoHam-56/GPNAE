@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fits every accuracy tier of the gpnae lane's coefficient memory and writes its reset default.
 
-Tier 0 (1%) is the design of record, gpnae_fit_study.log section 4 (D'): its sets are taken as fitted there and re-measured here.
+Tier 0 (1%) is the design of record, gpnae_fit_study.log section 4 (D'), with bf16 SELU and tanh from A3 (gpnae_margins_and_taylor_selu.log A.4):
+its sets are taken as fitted there and re-measured here.
 Tiers 1 (5%) and 2 (10%) are fitted here at their lowest Horner degree: per activation and side, candidate piece layouts in order of
 cost (rounds, then words); each piece fitted by float64 minimax (relative; absolute in Q4.11 for int8 sigmoid and tanh), rounded to the
 format, then coordinate descent on its bits against the bit-exact lane (gpnae_model) under the decimal rule at the tier's tolerance.
@@ -47,14 +48,15 @@ RECORD = {
         gm.TANH: dict(bounds=[3.0], deg=6, sets=[H("3f7fafa0", "bea318d5", "3dce3207", "bcb6b819", "3b45ce9f", "b966a716", "36dc6977")]),
     },
     "bf16": {
-        gm.SELU: dict(bounds=[1.0, 2.0, 3.0, 4.625], deg=2, sets=[H("3fe2", "3f5a", "3e4f"), H("3fd4", "3f25", "3dca"), H("3fbc", "3eeb", "3d54"),
-                                                                    H("3f9b", "3e94", "3cc0")]),
+        # SELU and tanh: candidate A3 (gpnae_margins_and_taylor_selu.log A.4), a piece past each saturation bound for margin under 1%
+        gm.SELU: dict(bounds=[1.0, 2.0, 3.0, 4.625, 5.25], deg=2, sets=[H("3fe2", "3f5a", "3e4d"), H("3fd3", "3f22", "3dc2"), H("3fba", "3ee5", "3d4b"),
+                                                                          H("3f9b", "3e94", "3cc0"), H("3f78", "3e3e", "3c4a")]),
         "sigp": dict(bounds=[5.0], deg=4, sets=[H("3f00", "3e8b", "bd15", "bb5a", "3a40")]),
         "sign": dict(reflect=0, bounds=[1.5], deg=3, sets=[H("3f00", "be83", "3c63", "3c24")],  # the Q set: P ~ sigmoid(-|x|)
                      tail=dict(deg=4, newton=2, coef=EXP2_FP32_DEG4)),
-        gm.TANH: dict(bounds=[0.5, 1.0, 1.5, 2.0, 2.65625], deg=2, sets=[H("3f81", "bebe", "3dec"), H("3f80", "be9d", "3d91"),
-                                                                         H("3f75", "be66", "3cf8"), H("3f5d", "be12", "3c43"),
-                                                                         H("3f3d", "bda5", "3b85")]),
+        gm.TANH: dict(bounds=[0.25, 0.5, 1.0, 1.75, 2.25, 3.0], deg=2, sets=[H("3f81", "beef", "3dbb"), H("3f81", "beb8", "3dd8"),
+                                                                             H("3f80", "be9d", "3d91"), H("3f71", "be51", "3cc4"),
+                                                                             H("3f4f", "bde3", "3bed"), H("3f2e", "bd7c", "3b27")]),
     },
     "int8": {  # centered operand: x - c (SELU) or |x| - c, fixedPointMultiplyAdd at 11 + frac
         # SELU: [-5.25, 0] at the study's degree 4, chosen on the fit sets alone (try_int8 over S 4.75 to 6.5, rs3_b2_f1_refit2): S 4.75 misses 1%
@@ -65,8 +67,8 @@ RECORD = {
         gm.TANH: dict(bounds=[6144], deg=5, center=3072, frac=1, sets=[[1858, 728, -1505, 1610, 12, -867]]),
     },
 }
-STUDY_WORST = {"fp32": {gm.SELU: 0.249, gm.SIGMOID: 0.248, gm.TANH: 0.497}, "bf16": {gm.SELU: 0.747, gm.SIGMOID: 0.775, gm.TANH: 0.792},
-               "int8": {}}  # gpnae_fit_study.log 4.4, % (fp32 sampled on 1.47e7 inputs, bf16 every input)
+STUDY_WORST = {"fp32": {gm.SELU: 0.249, gm.SIGMOID: 0.248, gm.TANH: 0.497}, "bf16": {gm.SELU: 0.747, gm.SIGMOID: 0.775, gm.TANH: 0.622},
+               "int8": {}}  # gpnae_fit_study.log 4.4 (bf16 SELU and tanh: A3's), % (fp32 sampled on 1.47e7 inputs, bf16 every input)
 
 
 # ── words, inputs and the rule ──
@@ -550,6 +552,24 @@ def sv_check(mems):
     return src[a:b + len("  // ── end of the generated reset default ──")] == sv_tables(mems)
 
 
+def record_diffs(fmt, mem):
+    """Where tier 0 of mem differs from RECORD[fmt] (fields, coefficient sets by content, tail): an empty list when make fit would write it."""
+    rec = build_mem(fmt, [record_design(fmt)] + [None] * (gm.NUM_TIERS - 1))
+    out = []
+    for d, (a, b) in enumerate(zip(rec.desc[0], mem.desc[0])):
+        for f in ("bounds", "np", "deg", "reflect", "center", "frac", "exp_deg"):
+            if getattr(a, f) != getattr(b, f):
+                out.append(f"{fmt} tier 0 descriptor {d} {f}: record {getattr(a, f)}, image {getattr(b, f)}")
+        n = a.np * (a.deg + 1)
+        if rec.words[a.base:a.base + n] != mem.words[b.base:b.base + n]:
+            out.append(f"{fmt} tier 0 descriptor {d} sets: record {rec.words[a.base:a.base + n]}, image {mem.words[b.base:b.base + n]}")
+        if a.exp_deg and rec.words[a.exp_base:a.exp_base + a.exp_deg + 1] != mem.words[b.exp_base:b.exp_base + b.exp_deg + 1]:
+            out.append(f"{fmt} tier 0 descriptor {d} exp set differs")
+    if vars(rec.tail[0]) != vars(mem.tail[0]):
+        out.append(f"{fmt} tier 0 tail: record {vars(rec.tail[0])}, image {vars(mem.tail[0])}")
+    return out
+
+
 # ── main ──
 
 def report_lines(fmt, mem):
@@ -577,6 +597,9 @@ def main():
         L = [ln for f in fmts for ln in report_lines(f, mems[f])]
         ok = sv_check(mems)
         L.append(f"RTL literal tables {'equal' if ok else 'DIFFER FROM'} gpnae_coef_default.json")
+        rd = [x for f in fmts for x in record_diffs(f, mems[f])]  # tier 0 is RECORD's, as make fit writes it
+        L += rd + [f"tier 0 of the default {'equals' if not rd else 'DIFFERS FROM'} RECORD in {', '.join(fmts)}"]
+        ok &= not rd
         print("\n".join(L))
         sys.exit(0 if ok and all("over the tolerance 0 " in ln for ln in L if "worst" in ln) else 1)
     old = json.load(open(gm.DEFAULT_JSON)) if os.path.exists(gm.DEFAULT_JSON) else {}
