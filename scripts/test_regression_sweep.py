@@ -285,7 +285,27 @@ def test_x_words():
     assert fourstate.field(rf"OVERLAP tanh : cycles to the last result ({fourstate.DEC})", "OVERLAP tanh : cycles to the last result 812", "t", "c") == 812
 
 
-MIN_TESTS = 14  # tests this file holds; fewer run means one was lost, which is a failure
+def test_build_failure_names_its_error():
+    """A failed TB build's error lines and its log path reach the point's console: Verilator's internal error, a linker error, or the tail."""
+    tsp = ("verilator --binary ...\n%Error: Internal Error: ../V3TSP.cpp:353: No unmarked edges found in tour\n"
+           "                        ... See the manual at https://verilator.org/verilator_doc.html for more assistance.\nmake: *** [Makefile:110: verilator] Error 1\n")
+    e = reg.build_errors(tsp)
+    assert any("V3TSP.cpp:353" in x for x in e) and any("Error 1" in x for x in e) and not any("See the manual" in x for x in e), e
+    ld = "g++ ...\n" * 5000 + "x.o: relocation truncated to fit: R_X86_64_PC32 against `.bss'\ncollect2: error: ld returned 1 exit status\n"
+    assert any("relocation truncated" in x for x in reg.build_errors(ld)) and any("collect2: error" in x for x in reg.build_errors(ld))
+    assert reg.build_errors("a\nb\nc\n")[-1] == "c" and len(reg.build_errors("%Error: x\n" * 100)) <= reg.BUILD_ERROR_LINES
+    x = gm.finite_inputs(gm.fpu.BF16)[::64][:64]
+    with scratch_dirs():
+        reg.run_make = lambda f, sim_args="", extra="": (tsp, 0.0)  # the build fails before the bench starts
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ok, lines, _ = reg.run_float("bf16", 0, x, list(reg.ALL_ACTS))
+        log = os.path.join(reg.RESULTS_DIR, "run_bf16_t0.build_error.log")
+        assert not ok and any("V3TSP.cpp:353" in ln for ln in lines) and any(f"build log: {log}" in ln for ln in lines), lines
+        assert open(log).read() == tsp  # kept apart, so a later run of the same name cannot overwrite it
+
+
+MIN_TESTS = 15  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]

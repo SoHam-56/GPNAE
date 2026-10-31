@@ -69,6 +69,28 @@ def run_make(fmt, sim_args="", extra=""):
     return r.stdout + r.stderr, time.time() - t0
 
 
+BUILD_ERROR_LINES = 12  # a failed build's error lines printed in the point's log; the whole output is kept in <run>.build_error.log
+_BUILD_ERR = re.compile(r"%Error|\berror\b|\*\*\*|Killed|terminated|relocation truncated|No space left|Disk quota", re.I)
+TB_BANNER = "GPNAE ACTIVATION VERIFICATION"  # TB_gpnae's banner: the build finished and the bench started
+
+
+def build_errors(raw):
+    """A failed build's error lines (Verilator's %Error, g++ and ld errors, make's ***), or its last lines when none matches."""
+    lines = [x.rstrip() for x in raw.splitlines() if x.strip()]
+    hits = [x for x in lines if _BUILD_ERR.search(x)]
+    return (hits or lines)[-BUILD_ERROR_LINES:]
+
+
+def build_failure(raw, name):
+    """When the bench never started: the whole output kept in results/<name>.build_error.log, and its error lines and path as report lines."""
+    if TB_BANNER in raw:
+        return []
+    path = os.path.join(RESULTS_DIR, f"{name}.build_error.log")
+    with open(path, "w") as fh:
+        fh.write(raw)
+    return [f"    BUILD FAILED: {ln.strip()[:240]}" for ln in build_errors(raw)] + [f"    build log: {path}"]
+
+
 def parse_log(raw, expect_total, acts):
     """The per-activation RESULT lines and the overall verdict; a short or absent run is NO-RESULTS."""
     per, D = {}, fourstate.DEC
@@ -369,7 +391,7 @@ def run_float(fmt, tier, x, acts, mem=None, sim_args="", tol=None, label="run", 
     parsed = parse_log(raw, x.size, acts)
     lines = [f"  {label} {fmt} tier {tier}: {x.size} inputs x {len(acts)} activations, {wall:.0f} s, TB {parsed['status']}"]
     lines += [f"    BITEXACT {a}: {p['exact']}/{p['total']} exact, {p['failed']} wrong, {p['missing']} missing" for a, p in parsed["per"].items()]
-    lines += [f"    {s}" for s in parsed["short"]] + [f"    {parsed['coef']}"]
+    lines += [f"    {s}" for s in parsed["short"]] + [f"    {parsed['coef']}"] + build_failure(raw, f"{label}_{fmt}_t{tier}")
     ok = parsed["status"] == "PASS"
     res = {}
     for a in acts:
@@ -416,7 +438,7 @@ def run_int8(tier, mem=None, sets=None, sim_args="", tol=None, label="int8", str
     parsed = parse_log(raw, batches * MAX_SIGNALS, ALL_ACTS)
     lines = [f"  {label} int8 tier {tier}: {n_sets} sets x 256 codes x 5 activations, {wall:.0f} s, TB {parsed['status']}"]
     lines += [f"    BITEXACT {a}: {p['exact']}/{p['total']} exact, {p['failed']} wrong, {p['missing']} missing" for a, p in parsed["per"].items()]
-    lines += [f"    {s}" for s in parsed["short"]] + [f"    {parsed['coef']}"]
+    lines += [f"    {s}" for s in parsed["short"]] + [f"    {parsed['coef']}"] + build_failure(raw, f"{label}_int8_t{tier}")
     ok = parsed["status"] == "PASS"
     if stream:
         se = re.search(r"STREAM : elements (\d+)\s+exact (\d+)\s+failed (\d+)\s+missing (\d+)\s+extra (\d+)", raw)
@@ -622,6 +644,7 @@ def do_cycles(fmt, seed):
                 row[(act, dn)] = cyc / tot if m else float("nan")
                 if not good:
                     L.append(f"  CYCLES {fmt} tier {tier} {act} {dn}: FAIL (" + (d.group(0) if d else "no overlap result") + ")")
+                    L += build_failure(raw, f"cycles_{fmt}_t{tier}_{act}_{DISTS.index(dn)}")
         for act in FLOAT_ACTS:
             est = STUDY_CYCLES[fmt][act]
             table.append(f"CYCLES {fmt} tier {tier} {act:8} " + "  ".join(f"{dn} {row[(act, dn)]:.2f}" for dn in DISTS)
@@ -645,6 +668,9 @@ def do_fault(fmt, which):
             write_words(os.path.join(STIM_DIR, f"{a}_exp.mem"), lane_for(fmt).run(x, CODES[a], 0), width(fmt))
     raw, _ = run_make(fmt, sz + " +no_stream", f"-GFAULT={which}")
     save_log(f"fault{which}_{fmt}.log", raw)
+    bf = build_failure(raw, f"fault{which}_{fmt}")
+    if bf:
+        return False, [f"FAULT {which} ({name}): NOT CAUGHT, the bench did not build"] + bf
     fired = len(re.findall(name, raw))
     if which == 4:  # the interlock: the writes are refused, so the batch passes bit for bit against the reset image
         m = re.search(r"LOAD REFUSED: (\d+) coefficient writes", raw)
