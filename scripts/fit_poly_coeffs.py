@@ -42,9 +42,11 @@ EXP2_FP32_DEG4 = H("3f7fffd4", "bf316a6d", "3e7515d4", "bd596432", "3bddbe6a")  
 RECORD = {
     "fp32": {
         gm.SELU: dict(bounds=[6.0], deg=6, sets=[H("3fe0fe85", "3f5fe8d5", "3e908be4", "3d8054e1", "3c168b63", "3a4ee01c", "37f886e7")]),
-        "sigp": dict(bounds=[6.0], deg=7, sets=[H("3f00002e", "3e7c3d80", "3c70145b", "bd2ac250", "3c65bce5", "bb1494c4", "39440e4e",
-                                                  "b6d41e7f")]),
-        "sign": dict(share=True, reflect=1, bounds=[6.0], exp=EXP2_FP32_DEG4),  # 1 - P on the x >= 0 set to -6, then E (1 - E)
+        # sigmoid: F2 (activation_perf_regression.log 4), 3 pieces of degree 4 instead of 1 of degree 7, 3 Horner rounds fewer
+        "sigp": dict(bounds=[2.0, 4.0, 6.0], deg=4, sets=[H("3efffe2e", "3e800367", "3a81efb1", "bcc8da25", "3b956d93"),
+                                                         H("3edcd898", "3ec67c34", "bdd8ceff", "3c5e0ac9", "ba31af91"),
+                                                         H("3f132f9e", "3e82115f", "bd72c701", "3bcff475", "b9890126")]),
+        "sign": dict(share=True, reflect=1, bounds=[2.0, 4.0, 6.0], exp=EXP2_FP32_DEG4),  # 1 - P on the x >= 0 sets to -6, then E (1 - E)
         gm.TANH: dict(bounds=[3.0], deg=6, sets=[H("3f7fafa0", "bea318d5", "3dce3207", "bcb6b819", "3b45ce9f", "b966a716", "36dc6977")]),
     },
     "bf16": {
