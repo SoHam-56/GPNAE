@@ -160,6 +160,19 @@ def test_tier_gate():
     assert not reg.gate("bf16", "tanh", x, y, 0.01).ok, "tier 2's tanh passes 1%: the tier gate could not tell the tiers apart"
 
 
+def test_margin_check():
+    """bf16 tier 0's margin check: the pre-A3 worsts (SELU 0.943%, tanh 0.960%) fail it, A3's pass; no other format or tier is checked."""
+    from types import SimpleNamespace as R
+    old = {"selu": R(worst=0.009428), "sigmoid": R(worst=0.007748), "tanh": R(worst=0.009602)}
+    a3 = {"selu": R(worst=0.007470), "sigmoid": R(worst=0.007748), "tanh": R(worst=0.006223), "relu": R(worst=0.0)}
+    ok, lines = reg.margin_check("bf16", 0, old)
+    assert not ok and sum("FAIL" in x for x in lines) == 2 and len(lines) == 3, lines
+    assert reg.margin_check("bf16", 0, a3)[0] and reg.margin_check("bf16", 0, {"tanh": R(worst=float("nan"))})[0] is False
+    assert reg.margin_check("bf16", 1, old) == (True, []) and reg.margin_check("fp32", 0, old) == (True, []) and reg.margin_check("int8", 0, old) == (True, [])
+    v = reg.SPEC.verdict("bf16/lane-t0", "MARGIN bf16 tier 0 tanh: FAIL  worst 0.9602% against 0.80%\nGATE bf16: PASS (3 s)\n", 0)
+    assert v.startswith("FAIL (log: MARGIN bf16 tier 0 tanh: FAIL"), v
+
+
 def test_int8_sets():
     """int8_sets is the TB's stimulus order and size; every activation the same number of sets, every set every code once."""
     sets = reg.int8_sets(1)
@@ -269,7 +282,7 @@ def test_x_words():
     assert fourstate.field(rf"OVERLAP tanh : cycles to the last result ({fourstate.DEC})", "OVERLAP tanh : cycles to the last result 812", "t", "c") == 812
 
 
-MIN_TESTS = 13  # tests this file holds; fewer run means one was lost, which is a failure
+MIN_TESTS = 14  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]

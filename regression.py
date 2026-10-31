@@ -466,12 +466,29 @@ def worst_line(fmt, tier, res):
     return f"WORST {fmt} tier {tier} ({100 * tol:g}%): " + ", ".join(parts) + f"; outputs over 1%: {over1}"
 
 
+MARGIN_T0 = {"bf16": 0.0080}  # bf16 tier 0: each activation's worst at most 0.80%, a margin check beside the 1% gate
+
+
+def margin_check(fmt, tier, res):
+    """Each activation's worst against MARGIN_T0 at tier 0 (no check elsewhere): (ok, lines)."""
+    lim = MARGIN_T0.get(fmt) if tier == 0 else None
+    if lim is None:
+        return True, []
+    ok, L = True, []
+    for a, r in res.items():
+        good = bool(np.isfinite(r.worst) and r.worst <= lim)
+        ok &= good
+        L.append(f"MARGIN {fmt} tier {tier} {a}: {'PASS' if good else 'FAIL'}  worst {100 * r.worst:.4f}% against {100 * lim:.2f}%")
+    return ok, L
+
+
 def do_gate(fmt, tier, seed):
     if fmt == "int8":
         ok, lines, res = run_int8(tier, seed=seed, label="gate")
     else:
         ok, lines, res = run_float(fmt, tier, float_gate_inputs(fmt, seed), list(ALL_ACTS), label="gate")
-    return ok, lines + [worst_line(fmt, tier, res)]
+    mok, ml = margin_check(fmt, tier, res)
+    return ok and mok, lines + [worst_line(fmt, tier, res)] + ml
 
 
 def do_held(fmt, tier, seed):
@@ -788,7 +805,7 @@ class LaneSpec(regress.Spec):
         if r.startswith("fault"):  # the point provokes the assertion it looks for
             return regress.marker_verdict(text, rc, (rf"^FAULT {f}: PASS", r"^FAULT \d .*: CAUGHT"), (r"NOT CAUGHT",), firing=False)
         run = "GATE" if r.startswith("lane-t") else "HELD" if r.startswith("held-t") else r.upper()
-        return regress.marker_verdict(text, rc, (rf"^{run} {f}: PASS",), (rf"^{run} {f}: FAIL", r"TRUTH \w+ \w+: FAIL"))
+        return regress.marker_verdict(text, rc, (rf"^{run} {f}: PASS",), (rf"^{run} {f}: FAIL", r"TRUTH \w+ \w+: FAIL", r"^MARGIN \w+ tier \d \w+: FAIL"))
 
 
 SPEC = LaneSpec(ROOT, os.path.join(RESULTS_DIR, "regression"))
