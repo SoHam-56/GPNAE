@@ -51,7 +51,7 @@ The published engine computed one input at a time. Today's lane is built for thr
 2. **Many inputs share one multiply-add unit.** A polynomial is evaluated as a chain (Horner's rule) in which each step waits for the previous one, so the published design kept its multiplier busy only about 6% of the time. The new unit works on 16 inputs in turn, like a barrel processor, so it starts a new step every cycle. Each input brings its own coefficient set and degree, so inputs in different pieces of a function share the unit at full rate.
 3. **Coefficients are data, in three accuracy tiers.** The coefficients, the piece boundaries and each set's degree live in a 128-word memory the host can rewrite; its reset contents are the fitted sets. A write lands only while the lane holds no element (idle_o); one sent while it works is refused, so a running group never reads a half-written set. Each function has three sets: within 1%, 5% and 10% of the exact value. A layer that tolerates 10% picks tier 2 and runs fewer multiply-add rounds.
 4. **Three number formats from one source.** One define picks fp32, bf16 or int8, and the same lane elaborates only that format's arithmetic. bf16 fits several low-degree pieces per function, because one polynomial in 8 significant bits cannot reach 1%; for sigmoid below -1.5 it computes e^-|x| as 2^-n P(f) in fp32 on a small side unit. fp32 does the same range reduction on the main multiply-add unit. int8 takes quantized inputs, rescales and centres them on the polynomial's range, and returns quantized outputs.
-5. **Verification against the true function.** Every output the RTL produces in the regression is compared with numpy float64: within the tier's tolerance or one output step. A bit-exact Python model of the hardware is the diagnostic, and planted faults show that every new check can fail.
+5. **Verification against the true function.** Every output the RTL produces in the regression is compared with numpy float64: within the tier's tolerance or one output step; bf16's 1% tier must also stay at or below 0.80%, so it keeps a margin. After every reset and every coefficient load, the testbench reads the lane's coefficient memory and compares it, field by field, with the image the host meant to write. A bit-exact Python model of the hardware is the diagnostic, and planted faults show that every new check can fail.
 
 ---
 
@@ -76,7 +76,7 @@ The 5% and 10% tiers take 7 to 10.5 cycles per input in every format (bf16 sigmo
 | fp32 | 1 311 424 (a grid over [-16, 16], random bit patterns, random reals up to ±110, every power of two, each piece boundary's neighbours) | 1% | 0.25% | 0.25% | 0.50% |
 | | | 5% | 3.2% | 3.0% | 3.5% |
 | | | 10% | 5.2% | 5.6% | 8.1% |
-| bf16 | every finite input (65 280) | 1% | 0.94% | 0.77% | 0.96% |
+| bf16 | every finite input (65 280) | 1% | 0.75% | 0.77% | 0.62% |
 | | | 5% | 4.5% | 3.0% | 4.7% |
 | | | 10% | 8.8% | 9.2% | 7.9% |
 | int8 | every input code of 355 quantization parameter sets (90 880) | 1% | 0.69% | within one output step | within one output step |
