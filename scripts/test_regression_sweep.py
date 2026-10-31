@@ -93,6 +93,9 @@ def test_regression_target():
     assert run("regression", "FMT=fp16").returncode != 0
     assert "+define+FMT_BF16" in run("verilator", "FMT=bf16").stdout and "+define+FMT_FP32" in run("verilator").stdout
     assert "--threads 3" in run("verilator", "SIM_THREADS=3").stdout
+    cores = subprocess.run(["nproc"], capture_output=True, text=True).stdout.strip()
+    for t in ("verilator", "barrel-mac"):  # one verilation thread (5.035's V3TSP error at -j 8), the g++ build every core
+        assert f"-j 1 --build-jobs {cores} " in run(t).stdout, (t, run(t).stdout[:400])
     assert "--trace" not in run("verilator").stdout and "--trace -DENABLE_TRACE" in run("verilator", "TRACE=1").stdout
     assert run("verilator", "TRACE=bogus").returncode != 0
     for fmt in ("int8", "fp16"):  # an exported FMT does not narrow make regression (only FMT= on its command line does); fp16 stops fmt.mk

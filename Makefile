@@ -68,13 +68,14 @@ TRACE_ON = $(filter $(TRACE),1 vcd fst)
 # Simulation threads: one lane is too small to share, so 1 (a 2^16-input fp32 run: 35.5 s at 1 thread, 151 s at 8; rs1_tf_thr1/8).
 SIM_THREADS ?= 1
 
+# One verilation thread, as SIENNA and SystolicMesh: 5.035 at -j 8 with a threaded model hit V3TSP.cpp:353 in SystolicMesh; the C++ build keeps every core.
 VERILATOR_FLAGS = \
 	--binary \
 	--timing \
 	--assert \
 	--top-module $(TOP_MODULE) \
 	--threads $(SIM_THREADS) \
-	-j $(shell nproc) \
+	-j 1 \
 	--build-jobs $(shell nproc) \
 	--sv \
 	$(FMT_DEF) \
@@ -130,7 +131,7 @@ ifeq ($(SIM),vcs)
 	$(call vcs_build,TB_barrel_mac,$(VCS_DIR)_bm,$(DESIGN_FILES) $(TB_DIR)/units/TB_barrel_mac.sv,$(FMT_DEF))
 	$(VCS_DIR)_bm/sim $(VCS_RUN)
 else
-	$(VERILATOR) --binary --timing --assert -j $(shell nproc) --build-jobs $(shell nproc) -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND $(FMT_DEF) \
+	$(VERILATOR) --binary --timing --assert -j 1 --build-jobs $(shell nproc) -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND $(FMT_DEF) \
 	  --top-module TB_barrel_mac --Mdir $(VERILATOR_DIR)_bm $(DESIGN_FILES) $(TB_DIR)/units/TB_barrel_mac.sv -o sim
 	$(VERILATOR_DIR)_bm/sim
 endif
