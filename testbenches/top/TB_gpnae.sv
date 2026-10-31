@@ -10,6 +10,7 @@
 // +no_stream leaves out int8's stream; +timeout=C (default 400000) cycles to wait for a batch.
 // The bench drives the lane's input link as a producer and takes its results as a consumer of +out_slots (default 64), +stall_pct
 // withholding credits.
+// After every reset and load the coefficient memory, read hierarchically, must equal regression.py's image (coef_default.mem, coef_loaded.mem).
 // FAULT 1: puts with no credit into a full FIFO, 2: a credited put while the lane pops, 3: an output link one bit wide, 4: a coefficient
 // write while the lane works (the interlock must refuse it: the batch stays the reset image's), 5: tier 3 (a_tier_valid).
 module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_CAP: the most +out_slots, and the lane's OUT_MAX
@@ -48,6 +49,79 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
   reg [43:0] loads[0:LOADS-1];  // {address, data} per write; an address of fff ends the list
   bit do_load;
   int n_loads;
+
+  // The coefficient-image check: the memory's registered state against the image the host meant it to hold.
+  localparam int IMG_N = gpnae_pkg::COEF_WORDS + gpnae_pkg::NUM_TIERS * gpnae_pkg::NUM_DESC * (gpnae_pkg::PMAX + 8)
+                         + gpnae_pkg::NUM_TIERS * (gpnae_pkg::TAIL_MAXC + 2);
+  localparam logic [31:0] IMG_END = 32'hC0EF_1A5E;  // the line after the last field, so a short or missing file fails
+  reg [31:0] img_def[0:IMG_N], img_load[0:IMG_N];  // the reset default's and the loaded image's fields, Mem.contents() order
+  int coef_checks = 0, coef_bad = 0;
+  gpnae_pkg::tail_t cc_tail[gpnae_pkg::NUM_TIERS];
+  if (sienna_fmt_pkg::HAS_FLOAT_TAIL) begin : G_CC_TAIL
+    for (genvar t = 0; t < gpnae_pkg::NUM_TIERS; t++) begin : G_T
+      assign cc_tail[t] = dut.COEF.G_TAIL.tail[t];
+    end
+  end else begin : G_CC_NO_TAIL
+    for (genvar t = 0; t < gpnae_pkg::NUM_TIERS; t++) begin : G_T
+      assign cc_tail[t] = '0;
+    end
+  end
+
+  // One field: what the memory holds against the image's word; a difference is counted and named with its load address.
+  task automatic coef_field(input string where, input string what, input int addr, input logic [31:0] got, input logic [31:0] want, inout int bad);
+    if (got !== want) begin
+      if (bad < 20) $display("  COEF IMAGE %s: %s (load address %0d) holds %h, the image has %h", where, what, addr, got, want);
+      bad++;
+    end
+  endtask
+
+  // The whole memory against an image: every word, every descriptor field and, with the float tail, every tail field.
+  task automatic coef_check(input string where, input bit loaded);
+    int bad, k, ab;
+    logic [31:0] w;
+    gpnae_pkg::desc_t q;
+    bad = 0;
+    for (int a = 0; a < gpnae_pkg::COEF_WORDS; a++) begin
+      w = loaded ? img_load[a] : img_def[a];
+      coef_field(where, $sformatf("word %0d", a), a, 32'(dut.COEF.words[a]), w, bad);
+    end
+    k = gpnae_pkg::COEF_WORDS;
+    for (int t = 0; t < gpnae_pkg::NUM_TIERS; t++)
+      for (int d = 0; d < gpnae_pkg::NUM_DESC; d++) begin
+        q  = dut.COEF.desc[t][d];
+        ab = gpnae_pkg::A_DESC + gpnae_pkg::DESC_STRIDE * (t * gpnae_pkg::NUM_DESC + d);
+        for (int j = 0; j < gpnae_pkg::PMAX; j++)
+          coef_field(where, $sformatf("tier %0d descriptor %0d bound %0d", t, d, j), ab + j, 32'(q.bound[j]), loaded ? img_load[k+j] : img_def[k+j], bad);
+        k += gpnae_pkg::PMAX;
+        coef_field(where, $sformatf("tier %0d descriptor %0d np", t, d), ab + gpnae_pkg::F_SET, 32'(q.np), loaded ? img_load[k] : img_def[k], bad);
+        coef_field(where, $sformatf("tier %0d descriptor %0d deg", t, d), ab + gpnae_pkg::F_SET, 32'(q.deg), loaded ? img_load[k+1] : img_def[k+1], bad);
+        coef_field(where, $sformatf("tier %0d descriptor %0d base", t, d), ab + gpnae_pkg::F_SET, 32'(q.base), loaded ? img_load[k+2] : img_def[k+2], bad);
+        coef_field(where, $sformatf("tier %0d descriptor %0d reflect", t, d), ab + gpnae_pkg::F_SET, 32'(q.reflect), loaded ? img_load[k+3] : img_def[k+3],
+                   bad);
+        coef_field(where, $sformatf("tier %0d descriptor %0d exp_base", t, d), ab + gpnae_pkg::F_EXP, 32'(q.exp_base), loaded ? img_load[k+4] : img_def[k+4],
+                   bad);
+        coef_field(where, $sformatf("tier %0d descriptor %0d exp_deg", t, d), ab + gpnae_pkg::F_EXP, 32'(q.exp_deg), loaded ? img_load[k+5] : img_def[k+5],
+                   bad);
+        coef_field(where, $sformatf("tier %0d descriptor %0d center", t, d), ab + gpnae_pkg::F_CENTER, 32'(q.center), loaded ? img_load[k+6] : img_def[k+6],
+                   bad);
+        coef_field(where, $sformatf("tier %0d descriptor %0d frac", t, d), ab + gpnae_pkg::F_FRAC, 32'(q.frac), loaded ? img_load[k+7] : img_def[k+7], bad);
+        k += 8;
+      end
+    if (sienna_fmt_pkg::HAS_FLOAT_TAIL)
+      for (int t = 0; t < gpnae_pkg::NUM_TIERS; t++) begin
+        ab = gpnae_pkg::A_TAIL + gpnae_pkg::TAIL_STRIDE * t;
+        for (int j = 0; j < gpnae_pkg::TAIL_MAXC; j++)
+          coef_field(where, $sformatf("tail %0d coef %0d", t, j), ab + j, cc_tail[t].coef[j], loaded ? img_load[k+j] : img_def[k+j], bad);
+        coef_field(where, $sformatf("tail %0d deg", t), ab + gpnae_pkg::TAIL_MAXC, 32'(cc_tail[t].deg), loaded ? img_load[k+6] : img_def[k+6], bad);
+        coef_field(where, $sformatf("tail %0d newton", t), ab + gpnae_pkg::TAIL_MAXC, 32'(cc_tail[t].newton), loaded ? img_load[k+7] : img_def[k+7], bad);
+        k += gpnae_pkg::TAIL_MAXC + 2;
+      end
+    coef_checks++;
+    if (bad > 0) begin
+      $display("  COEF IMAGE %s: %0d fields differ from the %s image", where, bad, loaded ? "loaded" : "default");
+      coef_bad++;
+    end
+  endtask
 
   // Input link: the testbench is the producer, counting the lane's credits.
   credit_link_if #(.DATA_W(DATA_WIDTH + 1), .CRW(1)) lin ();
@@ -186,7 +260,11 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
       @(negedge clk);
       rstn_i = 1;  // released between edges, so the first credits are seen with the assertions enabled
       tick();
-      if (do_load) load_image();
+      coef_check("reset", 1'b0);  // the reset default, read a cycle after reset ends
+      if (do_load) begin
+        load_image();
+        coef_check("load", 1'b1);  // read after the last write's edge
+      end
     end
   endtask
 
@@ -277,6 +355,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
             tick();
           end
           cwr = 1'b0;
+          coef_check("refused writes", do_load);  // every write refused: the memory is still the image
         end
 
         guard = 0;
@@ -616,7 +695,11 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
     tier = 2'(TIER);
     do_load = $test$plusargs("load");
     n_loads = 0;
+    $readmemh({STIM_DIR, "coef_default.mem"}, img_def);
+    if (img_def[IMG_N] !== IMG_END) $fatal(1, "coef_default.mem: not %0d fields and the end word (regression.py writes it with every run)", IMG_N);
     if (do_load) begin
+      $readmemh({STIM_DIR, "coef_loaded.mem"}, img_load);
+      if (img_load[IMG_N] !== IMG_END) $fatal(1, "coef_loaded.mem: not %0d fields and the end word (regression.py writes it with the load file)", IMG_N);
       for (int i = 0; i < LOADS; i++) loads[i] = '1;
       $readmemh({STIM_DIR, "coef_load.mem"}, loads);
       while (n_loads < LOADS && loads[n_loads][43:32] != 12'hFFF) n_loads++;
@@ -652,6 +735,8 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
     $display(" Total    : %0d", total_checked);
     $display(" Exact    : %0d", total_exact);
     total_failed += drain_bad;  // a drain point with a credit missing fails the run
+    total_failed += coef_bad;  // a coefficient image that differs fails the run
+    $display(" COEF IMAGE : checks %0d  differ %0d", coef_checks, coef_bad);
     $display(" Failed   : %0d", total_failed);
     $display(" Missing  : %0d", total_missing);
     if (FAULT == 4) $display(" LOAD REFUSED: %0d coefficient writes while the lane was busy", coef_refused);

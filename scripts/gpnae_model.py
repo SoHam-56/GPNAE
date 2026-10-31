@@ -33,6 +33,7 @@ A_DESC, DESC_STRIDE = COEF_WORDS, 16
 A_TAIL, TAIL_STRIDE = COEF_WORDS + NUM_TIERS * NUM_DESC * DESC_STRIDE, 8
 F_SET, F_EXP, F_CENTER, F_FRAC = PMAX, PMAX + 1, PMAX + 2, PMAX + 3  # descriptor field words after the PMAX bounds
 T_CTRL = TAIL_MAXC  # tail set word after its coefficients: {newton[5:4], degree[2:0]}
+IMAGE_END = 0xC0EF1A5E  # the word after Mem.contents() in an image file, so a bench can tell a short file
 
 # Element kinds, the post stage's cases (gpnae_act_in.sv's kind_o).
 K_LIN, K_MUL, K_ONE, K_PASS, K_REFL, K_SAT, K_EXP, K_TAIL = range(8)
@@ -123,6 +124,21 @@ class Mem:
             b, ts = A_TAIL + TAIL_STRIDE * t, self.tail[t]
             out += [(b + j, ts.coef[j]) for j in range(TAIL_MAXC)] + [(b + T_CTRL, ts.deg | (ts.newton << 4))]
         return out
+
+    def contents(self):
+        """The memory field by field, the order the benches' image check reads: words, per descriptor its fields, per tier its tail set."""
+        out = list(self.words)
+        for row in self.desc:
+            for d in row:
+                out += list(d.bounds) + [d.np, d.deg, d.base, d.reflect, d.exp_base, d.exp_deg, d.center, d.frac]
+        for t in self.tail:
+            out += list(t.coef) + [t.deg, t.newton]
+        return out
+
+    def write_contents(self, path):
+        """contents() as a $readmemh file, one 32-bit word a line, then the end word the benches look for."""
+        with open(path, "w") as fh:
+            fh.write("".join(f"{v & 0xFFFFFFFF:08x}\n" for v in self.contents() + [IMAGE_END]))
 
     def to_dict(self):
         return {"fmt": self.fmt, "words": list(self.words), "desc": [[dict(vars(d)) for d in row] for row in self.desc],
@@ -524,3 +540,9 @@ class LaneInt8(Lane):
 
     def element(self, q, code, par, tier=0) -> int:
         return int(self.run(np.array([q]), code, par, tier)[0])
+
+
+if __name__ == "__main__":  # gpnae_model.py contents FMT PATH: the reset default's image file, for the benches' coefficient-image check
+    if len(sys.argv) != 4 or sys.argv[1] != "contents" or sys.argv[2] not in ("fp32", "bf16", "int8"):
+        sys.exit("usage: gpnae_model.py contents fp32|bf16|int8 PATH")
+    default_mem(sys.argv[2]).write_contents(sys.argv[3])

@@ -61,6 +61,7 @@ def run_make(fmt, sim_args="", extra=""):
     """Build (once per format and EXTRA_FLAGS: Verilator skips an identical rebuild) and run TB_gpnae in fmt through make verilator; returns
     (log, seconds)."""
     t0 = time.time()
+    gm.default_mem(fmt).write_contents(os.path.join(STIM_DIR, "coef_default.mem"))  # the image the bench checks the reset default against
     cmd = ["make", "vcs" if SIM == "vcs" else "verilator", f"FMT={fmt}", f"SIM_ARGS={(os.environ.get('SIM_ARGS', '') + ' ' + sim_args).strip()}"]
     if extra:
         cmd.append(f"EXTRA_FLAGS={extra}")
@@ -80,11 +81,13 @@ def parse_log(raw, expect_total, acts):
         per[a] = dict(total=tot, exact=ex, failed=fail, missing=miss)
     short = [f"{len(per)} of {len(acts)} activations reported"] if set(per) != set(acts) else []
     short += [f"{a} checked {p['total']} of {expect_total}" for a, p in per.items() if p["total"] != expect_total]
+    cc = re.search(r"COEF IMAGE : checks (\d+)\s+differ (\d+)", raw)
+    short += [] if cc and int(cc.group(1)) > 0 else ["no coefficient-image check ran"]
     status = "NO-RESULTS" if short else ("PASS" if "RESULT: PASSED" in raw and all(p["failed"] + p["missing"] == 0 for p in per.values())
                                          else "FAIL")
     if not per and "%Error" in raw:
         status = "BUILD-ERROR"
-    return dict(status=status, per=per, short=short)
+    return dict(status=status, per=per, short=short, coef=f"COEF IMAGE: {cc.group(1)} checks, {cc.group(2)} differ" if cc else "COEF IMAGE: no check")
 
 
 # ── the true-function gate ──
@@ -366,7 +369,7 @@ def run_float(fmt, tier, x, acts, mem=None, sim_args="", tol=None, label="run", 
     parsed = parse_log(raw, x.size, acts)
     lines = [f"  {label} {fmt} tier {tier}: {x.size} inputs x {len(acts)} activations, {wall:.0f} s, TB {parsed['status']}"]
     lines += [f"    BITEXACT {a}: {p['exact']}/{p['total']} exact, {p['failed']} wrong, {p['missing']} missing" for a, p in parsed["per"].items()]
-    lines += [f"    {s}" for s in parsed["short"]]
+    lines += [f"    {s}" for s in parsed["short"]] + [f"    {parsed['coef']}"]
     ok = parsed["status"] == "PASS"
     res = {}
     for a in acts:
@@ -413,7 +416,7 @@ def run_int8(tier, mem=None, sets=None, sim_args="", tol=None, label="int8", str
     parsed = parse_log(raw, batches * MAX_SIGNALS, ALL_ACTS)
     lines = [f"  {label} int8 tier {tier}: {n_sets} sets x 256 codes x 5 activations, {wall:.0f} s, TB {parsed['status']}"]
     lines += [f"    BITEXACT {a}: {p['exact']}/{p['total']} exact, {p['failed']} wrong, {p['missing']} missing" for a, p in parsed["per"].items()]
-    lines += [f"    {s}" for s in parsed["short"]]
+    lines += [f"    {s}" for s in parsed["short"]] + [f"    {parsed['coef']}"]
     ok = parsed["status"] == "PASS"
     if stream:
         se = re.search(r"STREAM : elements (\d+)\s+exact (\d+)\s+failed (\d+)\s+missing (\d+)\s+extra (\d+)", raw)
@@ -513,6 +516,7 @@ def loaded_image(fmt):
 
 
 def write_load(mem):
+    mem.write_contents(os.path.join(STIM_DIR, "coef_loaded.mem"))  # the image the bench checks the load against
     with open(os.path.join(STIM_DIR, "coef_load.mem"), "w") as fh:
         fh.write("".join(f"{a:03x}{d & 0xFFFFFFFF:08x}\n" for a, d in mem.writes()) + "fff00000000\n")
 

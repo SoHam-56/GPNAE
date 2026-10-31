@@ -126,7 +126,7 @@ def fake_tb(fmt, words_fn):
             if "dump_got" in sim_args:
                 reg.write_words(os.path.join(reg.STIM_DIR, f"{a}_got.mem"), words_fn(a, x, e), reg.width(fmt))
             log.append(f"  RESULT {a} : total {x.size}  exact {x.size}  failed 0  missing 0")
-        return "\n".join(log + [" RESULT: PASSED"]) + "\n", 0.0
+        return "\n".join(log + [" COEF IMAGE : checks 4  differ 0", " RESULT: PASSED"]) + "\n", 0.0
     return run
 
 
@@ -252,7 +252,10 @@ def test_x_words():
         assert not ok and "tanh" not in res and "FAIL: X in output word 37 of test run bf16 tier 0 tanh" in buf.getvalue(), buf.getvalue()
     r = reg.parse_log("  RESULT tanh : total 32  exact x  failed 0  missing 0\n RESULT: PASSED\n", 32, ["tanh"])
     assert r["status"] == "FAIL" and r["short"] == ["FAIL: X in result count of test tanh ('x')"], r
-    assert reg.parse_log("  RESULT tanh : total 32  exact 32  failed 0  missing 0\n RESULT: PASSED\n", 32, ["tanh"])["status"] == "PASS"
+    ok = "  RESULT tanh : total 32  exact 32  failed 0  missing 0\n COEF IMAGE : checks 3  differ 0\n RESULT: PASSED\n"
+    assert reg.parse_log(ok, 32, ["tanh"])["status"] == "PASS"
+    assert reg.parse_log(ok.replace(" COEF IMAGE : checks 3  differ 0\n", ""), 32, ["tanh"])["status"] == "NO-RESULTS"  # the image check must have run
+    assert reg.parse_log(ok.replace("checks 3", "checks 0"), 32, ["tanh"])["status"] == "NO-RESULTS"
     import fourstate
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".mem", delete=False) as fh:

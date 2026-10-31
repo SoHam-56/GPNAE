@@ -17,4 +17,6 @@ Verilator_*/
 testbenches/stimulus/*_par.mem
 testbenches/stimulus/stream_*.mem
 testbenches/stimulus/coef_load.mem
+testbenches/stimulus/coef_default.mem
+testbenches/stimulus/coef_loaded.mem
 testbenches/stimulus/bm_*.mem
