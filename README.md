@@ -63,9 +63,9 @@ The published engine computed one input at a time. Today's lane is built for thr
 
 | Format | SELU | sigmoid | tanh |
 |---|---|---|---|
-| fp32 | 12.8 cycles · 13.5 ns | 13.8 (normal inputs) to 15.1 (uniform on [-8, 8]) · 14.5 to 15.9 ns; far 12.5 | 12.8 · 13.5 ns |
-| bf16 | 8.2 · 8.6 ns | 11.8 to 14.6 · 12.5 to 15.3 ns; far 26.6 · 28 ns (the fp32 side unit) | 8.2 · 8.6 ns |
-| int8 | 9.8 · 10.3 ns | 10.8 · 11.3 ns | 10.8 · 11.3 ns |
+| fp32 | 12.8 cycles · 13.5 ns | 10.8 (normal inputs) to 12.1 (uniform on [-8, 8]) · 11.4 to 12.7 ns; far 12.5 | 12.8 · 13.5 ns |
+| bf16 | 8.2 · 8.6 ns | 10.4 to 12.1 · 10.9 to 12.7 ns; far 22.4 · 23.6 ns (the fp32 side unit) | 8.2 · 8.6 ns |
+| int8 | 8.8 · 9.2 ns | 8.8 · 9.2 ns | 8.8 · 9.2 ns |
 
 The 5% and 10% tiers take 7 to 10.5 cycles per input in every format (bf16 sigmoid's far inputs 14 to 19, on the side unit). ReLU and linear bypass the polynomial.
 
@@ -85,13 +85,13 @@ The 5% and 10% tiers take 7 to 10.5 cycles per input in every format (bf16 sigmo
 
 An int8 output passes when it is within max(tolerance x |t|, one output step) of t, the exact value clamped to the output range; the int8 figures are the worst among outputs more than one step from t. int8 sigmoid needs its full degree at every tier, because its output step (1/256) is finer than 5%.
 
-Inputs the fit never saw give the same picture: fp32 on 1.3 M fresh random words is within 0.25%, 0.25% and 0.50%, and int8 on 256 held-out parameter sets (every zero point, scales from 2^-20 to 15.99) within 0.68% for SELU and one output step for sigmoid and tanh (make regression's held-out points).
+Inputs the fit never saw give the same picture: fp32 on 1.3 M fresh random words is within 0.25%, 0.25% and 0.50%, and int8 on 256 held-out parameter sets (every zero point, scales from 2^-20 to 15.99) within 0.67% for SELU and one output step for sigmoid and tanh (make regression's held-out points).
 
 ### Compared with other activation hardware
 
 | Design | Method | Precision | Cycles per output |
 |---|---|---|---|
-| **GPNAE today** | fitted polynomial pieces on a barrel multiply-accumulate unit | fp32 · bf16 · int8 | 12.5 to 15.1 · 8.2 to 26.6 · 9.8 to 10.8 (one lane, 1% tier) |
+| **GPNAE today** | fitted polynomial pieces on a barrel multiply-accumulate unit | fp32 · bf16 · int8 | 10.8 to 12.8 · 8.2 to 22.4 · 8.8 (one lane, 1% tier) |
 | **TYTAN, as published** | Taylor series of e^x, then reshaped | fp32 | 747 (tanh, 30 terms) |
 | NN-LUT [1] | 16-entry lookup table, piecewise linear | INT32, FP16, FP32 | 2 |
 | UNO [2] | degree 2 to 4 Taylor series on existing MAC units | 8-bit fixed point | 3 to 5 per primitive (exp, log, divide) |
