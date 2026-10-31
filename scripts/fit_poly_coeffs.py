@@ -62,12 +62,13 @@ RECORD = {
                                                                              H("3f4f", "bde3", "3bed"), H("3f2e", "bd7c", "3b27")]),
     },
     "int8": {  # centered operand: x - c (SELU) or |x| - c, fixedPointMultiplyAdd at 11 + frac
-        # SELU: [-5.25, 0] at the study's degree 4, chosen on the fit sets alone (try_int8 over S 4.75 to 6.5, rs3_b2_f1_refit2): S 4.75 misses 1%
-        # (1.195%), S 5.0 is past int8's MARGIN (0.988% against 0.97%); 5.25 measures 0.688% on the fit sets, 0.678% held out; same cycles
-        gm.SELU: dict(bounds=[10752], deg=4, center=-5376, frac=2, sets=[[1271, 1510, 1576, 1634, 1011]]),
-        "sigp": dict(bounds=[12800], deg=5, center=6400, frac=2, sets=[[1965, 322, -692, 770, -31, -373]]),
-        "sign": dict(share=True, reflect=1, bounds=[12800]),  # 1 - P on the x >= 0 set
-        gm.TANH: dict(bounds=[6144], deg=5, center=3072, frac=1, sets=[[1858, 728, -1505, 1610, 12, -867]]),
+        # F3 (activation_perf_regression.log 4): pieces of degree 3 on the same centers, 4 Horner rounds instead of 5 / 6 / 6
+        gm.SELU: dict(bounds=[5632, 10752], deg=3, center=-5376, frac=2, sets=[[1273, 1622, 725, 3337], [1271, 1498, 1259, 523]]),
+        "sigp": dict(bounds=[4608, 8704, 12800], deg=3, center=6400, frac=2, sets=[[1891, -274, -2224, -575], [1962, 332, -627, 618],
+                                                                                   [1972, 238, -278, 117]]),
+        "sign": dict(share=True, reflect=1, bounds=[4608, 8704, 12800]),  # 1 - P on the x >= 0 sets
+        gm.TANH: dict(bounds=[2048, 4096, 6144], deg=3, center=3072, frac=1, sets=[[1682, -690, -5162, -1665], [1854, 741, -1387, 1416],
+                                                                                  [1871, 563, -677, 297]]),
     },
 }
 STUDY_WORST = {"fp32": {gm.SELU: 0.249, gm.SIGMOID: 0.248, gm.TANH: 0.497}, "bf16": {gm.SELU: 0.747, gm.SIGMOID: 0.775, gm.TANH: 0.622},
