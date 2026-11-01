@@ -69,6 +69,8 @@ The published engine computed one input at a time. Today's lane is built for thr
 
 The 5% and 10% tiers take 7 to 10.5 cycles per input in every format (bf16 sigmoid's far inputs 14 to 19, on the side unit). ReLU and linear bypass the polynomial.
 
+**Inside SIENNA**, 128 lanes share a 64 × 64 result (4 096 inputs, 32 per lane). Measured on 2026-10-31 at T = 2, the activation stage takes 449 cycles per set for fp32 SELU and tanh and 429 for sigmoid, 301 and 518 in bf16, and 323 in int8 for every function: 0.47, 0.45, 0.32, 0.55 and 0.34 µs at 950 MHz. That stage, not the matrix engine, sets SIENNA's pace for these activations ([SIENNA's performance](https://github.com/SoHam-56/SIENNA#performance)).
+
 **Accuracy against the exact functions**, worst relative error over every input the regression gives each lane, at each tier:
 
 | Format | Inputs per function | Tier | SELU | sigmoid | tanh |
