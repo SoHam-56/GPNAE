@@ -8,7 +8,7 @@ Neural-network accelerators are good at multiply-accumulate and slow at non-line
 |---|---|
 | **58x fewer cycles** per activation | than the published design: 747 -> 12.8 cycles for tanh (fp32) |
 | **13.5 ns** per tanh in fp32 | 8.6 ns in bf16, 11.3 ns in int8, on one lane at 950 MHz |
-| **within 1%** of the exact functions | in every format, on every input checked (fp32 within 0.50%) |
+| **within 1%** of the exact functions | in every format, on every input checked (int8: within 1% or one output step; fp32 within 0.50%) |
 | **no lookup tables** | each function is a few polynomial pieces whose coefficients are data the host can rewrite |
 | **35.8x smaller, 1.77x lower power** | than NVDLA's activation processor in the same 45 nm process (published TYTAN core) |
 
@@ -69,7 +69,11 @@ The published engine computed one input at a time. Today's lane is built for thr
 
 The 5% and 10% tiers take 7 to 10.5 cycles per input in every format (bf16 sigmoid's far inputs 14 to 19, on the side unit). ReLU and linear bypass the polynomial.
 
-**Inside SIENNA**, 128 lanes share a 64 × 64 result (4 096 inputs, 32 per lane). Measured on 2026-10-31 at T = 2, the activation stage takes 449 cycles per set for fp32 SELU and tanh and 429 for sigmoid, 301 and 518 in bf16, and 323 in int8 for every function: 0.47, 0.45, 0.32, 0.55 and 0.34 µs at 950 MHz. That stage, not the matrix engine, sets SIENNA's pace for these activations ([SIENNA's performance](https://github.com/SoHam-56/SIENNA#performance)).
+**Inside SIENNA**, 128 lanes share a 64 × 64 result (4 096 inputs, 32 per lane). Measured on 2026-10-31 at T = 2, SIENNA takes 449 cycles per set for fp32 SELU and tanh and 429 for sigmoid, 301 and 518 in bf16, and 323 in int8 for every function: 0.47, 0.45, 0.32, 0.55 and 0.34 µs at 950 MHz. These are SIENNA's cycles per set, which the activation lanes set for these functions (a ReLU set takes 67); the lanes were not timed separately there ([SIENNA's performance](https://github.com/SoHam-56/SIENNA#performance)).
+
+**Bandwidth of one lane** (derived from the cycles above at 950 MHz): it takes one input word and returns one output word per element, so at the 1% tier it needs 4 bytes per 12.8 cycles in fp32 tanh (0.30 GB/s each way), 2 bytes per 8.2 cycles in bf16 (0.23 GB/s) and 1 byte per 8.8 cycles in int8 (0.11 GB/s). 128 lanes need 128 times that.
+
+**Coefficient memory.** 128 coefficient words plus 216 words of piece bounds, degrees and per-format settings (three tiers × four function descriptors × 16 words, and three bf16 fp32-side sets × 8): 344 writes of 32 bits for a full image, one per cycle on the load path, so a complete reload takes 344 cycles (0.36 µs at 950 MHz, derived). Changing one tier of one function rewrites only its descriptor and coefficients.
 
 **Accuracy against the exact functions**, worst relative error over every input the regression gives each lane, at each tier:
 
@@ -105,6 +109,35 @@ Lookup tables and short series take fewer cycles at reduced precision or with fe
 
 ---
 
+## Interface
+
+`gpnae` is one lane; SIENNA instantiates 32 or 128 of them. Its stream ports are *credit links* (`credit_link_if`, in ArithmeticLibrary): the receiver grants one credit per free slot, and the sender puts only while it holds one.
+
+| Port or parameter | What it is |
+|---|---|
+| `in` (credit link in) | one input word per put, with a `last` flag on a set's final element; the lane advertises its input FIFO's slots (`2**ADDR_LINES`) |
+| `out` (credit link out) | one result per put; a group of `K` elements starts only once the consumer has granted `K` credits |
+| `control_word_i` | the function: SELU, sigmoid, tanh, ReLU or linear |
+| `tier_i` | the accuracy tier: 0 within 1%, 1 within 5%, 2 within 10% |
+| `par_i` | int8 only: the input rescale and SELU's output requantize |
+| `coef_wr_i`, `coef_addr_i`, `coef_data_i` | the coefficient memory's load path, one 32-bit word per write |
+| `idle_o` | no element in the lane: a coefficient write is taken now; one sent while it is low is refused |
+| `K` (16), `TAIL_CONTEXTS` (8) | inputs the barrel multiply-add unit works on in turn; bf16 sigmoid's fp32 side-unit contexts |
+
+The format comes from the build's define, not a parameter. `scripts/gpnae_model.py` writes coefficient images in the memory's layout (`src/lane/gpnae_pkg.sv`).
+
+## Adding an activation
+
+The coefficients are data, but the functions are not: each tier has one descriptor per function (SELU, sigmoid for x ≥ 0 and x < 0, tanh), fixed in `src/lane/gpnae_pkg.sv`, and `control_word_i` selects among them. A new function therefore needs:
+1. a descriptor slot and a control code in `gpnae_pkg.sv` and the lane's function decode;
+2. its true function in `scripts/gpnae_model.py`, which every gate compares against;
+3. its pieces in `scripts/fit_poly_coeffs.py`, which fits every tier and writes the reset image (`scripts/gpnae_coef_default.json` and `src/memory/gpnae_coef_mem.sv`);
+4. its points in `regression.py`, gated like the others.
+
+Changing an existing function's accuracy or speed needs only steps 3 and 4: refit, and the regression checks the new image.
+
+---
+
 ## Getting started
 
 You need Verilator 5 with a C++20 compiler (its `--timing` mode needs coroutines), and Python 3.10 or later with NumPy.
@@ -113,10 +146,13 @@ You need Verilator 5 with a C++20 compiler (its `--timing` mode needs coroutines
 git clone --recursive https://github.com/SoHam-56/GPNAE.git
 cd GPNAE
 
-make regression                                     # every format: lint, the lane at each tier, protocol, load path, cycles, faults
-make regression FMT=bf16                            # one format
-python3 regression.py --format bf16 --run gate --tier 0   # one lane gate: every bf16 input against the true function
-make fit                                            # refit every tier; writes scripts/gpnae_coef_default.json and src/memory/gpnae_coef_mem.sv's reset contents
+make regression                         # every format: lint, the lane at each tier, protocol, load path, cycles, faults
+make regression FMT=bf16                # one format
+make regression/bf16/lane-t0            # one point: every bf16 input against the true function at the 1% tier
+make verilator FMT=bf16 TRACE=1         # one simulation with a waveform (vcs: the same on Synopsys VCS)
+make wave                               # open that waveform
+make lint                               # Verilator lint of the RTL
+make clean                              # remove the builds and logs
 ```
 
 Activate the venv in the shell that runs make: some checks call `python3` directly, and without the venv that is the system's Python, which may lack NumPy.
@@ -131,7 +167,7 @@ The published Taylor lane was removed from this tree; the last commit that build
 
 Everything here runs on any Linux machine; nothing depends on the authors' servers.
 
-**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator 5.035 built with that compiler (the version every regression runs on), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11). The released Verilator 5.052 is not supported yet: it runs SystolicMesh's regression and SIENNA's fp32 and int8 points, but stops on bf16 builds (gpnae_tail.sv), on GPNAE's lane bench (a zero-delay warning in TB_gpnae) and on the lint gates (its new warnings, and its removal of --xml-only, which check-hier reads). A Verilator configured with a g++ older than 10 omits the `-fcoroutines` its `--timing` builds need: put a `g++` wrapper that adds it first on `PATH`.
+**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator 5.035 built with that compiler (the version every regression runs on), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11). The released Verilator 5.052 is not supported yet: it runs SystolicMesh's regression and SIENNA's fp32 and int8 points, but stops on bf16 builds (gpnae_tail.sv), on GPNAE's lane bench (a zero-delay warning in TB_gpnae) and on the lint gates (its new warnings, and its removal of --xml-only, which the hierarchy check reads). A Verilator configured with a g++ older than 10 omits the `-fcoroutines` its `--timing` builds need: put a `g++` wrapper that adds it first on `PATH`.
 
 ```bash
 git clone --recursive https://github.com/SoHam-56/GPNAE.git && cd GPNAE
