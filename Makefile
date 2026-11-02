@@ -98,15 +98,21 @@ endif
 default: help
 
 help:
-	@echo "  make vcs [FMT=f]        - the same on Synopsys VCS (README: Running with VCS); SIM=vcs runs make regression on VCS"
-	@echo "  make verilator [FMT=f]  - build and run TB_gpnae (regression.py writes its stimulus; the run size and tier are SIM_ARGS)"
-	@echo "  make barrel-mac [FMT=f] - TB_barrel_mac on barrel_mac_vectors.py's groups, bit for bit"
-	@echo "  make lint [FMT=f]       - verilator --lint-only -Wall of gpnae and each of its new modules, with and without SYNTHESIS (lint_waivers.vlt: the library's and B's lane_link's own)"
-	@echo "  make check-fmt          - no RTL outside the allowlist names a precision (C4: a planted EXP_W must fail it)"
-	@echo "  make check-hier         - at each define, the lane elaborates only that precision's units"
-	@echo "  make fit                - fit_poly_coeffs.py: every tier, then the default JSON and gpnae_coef_mem.sv's tables"
-	@echo "  make clean              - remove the simulation artifacts"
-	@echo "  make regression [FMT=f] - every point (regression.py --action points), one table; make regression/<point>, make regression-summary"
+	@echo "=== GPNAE ==="
+	@echo "  FMT=fp32|bf16|int8 picks the number format (default fp32)."
+	@echo ""
+	@echo "  make regression [FMT=f]       - every point: each format's lane at every tier, the load path, protocol and cycles, one table"
+	@echo "  make regression/<point>       - one point, e.g. regression/bf16/lane-t0 (python3 regression.py --action points lists them)"
+	@echo "  make verilator [TRACE=1|fst]  - build and run TB_gpnae at FMT (TRACE writes tb_gpnae.vcd or .fst)"
+	@echo "  make vcs                      - the same on Synopsys VCS; SIM=vcs runs make regression on VCS (README: Running with VCS)"
+	@echo "  make wave                     - open the last waveform"
+	@echo "  make lint                     - Verilator lint of the RTL"
+	@echo "  make clean                    - remove the builds and logs"
+
+WAVE ?= surfer
+wave:
+	@f=$$(ls -t tb_gpnae.fst tb_gpnae.vcd 2>/dev/null | head -1); \
+	if [ -n "$$f" ]; then echo "-- Opening $$f"; $(WAVE) $$f; else echo "-- No waveform: run make verilator TRACE=1 first"; fi
 
 verilator:
 	@echo "-- Verilator simulation for GPNAE, $(FMT)"
@@ -175,7 +181,7 @@ clean:
 	-rm -rf $(VERILATOR_DIR) $(VERILATOR_DIR)_bm $(PRJ_DIR)/Verilator_hier $(PRJ_DIR)/VCS $(PRJ_DIR)/VCS_bm
 	-rm -f *.vcd *.fst
 
-.PHONY: default help verilator vcs barrel-mac lint check-fmt check-hier fit clean regression regression-summary
+.PHONY: default help wave verilator vcs barrel-mac lint check-fmt check-hier fit clean regression regression-summary
 
 # make regression: selftest, check-model and per format the barrel MAC, each tier's gate, protocol, load, cycles and the two faults.
 FORMATS  = fp32 bf16 int8
