@@ -244,6 +244,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
       tick();
     end
     cwr = 1'b0;
+    tick();  // a taken write lands at the edge after it was taken
   endtask
 
   task automatic reset_sequence();

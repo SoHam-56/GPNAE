@@ -132,7 +132,18 @@ module gpnae
   logic [COEF_ADDR_W-1:0] coef_raddr;
   logic [ACT_W-1:0] coef_rdata;
   logic             lane_idle, coef_we;  // a write lands only while the lane holds no element (set below)
-  gpnae_coef_mem COEF (.clk_i(clk_i), .rstn_i(rstn_i), .wr_i(coef_we), .waddr_i(coef_addr_i), .wdata_i(coef_data_i), .raddr_i(coef_raddr),
+  // A taken write is registered at the lane and lands a cycle later: the shared coef_* ports fan out to one register per lane, not to every table flop (timing).
+  logic                   coef_we_q;
+  logic [LOAD_ADDR_W-1:0] coef_addr_q;
+  logic [31:0]            coef_data_q;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) coef_we_q <= 1'b0;
+    else coef_we_q <= coef_we;
+  always_ff @(posedge clk_i) begin  // no reset: read only with coef_we_q
+    coef_addr_q <= coef_addr_i;
+    coef_data_q <= coef_data_i;
+  end
+  gpnae_coef_mem COEF (.clk_i(clk_i), .rstn_i(rstn_i), .wr_i(coef_we_q), .waddr_i(coef_addr_q), .wdata_i(coef_data_q), .raddr_i(coef_raddr),
                        .rdata_o(coef_rdata), .tier_i(tier_q), .desc_o(desc), .tail_o(tset));
 
   // ── per-element state ──
@@ -457,7 +468,7 @@ module gpnae
 
   // The load interlock: a group in flight reads the memory every cycle, so a write lands only while the lane holds no element.
   assign lane_idle = (gstate == G_IDLE) && (fifo_count == '0) && !tail_busy;
-  assign coef_we   = coef_wr_i && lane_idle;
+  assign coef_we   = coef_wr_i && lane_idle;  // decided now, written at the next edge
   assign idle_o    = lane_idle;
 
 `ifndef SYNTHESIS
