@@ -1,9 +1,10 @@
 `timescale 1ns / 100ps
 
 // The lane's input stage, one element per cycle: from its word and the tier's descriptors, the element's kind (the post stage's case),
-// its coefficient set (base, degree) and the barrel MAC's operand. Its outputs come ACT_IN_LATENCY = LANE_MUL_LATENCY + 1 cycles after
-// valid_i. Floats: SELU x, sigmoid |x| (fp32 beyond its pieces for x < 0: f of k = |x| log2 e, with n), tanh x^2, on one fmt_mul.
-// int8: x = rescale(q) on int16Multiplier, then the centered operand x - c (SELU) or |x| - c, with the descriptor's fraction shift.
+// its coefficient set (base, degree) and the barrel MAC's operand. Its outputs come sienna_fmt_pkg::ACT_IN_LATENCY cycles after valid_i.
+// Floats (LANE_MUL_LATENCY + 1): SELU x, sigmoid |x| (fp32 beyond its pieces for x < 0: f of k = |x| log2 e, with n), tanh x^2, on one fmt_mul.
+// int8 (LANE_MUL_LATENCY + 3): x = rescale(q) on int16Multiplier, then over three stages x rounded and saturated, the piece and kind with the
+// centered operand x - c (SELU) or |x| - c, and the coefficient base, with the descriptor's fraction shift.
 module gpnae_act_in
   import gpnae_pkg::*;
 #(
@@ -36,17 +37,19 @@ module gpnae_act_in
   localparam int FN_SELU = 0, FN_SIG = 1, FN_TANH = 2;  // int8 runs tanh in the else
   /* verilator lint_on UNUSEDPARAM */
 
-  // The piece of |x| (mag, the magnitude bits of a bound), its set, and whether |x| is past the last bound.
-  function automatic void piece_of(input logic [PMAX-1:0][ACT_W-1:0] bound, input logic [2:0] np, input logic [3:0] deg,
-                                   input logic [COEF_ADDR_W-1:0] base, input logic [ACT_W-2:0] mag, output logic [COEF_ADDR_W-1:0] b,
-                                   output logic beyond);
+  // The piece of |x| (mag, the magnitude bits of a bound): how many of the first np - 1 bounds it reaches; and whether it is past the last bound.
+  function automatic logic [2:0] piece_idx(input logic [PMAX-1:0][ACT_W-1:0] bound, input logic [2:0] np, input logic [ACT_W-2:0] mag);
     int n;
     logic [2:0] p;
     n = (np == 3'd0) ? 1 : ((int'(np) > PMAX) ? PMAX : int'(np));
     p = '0;
     for (int j = 0; j < PMAX - 1; j++) if (j < n - 1 && mag >= bound[j][ACT_W-2:0]) p = p + 3'd1;
-    beyond = mag > bound[n-1][ACT_W-2:0];
-    b      = base + COEF_ADDR_W'(int'(p) * (int'(deg) + 1));
+    return p;
+  endfunction
+  function automatic logic beyond_of(input logic [PMAX-1:0][ACT_W-1:0] bound, input logic [2:0] np, input logic [ACT_W-2:0] mag);
+    int n;
+    n = (np == 3'd0) ? 1 : ((int'(np) > PMAX) ? PMAX : int'(np));
+    return mag > bound[n-1][ACT_W-2:0];
   endfunction
 
   function automatic logic uses_p(input kind_t k);
@@ -54,7 +57,7 @@ module gpnae_act_in
   endfunction
 
 `ifdef FMT_INT8
-  // ── int8: rescale on int16Multiplier, then classify and center in one cycle ──
+  // ── int8: rescale on int16Multiplier, then round and saturate (stage A), classify and center (B), the base (C) ──
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_desc;
   assign unused_desc = ^{desc_i[0].exp_base, desc_i[0].exp_deg, desc_i[1].exp_base, desc_i[1].exp_deg, desc_i[2].exp_base,
@@ -62,8 +65,9 @@ module gpnae_act_in
   logic unused_par;
   assign unused_par = ^{par_i.selu_out_mantissa, par_i.selu_out_shift, par_i.selu_out_zero_point};
   /* verilator lint_on UNUSEDSIGNAL */
-  if (MUL_LAT != 1) begin : G_BAD_LAT
-    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, 1 cycle, not %0d", MUL_LAT);
+  if (MUL_LAT != 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 3) begin : G_BAD_LAT
+    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, 1 cycle, then three stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
+           sienna_fmt_pkg::ACT_IN_LATENCY);
   end
   logic signed [15:0] d_q;
   logic signed [31:0] r;
@@ -97,37 +101,76 @@ module gpnae_act_in
   assign neg = x[15];
   assign mag = (x == -16'sh8000) ? 15'h7FFF : 15'(neg ? -x : x);
 
+  // Stage A: x, its sign and magnitude, r's sign and low bits.
+  logic               a_v, a_neg, a_r31;
+  logic [IW-1:0]      a_idx;
+  logic [1:0]         a_fn;
+  logic signed [15:0] a_x;
+  logic [14:0]        a_mag;
+  logic [23:0]        a_aux;
+  // Stage B: the descriptor's piece, kind, degree, fraction and base, and the centered operand.
+  logic                   b_v, b_neg;
+  logic [IW-1:0]          b_idx;
+  logic [2:0]             b_p;
+  kind_t                  b_kind;
+  logic [3:0]             b_deg;
+  logic [1:0]             b_frac;
+  logic [COEF_ADDR_W-1:0] b_base;
+  logic [15:0]            b_op;
+  logic [23:0]            b_aux;
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) valid_o <= 1'b0;
-    else valid_o <= s_v;
+    if (!rstn_i) {a_v, b_v, valid_o} <= '0;
+    else {a_v, b_v, valid_o} <= {s_v, a_v, b_v};
 
   always_ff @(posedge clk_i)
     if (s_v) begin
+      a_idx <= s_idx;
+      a_fn  <= s_fn;
+      a_x   <= x;
+      a_mag <= mag;
+      a_neg <= neg;
+      a_r31 <= r[31];
+      a_aux <= r[23:0];  // |q - z_in| <= 255 and mx < 2^15 keep r below 2^23
+    end
+
+  always_ff @(posedge clk_i)
+    if (a_v) begin
       /* verilator lint_off UNUSEDSIGNAL */
-      automatic desc_t d = desc_i[(s_fn == 2'(FN_SELU)) ? D_SELU : (s_fn == 2'(FN_SIG)) ? (neg ? D_SIGN : D_SIGP) : D_TANH];
+      automatic desc_t d = desc_i[(a_fn == 2'(FN_SELU)) ? D_SELU : (a_fn == 2'(FN_SIG)) ? (a_neg ? D_SIGN : D_SIGP) : D_TANH];
       /* verilator lint_on UNUSEDSIGNAL */
-      automatic logic [COEF_ADDR_W-1:0] b;
-      automatic logic beyond;
+      automatic logic beyond = beyond_of(d.bound, d.np, a_mag);
       automatic kind_t k;
       automatic logic signed [16:0] t;
-      piece_of(d.bound, d.np, d.deg, d.base, mag, b, beyond);
-      if (s_fn == 2'(FN_SELU)) begin
-        k = !r[31] ? K_LIN : ((beyond && neg) ? K_SAT : K_MUL);  // SELU's sign is r's: an x < 0 that rounds to 0 stays negative
-        t = 17'(x) - 17'($signed(d.center));
+      if (a_fn == 2'(FN_SELU)) begin
+        k = !a_r31 ? K_LIN : ((beyond && a_neg) ? K_SAT : K_MUL);  // SELU's sign is r's: an x < 0 that rounds to 0 stays negative
+        t = 17'(a_x) - 17'($signed(d.center));
       end else begin
-        k = beyond ? K_SAT : ((s_fn == 2'(FN_SIG) && neg && d.reflect) ? K_REFL : K_PASS);
-        t = 17'({2'b00, mag}) - 17'($signed(d.center));
+        k = beyond ? K_SAT : ((a_fn == 2'(FN_SIG) && a_neg && d.reflect) ? K_REFL : K_PASS);
+        t = 17'({2'b00, a_mag}) - 17'($signed(d.center));
       end
-      idx_o   <= s_idx;
-      op_o    <= (t > 17'sd32767) ? 16'h7FFF : ((t < -17'sd32768) ? 16'h8000 : t[15:0]);
-      base_o  <= b;
-      deg_o   <= uses_p(k) ? d.deg : 4'd0;
-      frac_o  <= d.frac;
-      kind_o  <= k;
-      neg_o   <= neg;
+      b_idx  <= a_idx;
+      b_p    <= piece_idx(d.bound, d.np, a_mag);
+      b_kind <= k;
+      b_deg  <= d.deg;
+      b_frac <= d.frac;
+      b_base <= d.base;
+      b_op   <= (t > 17'sd32767) ? 16'h7FFF : ((t < -17'sd32768) ? 16'h8000 : t[15:0]);
+      b_neg  <= a_neg;
+      b_aux  <= a_aux;
+    end
+
+  always_ff @(posedge clk_i)
+    if (b_v) begin
+      idx_o   <= b_idx;
+      op_o    <= b_op;
+      base_o  <= b_base + COEF_ADDR_W'(int'(b_p) * (int'(b_deg) + 1));
+      deg_o   <= uses_p(b_kind) ? b_deg : 4'd0;
+      frac_o  <= b_frac;
+      kind_o  <= b_kind;
+      neg_o   <= b_neg;
       n_o     <= '0;
       under_o <= 1'b0;
-      aux_o   <= r[23:0];  // |q - z_in| <= 255 and mx < 2^15 keep r below 2^23
+      aux_o   <= b_aux;
     end
 
 `ifdef SYNTHESIS
@@ -163,21 +206,17 @@ module gpnae_act_in
   assign mag = word_i[ACT_W-2:0];
   assign neg = word_i[ACT_W-1] && (mag != '0);
 
-  // The element's class, at valid_i.
-  /* verilator lint_off UNUSEDSIGNAL */
-  desc_t                  c_d;  // floats leave center and frac
-  /* verilator lint_on UNUSEDSIGNAL */
-  logic [COEF_ADDR_W-1:0] c_base;
-  logic                   c_beyond;
-  kind_t                  c_kind;
-  always_comb begin
-    c_d = desc_i[(fn_i == 2'(FN_SELU)) ? D_SELU : (fn_i == 2'(FN_SIG)) ? (neg ? D_SIGN : D_SIGP) : D_TANH];
-    piece_of(c_d.bound, c_d.np, c_d.deg, c_d.base, mag, c_base, c_beyond);
-    if (fn_i == 2'(FN_SELU)) c_kind = !neg ? K_LIN : (c_beyond ? K_SAT : K_MUL);
-    else if (fn_i == 2'(FN_SIG))
-      c_kind = !neg ? (c_beyond ? K_SAT : K_PASS) : (c_beyond ? (EXP_ON_MAC ? K_EXP : K_TAIL) : (c_d.reflect ? K_REFL : K_PASS));
-    else c_kind = (mag < T_TINY[ACT_W-2:0]) ? K_ONE : (c_beyond ? K_SAT : K_MUL);
+  // The element's class takes the first three stages beside the multiply (timing): stage 0 the word and its descriptor, stage 1 its piece
+  // and kind, stage 2 its coefficient base; the multiply is at least that long in every float format.
+  if (MUL_LAT < 3) begin : G_BAD_LAT
+    $fatal(1, "gpnae_act_in: the class takes 3 stages beside the multiply, LANE_MUL_LATENCY is %0d", MUL_LAT);
   end
+  /* verilator lint_off UNUSEDSIGNAL */
+  desc_t c_d;  // stage 0: the descriptor of the function and sign; floats leave center and frac
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [2:0] c_p;  // stage 1: the piece
+  logic [3:0] c_deg;
+  always_ff @(posedge clk_i) c_d <= desc_i[(fn_i == 2'(FN_SELU)) ? D_SELU : (fn_i == 2'(FN_SIG)) ? (neg ? D_SIGN : D_SIGP) : D_TANH];
 
   // x^2 for tanh, |x| log2 e for sigmoid (fp32's exp elements take its split), nothing else.
   logic [ACT_W-1:0] sq;
@@ -203,9 +242,22 @@ module gpnae_act_in
     if (!rstn_i) p_v <= '0;
     else p_v <= {p_v[MUL_LAT-2:0], valid_i};
   always_ff @(posedge clk_i) begin
-    p_c[0] <= '{idx: idx_i, fn: fn_i, word: word_i, base: c_base, deg: c_d.deg, exp_base: c_d.exp_base, exp_deg: c_d.exp_deg,
-                kind: c_kind, neg: neg};
-    for (int i = 1; i < MUL_LAT; i++) p_c[i] <= p_c[i-1];
+    automatic logic [ACT_W-2:0] m1 = p_c[0].word[ACT_W-2:0];  // stage 1 reads stage 0's word
+    automatic logic beyond1;
+    automatic kind_t k1;
+    p_c[0] <= '{idx: idx_i, fn: fn_i, word: word_i, base: '0, deg: '0, exp_base: '0, exp_deg: '0, kind: K_PASS, neg: neg};
+    beyond1 = beyond_of(c_d.bound, c_d.np, m1);
+    if (p_c[0].fn == 2'(FN_SELU)) k1 = !p_c[0].neg ? K_LIN : (beyond1 ? K_SAT : K_MUL);
+    else if (p_c[0].fn == 2'(FN_SIG))
+      k1 = !p_c[0].neg ? (beyond1 ? K_SAT : K_PASS) : (beyond1 ? (EXP_ON_MAC ? K_EXP : K_TAIL) : (c_d.reflect ? K_REFL : K_PASS));
+    else k1 = (m1 < T_TINY[ACT_W-2:0]) ? K_ONE : (beyond1 ? K_SAT : K_MUL);
+    p_c[1] <= '{idx: p_c[0].idx, fn: p_c[0].fn, word: p_c[0].word, base: c_d.base, deg: c_d.deg, exp_base: c_d.exp_base, exp_deg: c_d.exp_deg,
+                kind: k1, neg: p_c[0].neg};
+    c_p   <= piece_idx(c_d.bound, c_d.np, m1);
+    c_deg <= c_d.deg;
+    p_c[2] <= p_c[1];
+    p_c[2].base <= p_c[1].base + COEF_ADDR_W'(int'(c_p) * (int'(c_deg) + 1));
+    for (int i = 3; i < MUL_LAT; i++) p_c[i] <= p_c[i-1];
   end
 
   logic [      7:0] sp_n;

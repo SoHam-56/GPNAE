@@ -41,7 +41,7 @@ module gpnae
   localparam int SW = $clog2(K);
   // Pop issued at cycle c -> rd_en at c+1 -> status clear visible c+2 -> data_o(t+2)=mem[rd_ptr(t)], so the word appears at c+3.
   localparam int CAP_LAG = 3;
-  localparam int ACT_IN_LAT = sienna_fmt_pkg::LANE_MUL_LATENCY + 1;  // gpnae_act_in, valid_i to valid_o
+  localparam int ACT_IN_LAT = sienna_fmt_pkg::ACT_IN_LATENCY;  // gpnae_act_in, valid_i to valid_o
   localparam int AL = sienna_fmt_pkg::LANE_ADD_LATENCY;  // gpnae_post's add path, before the second pass reads it
   localparam bit TAIL = sienna_fmt_pkg::HAS_FLOAT_TAIL;
   localparam int FN_SELU = 0, FN_SIG = 1, FN_TANH = 2;
