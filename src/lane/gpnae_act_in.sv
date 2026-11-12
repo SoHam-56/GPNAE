@@ -3,8 +3,9 @@
 // The lane's input stage, one element per cycle: from its word and the tier's descriptors, the element's kind (the post stage's case),
 // its coefficient set (base, degree) and the barrel MAC's operand. Its outputs come sienna_fmt_pkg::ACT_IN_LATENCY cycles after valid_i.
 // Floats (LANE_MUL_LATENCY + 1): SELU x, sigmoid |x| (fp32 beyond its pieces for x < 0: f of k = |x| log2 e, with n), tanh x^2, on one fmt_mul.
-// int8 (LANE_MUL_LATENCY + 3): x = rescale(q) on int16Multiplier, then over three stages x rounded and saturated, the piece and kind with the
-// centered operand x - c (SELU) or |x| - c, and the coefficient base, with the descriptor's fraction shift.
+// int8 (LANE_MUL_LATENCY + 4): x = rescale(q) on int16Multiplier, then over four stages the product rounded by the shift, x saturated with its
+// sign and magnitude, the piece and kind with the centered operand x - c (SELU) or |x| - c, and the coefficient base, with the descriptor's
+// fraction shift.
 module gpnae_act_in
   import gpnae_pkg::*;
 #(
@@ -57,7 +58,7 @@ module gpnae_act_in
   endfunction
 
 `ifdef FMT_INT8
-  // ── int8: rescale on int16Multiplier, then round and saturate (stage A), classify and center (B), the base (C) ──
+  // ── int8: rescale on int16Multiplier, then round (stage R), saturate (A), classify and center (B), the base (C) ──
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_desc;
   assign unused_desc = ^{desc_i[0].exp_base, desc_i[0].exp_deg, desc_i[1].exp_base, desc_i[1].exp_deg, desc_i[2].exp_base,
@@ -65,8 +66,8 @@ module gpnae_act_in
   logic unused_par;
   assign unused_par = ^{par_i.selu_out_mantissa, par_i.selu_out_shift, par_i.selu_out_zero_point};
   /* verilator lint_on UNUSEDSIGNAL */
-  if (MUL_LAT != 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 3) begin : G_BAD_LAT
-    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, 1 cycle, then three stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
+  if (MUL_LAT != 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 4) begin : G_BAD_LAT
+    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, 1 cycle, then four stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
            sienna_fmt_pkg::ACT_IN_LATENCY);
   end
   logic signed [15:0] d_q;
@@ -90,14 +91,29 @@ module gpnae_act_in
       s_shx <= par_i.in_rescale_shift;
     end
 
-  // x = (q - z_in) mx rounded half up by 2^shx, saturated to Q4.11.
-  logic signed [39:0] rw, xr;
+  // Stage R: r rounded half up by 2^shx (the variable shift and its round add alone: with the saturate it was the int8 lane's 1.9 ns path at 45 nm).
+  logic signed [32:0] rw, xr;  // r plus the round bit fits 33 bits
+  assign rw = 33'(r);
+  assign xr = (s_shx == 5'd0) ? rw : ((rw + (33'sd1 <<< (s_shx - 5'd1))) >>> s_shx);
+  logic               r_v, r_r31;
+  logic [IW-1:0]      r_idx;
+  logic [1:0]         r_fn;
+  logic signed [32:0] r_xr;
+  logic [23:0]        r_aux;
+  always_ff @(posedge clk_i)
+    if (s_v) begin
+      r_idx <= s_idx;
+      r_fn  <= s_fn;
+      r_xr  <= xr;
+      r_r31 <= r[31];
+      r_aux <= r[23:0];  // |q - z_in| <= 255 and mx < 2^15 keep r below 2^23
+    end
+
+  // x = the rounded product saturated to Q4.11.
   logic signed [15:0] x;
   logic        [14:0] mag;
   logic               neg;
-  assign rw  = 40'(r);
-  assign xr  = (s_shx == 5'd0) ? rw : ((rw + (40'sd1 <<< (s_shx - 5'd1))) >>> s_shx);
-  assign x   = (xr > 40'sd32767) ? 16'sh7FFF : ((xr < -40'sd32768) ? -16'sh8000 : xr[15:0]);
+  assign x   = (r_xr > 33'sd32767) ? 16'sh7FFF : ((r_xr < -33'sd32768) ? -16'sh8000 : r_xr[15:0]);
   assign neg = x[15];
   assign mag = (x == -16'sh8000) ? 15'h7FFF : 15'(neg ? -x : x);
 
@@ -119,18 +135,18 @@ module gpnae_act_in
   logic [15:0]            b_op;
   logic [23:0]            b_aux;
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) {a_v, b_v, valid_o} <= '0;
-    else {a_v, b_v, valid_o} <= {s_v, a_v, b_v};
+    if (!rstn_i) {r_v, a_v, b_v, valid_o} <= '0;
+    else {r_v, a_v, b_v, valid_o} <= {s_v, r_v, a_v, b_v};
 
   always_ff @(posedge clk_i)
-    if (s_v) begin
-      a_idx <= s_idx;
-      a_fn  <= s_fn;
+    if (r_v) begin
+      a_idx <= r_idx;
+      a_fn  <= r_fn;
       a_x   <= x;
       a_mag <= mag;
       a_neg <= neg;
-      a_r31 <= r[31];
-      a_aux <= r[23:0];  // |q - z_in| <= 255 and mx < 2^15 keep r below 2^23
+      a_r31 <= r_r31;
+      a_aux <= r_aux;
     end
 
   always_ff @(posedge clk_i)
