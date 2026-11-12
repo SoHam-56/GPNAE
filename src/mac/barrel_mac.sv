@@ -76,20 +76,26 @@ module barrel_mac #(
   assign step_valid = (state == RUN) && (slot < n_elems);
   assign iss_pad    = (max_deg - round) > sdeg[slot[SW-1:0]];
 
-  // The coefficient for the step issued LAG cycles ago, addressed at stage LAG - 1 so the memory's registered read lands at LAG.
-  logic [SW-1:0] a_slot;
-  logic [   3:0] a_round;
-  logic          a_pad, c_pad;
+  // The coefficient for the step issued LAG cycles ago, so the memory's registered read lands at LAG. The address is registered a
+  // stage earlier (the slot's base mux and the index add in one cycle with the memory's read mux was the float lanes' worst path);
+  // with a lag of 1 there is no stage for it and the address is combinational from the issue.
+  logic a_pad, c_pad;
   if (LAG == 1) begin : G_ADDR_AT_ISSUE
-    assign a_slot  = slot[SW-1:0];
-    assign a_round = round;
-    assign a_pad   = iss_pad;
-  end else begin : G_ADDR_DELAYED
-    assign a_slot  = slot_dly[LAG-2];
-    assign a_round = rnd_dly[LAG-2];
-    assign a_pad   = pad_dly[LAG-2];
+    assign coeff_addr_o = sbase[slot[SW-1:0]] + COEF_ADDR_W'(max_deg - round);
+    assign a_pad        = iss_pad;
+  end else begin : G_ADDR_REGISTERED
+    logic [SW-1:0] a_slot;
+    logic [   3:0] a_round;
+    if (LAG == 2) begin : G_FROM_ISSUE
+      assign a_slot  = slot[SW-1:0];
+      assign a_round = round;
+    end else begin : G_FROM_PIPE
+      assign a_slot  = slot_dly[LAG-3];
+      assign a_round = rnd_dly[LAG-3];
+    end
+    always_ff @(posedge clk_i) coeff_addr_o <= sbase[a_slot] + COEF_ADDR_W'(max_deg - a_round);
+    assign a_pad = pad_dly[LAG-2];
   end
-  assign coeff_addr_o = sbase[a_slot] + COEF_ADDR_W'(max_deg - a_round);
   always_ff @(posedge clk_i) c_pad <= a_pad;
   assign step_c = c_pad ? '0 : coeff_data_i;
 
