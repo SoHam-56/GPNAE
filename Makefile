@@ -153,6 +153,7 @@ else
 	@for t in $(LINT_TOPS) $(if $(filter bf16,$(FMT)),gpnae_tail); do \
 	  bash $(ARIL)/scripts/lint.sh "lint $$t $(FMT)" -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; \
 	  bash $(ARIL)/scripts/lint.sh "lint $$t $(FMT) sim" -Wall -Wno-fatal $(FMT_DEF) --top-module $$t $(PRJ_DIR)/scripts/lint_waivers.vlt $(DESIGN_FILES) || exit 1; done
+	@$(PYTHON) $(ARIL)/scripts/declared_first.py --label "gpnae $(FMT)" --top gpnae $(patsubst +define+%,-D %,$(FMT_DEF)) -D SYNTHESIS $(DESIGN_FILES)
 	@t=$$(mktemp -d); sed 's/^endmodule/  logic lint_planted;\nendmodule/' $(SRC_DIR)/lane/gpnae.sv > $$t/gpnae.sv; \
 	if verilator --lint-only -Wall -Wno-fatal -DSYNTHESIS $(FMT_DEF) --top-module gpnae $(PRJ_DIR)/scripts/lint_waivers.vlt $(filter-out $(SRC_DIR)/lane/gpnae.sv,$(DESIGN_FILES)) \
 	  $$t/gpnae.sv 2>&1 | command grep -q "UNUSEDSIGNAL.*lint_planted"; then echo "lint control OK: a warning planted in gpnae.sv shows through the waivers"; \

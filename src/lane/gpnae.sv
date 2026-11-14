@@ -41,6 +41,7 @@ module gpnae
   localparam int SW = $clog2(K);
   // Pop issued at cycle c -> rd_en at c+1 -> status clear visible c+2 -> data_o(t+2)=mem[rd_ptr(t)], so the word appears at c+3.
   localparam int CAP_LAG = 3;
+  logic [CAP_LAG-1:0] cap_v;  // the capture's lag line (declared here, before the link reads it)
   localparam int ACT_IN_LAT = sienna_fmt_pkg::ACT_IN_LATENCY;  // gpnae_act_in, valid_i to valid_o
   localparam int AL = sienna_fmt_pkg::LANE_ADD_LATENCY;  // gpnae_post's add path, before the second pass reads it
   localparam bit TAIL = sienna_fmt_pkg::HAS_FLOAT_TAIL;
@@ -159,7 +160,6 @@ module gpnae
 
   logic [SW:0] n_elems, ld_idx, rx_idx, iss_idx, emit_idx;
   logic [SW:0] pop_idx, grp_n;
-  logic [CAP_LAG-1:0] cap_v;
   logic [3:0]  drain_cnt;
   logic        cap_now;
   assign cap_now = (gstate == G_CAP) && cap_v[CAP_LAG-1];
