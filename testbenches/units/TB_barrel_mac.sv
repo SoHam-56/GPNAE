@@ -1,7 +1,8 @@
 `timescale 1ns / 100ps
 
 // barrel_mac in the build's format against barrel_mac_vectors.py (gpnae_model's Horner step), bit for bit, each slot on its own set,
-// with done and busy checks; the coefficient memory is the bench's, read registered as gpnae_coef_mem reads.
+// with done and busy checks; the coefficient memory is the bench's, read over gpnae_pkg::COEF_READ_LATENCY registered stages as
+// gpnae_coef_mem reads.
 module TB_barrel_mac;
   localparam int NG = 256;  // groups, as the vector script writes them
   localparam int K = 16;
@@ -26,7 +27,12 @@ module TB_barrel_mac;
   logic [W+15:0] slot[NG*K];  // {frac, deg, base, operand}
   logic [W-1:0] want[NG*K];
 
-  always_ff @(posedge clk) cdata <= mem[caddr];
+  logic [W-1:0] cpipe[gpnae_pkg::COEF_READ_LATENCY];
+  always_ff @(posedge clk) begin
+    cpipe[0] <= mem[caddr];
+    for (int i = 1; i < gpnae_pkg::COEF_READ_LATENCY; i++) cpipe[i] <= cpipe[i-1];
+  end
+  assign cdata = cpipe[gpnae_pkg::COEF_READ_LATENCY-1];
 
   barrel_mac #(.K(K), .COEF_ADDR_W(AW)) dut (
       .clk_i(clk), .rstn_i(rstn), .ld_valid_i(ld_valid), .ld_data_i(ld_data), .ld_base_i(ld_base), .ld_deg_i(ld_deg), .ld_frac_i(ld_frac),

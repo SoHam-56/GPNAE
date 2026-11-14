@@ -1,8 +1,9 @@
 `timescale 1ns / 100ps
 
 // One Horner step, y = c + x * acc, in the build's activation arithmetic: floats fmt_mul then fmt_add (the add's A the coefficient),
-// int8 one register then fixedPointMultiplyAdd. x_i, acc_i and frac_i are taken with valid_i; c_i is sampled HORNER_COEFFICIENT_LAG
-// cycles later; y_o and done_o come HORNER_STEP_LATENCY cycles after valid_i. A new step may start every cycle.
+// int8 one register then fixedPointMultiplyAdd, whose add stage takes the coefficient. x_i, acc_i and frac_i are taken with valid_i;
+// c_i is sampled HORNER_COEFFICIENT_LAG cycles later; y_o and done_o come HORNER_STEP_LATENCY cycles after valid_i. A new step may
+// start every cycle.
 module gpnae_horner #(
     localparam int ACT_W = sienna_fmt_pkg::ACTIVATION_DATA_WIDTH
 ) (
@@ -20,7 +21,7 @@ module gpnae_horner #(
   localparam int LOOP = sienna_fmt_pkg::HORNER_STEP_LATENCY;
 
 `ifdef FMT_INT8
-  // One register, so the coefficient arrives with the operands a cycle after valid_i, then the fixed-point multiply-add.
+  // One register, then the fixed-point multiply-add, which takes the coefficient at its add stage, two cycles after valid_i.
   logic             r_v;
   logic [ACT_W-1:0] r_x, r_acc;
   logic [      1:0] r_f;
@@ -35,8 +36,8 @@ module gpnae_horner #(
     end
   fixedPointMultiplyAdd MAC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(r_v), .a_i(r_x), .x_i(r_acc), .c_i(c_i), .frac_i(r_f),
                              .result_o(y_o), .done_o(done_o));
-  if (LAG != 1 || LOOP != 3) begin : G_BAD_LATENCY
-    $fatal(1, "gpnae_horner: int8 is a register then fixedPointMultiplyAdd's 2 cycles (lag 1, loop 3), not lag %0d loop %0d", LAG, LOOP);
+  if (LAG != 2 || LOOP != 3) begin : G_BAD_LATENCY
+    $fatal(1, "gpnae_horner: int8 is a register then fixedPointMultiplyAdd's 2 cycles with the coefficient at the second (lag 2, loop 3), not lag %0d loop %0d", LAG, LOOP);
   end
 `else
   // The product's done lines up with the coefficient: the add issues as the product lands.

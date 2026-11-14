@@ -4,8 +4,8 @@
 // processor that rotates through contexts to fill the step's pipeline. Each slot has its own coefficient set (base and degree) and,
 // in int8, its own fraction shift; a round issues one step per slot, so it costs max(n, LOOP + 1) cycles. The group runs
 // max(degree) + 1 rounds; a slot of lower degree joins at its own degree, its earlier rounds writing its accumulator back as 0, so its
-// result never depends on its group. Coefficients come from the lane's memory on coeff_addr_o, read back on coeff_data_i a cycle later.
-// No format here: the step's latency and coefficient lag are the package's.
+// result never depends on its group. Coefficients come from the lane's memory on coeff_addr_o, read back on coeff_data_i
+// gpnae_pkg::COEF_READ_LATENCY cycles later. No format here: the step's latency and coefficient lag are the package's.
 module barrel_mac #(
     parameter int  K           = 16,
     parameter int  COEF_ADDR_W = 7,
@@ -22,7 +22,7 @@ module barrel_mac #(
     input logic [            1:0] ld_frac_i,  // int8: fixedPointMultiplyAdd's extra fraction bits; floats ignore it
     input logic                   start_i,
 
-    // Coefficient memory read: the word at coeff_addr_o is on coeff_data_i the next cycle.
+    // Coefficient memory read: the word at coeff_addr_o is on coeff_data_i READ cycles later.
     output logic [COEF_ADDR_W-1:0] coeff_addr_o,
     input  logic [      ACT_W-1:0] coeff_data_i,
 
@@ -34,14 +34,15 @@ module barrel_mac #(
 );
   localparam int LOOP    = sienna_fmt_pkg::HORNER_STEP_LATENCY;  // the Horner recurrence: issue to write-back
   localparam int LAG     = sienna_fmt_pkg::HORNER_COEFFICIENT_LAG;  // the coefficient is wanted this long after the issue
+  localparam int READ    = gpnae_pkg::COEF_READ_LATENCY;  // the memory's address-to-data cycles
   localparam int MIN_PER = LOOP + 1;  // write-back lands a cycle after that
   localparam int SW      = $clog2(K);
 
   if (K < MIN_PER) begin : G_BAD_K
     $fatal(1, "barrel_mac: K %0d is below %0d, so a slot's accumulator would not be back before its next round", K, MIN_PER);
   end
-  if (LAG < 1 || LAG >= LOOP) begin : G_BAD_LAG
-    $fatal(1, "barrel_mac: the coefficient lag %0d must be 1 to %0d", LAG, LOOP - 1);
+  if (LAG < READ || LAG >= LOOP) begin : G_BAD_LAG
+    $fatal(1, "barrel_mac: the coefficient lag %0d must be %0d (the memory read) to %0d", LAG, READ, LOOP - 1);
   end
 
   logic [      ACT_W-1:0] xop  [K];  // operands, one per slot
@@ -62,7 +63,8 @@ module barrel_mac #(
   logic [  SW:0] emit_idx;
   logic [$clog2(LOOP+2):0] drain_cnt;
 
-  // Issue pipeline: slot, round and pad ride with each step, to address its coefficient at stage LAG - 1 and write back at LOOP - 1.
+  // Issue pipeline: slot, round and pad ride with each step, to address its coefficient READ cycles before stage LAG and write back at
+  // LOOP - 1.
   logic          v_dly   [LOOP];
   logic [SW-1:0] slot_dly[LOOP];
   logic [   3:0] rnd_dly [LOOP];
@@ -76,27 +78,27 @@ module barrel_mac #(
   assign step_valid = (state == RUN) && (slot < n_elems);
   assign iss_pad    = (max_deg - round) > sdeg[slot[SW-1:0]];
 
-  // The coefficient for the step issued LAG cycles ago, so the memory's registered read lands at LAG. The address is registered a
-  // stage earlier (the slot's base mux and the index add in one cycle with the memory's read mux was the float lanes' worst path);
-  // with a lag of 1 there is no stage for it and the address is combinational from the issue.
-  logic a_pad, c_pad;
-  if (LAG == 1) begin : G_ADDR_AT_ISSUE
+  // The coefficient for the step issued LAG cycles ago: the address goes out READ cycles before, at issue + LAG - READ. When that is the
+  // issue itself the address is combinational from the issue; otherwise it is registered the cycle before, from the issue when that is
+  // the cycle before, else from the issue pipeline (the slot's base mux and the index add in one cycle with the memory's read mux was
+  // the float lanes' worst path, so neither shares a cycle with the other).
+  localparam int ADDR_AT = LAG - READ;  // cycles after the issue the address is on coeff_addr_o
+  logic c_pad;
+  if (ADDR_AT == 0) begin : G_ADDR_AT_ISSUE
     assign coeff_addr_o = sbase[slot[SW-1:0]] + COEF_ADDR_W'(max_deg - round);
-    assign a_pad        = iss_pad;
   end else begin : G_ADDR_REGISTERED
     logic [SW-1:0] a_slot;
     logic [   3:0] a_round;
-    if (LAG == 2) begin : G_FROM_ISSUE
+    if (ADDR_AT == 1) begin : G_FROM_ISSUE
       assign a_slot  = slot[SW-1:0];
       assign a_round = round;
     end else begin : G_FROM_PIPE
-      assign a_slot  = slot_dly[LAG-3];
-      assign a_round = rnd_dly[LAG-3];
+      assign a_slot  = slot_dly[ADDR_AT-2];
+      assign a_round = rnd_dly[ADDR_AT-2];
     end
     always_ff @(posedge clk_i) coeff_addr_o <= sbase[a_slot] + COEF_ADDR_W'(max_deg - a_round);
-    assign a_pad = pad_dly[LAG-2];
   end
-  always_ff @(posedge clk_i) c_pad <= a_pad;
+  always_ff @(posedge clk_i) c_pad <= pad_dly[LAG-2];  // with the data, at issue + LAG
   assign step_c = c_pad ? '0 : coeff_data_i;
 
   gpnae_horner STEP (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(step_valid), .x_i(xop[slot[SW-1:0]]), .acc_i(acc[slot[SW-1:0]]),

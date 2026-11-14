@@ -2,8 +2,9 @@
 
 // The lane's coefficient memory, host-writable: COEF_WORDS coefficient words, per tier four descriptors (piece bounds, base, degree and
 // the rest as data), and in builds with the float tail its fp32 sets. Reset loads the build-time default below, the format's, fitted by
-// fit_poly_coeffs.py. A write takes 32 bits at a 9-bit word address (gpnae_pkg's map); the barrel MAC reads one word a cycle, registered;
-// the descriptors and tail set of the selected tier are combinational.
+// fit_poly_coeffs.py. A write takes 32 bits at a 9-bit word address (gpnae_pkg's map); the barrel MAC reads one word a cycle over two
+// registered stages (COEF_READ_LATENCY: the row within each bank, then the bank; one 128:1 mux of a word was the float lanes' worst
+// path); the descriptors and tail set of the selected tier are combinational.
 module gpnae_coef_mem
   import gpnae_pkg::*;
 (
@@ -15,7 +16,7 @@ module gpnae_coef_mem
     input logic [           31:0] wdata_i,
 
     input  logic [COEF_ADDR_W-1:0] raddr_i,
-    output logic [      ACT_W-1:0] rdata_o,  // the word at raddr_i, a cycle later
+    output logic [      ACT_W-1:0] rdata_o,  // the word at raddr_i, COEF_READ_LATENCY cycles later
 
     input  logic [1:0] tier_i,
     output desc_t      desc_o[NUM_DESC],  // tier_i's descriptors
@@ -83,7 +84,19 @@ module gpnae_coef_mem
     end
   end
 
-  always_ff @(posedge clk_i) rdata_o <= words[raddr_i];
+  // The read: stage 1 picks the row within every bank, stage 2 the bank.
+  localparam int BK_W = COEF_ADDR_W / 2;  // bank bits
+  localparam int RW_W = COEF_ADDR_W - BK_W;  // row bits
+  if (COEF_READ_LATENCY != 2) begin : G_BAD_READ
+    $fatal(1, "gpnae_coef_mem: the read takes 2 cycles, COEF_READ_LATENCY says %0d", COEF_READ_LATENCY);
+  end
+  logic [ACT_W-1:0] r1_word[1 << BK_W];
+  logic [ BK_W-1:0] r1_bank;
+  always_ff @(posedge clk_i) begin
+    for (int b = 0; b < (1 << BK_W); b++) r1_word[b] <= words[{b[BK_W-1:0], raddr_i[RW_W-1:0]}];
+    r1_bank <= raddr_i[COEF_ADDR_W-1:RW_W];
+    rdata_o <= r1_word[r1_bank];
+  end
 
   logic [1:0] tsel;
   assign tsel = (int'(tier_i) < NUM_TIERS) ? tier_i : 2'd0;  // tier 3 does not exist; gpnae flags it
