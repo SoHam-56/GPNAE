@@ -52,7 +52,7 @@ module gpnae_post
   localparam logic signed [15:0] ONE_Q11 = 16'sd2048;
   localparam logic signed [15:0] LAMBDA_Q14 = 16'sd17215;  // lambda in Q1.14
   localparam int RQ_LAT = sienna_fmt_pkg::REQUANT_LATENCY;
-  localparam int PM_LAT = sienna_fmt_pkg::LANE_MUL_LATENCY;
+  localparam int PM_LAT = sienna_fmt_pkg::POST_MUL_LATENCY;
   localparam int B_LAT = PM_LAT + RQ_LAT;  // after the operand register: int24Multiplier, then int8Requantizer
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_in;

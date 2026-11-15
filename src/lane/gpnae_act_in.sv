@@ -66,8 +66,8 @@ module gpnae_act_in
   logic unused_par;
   assign unused_par = ^{par_i.selu_out_mantissa, par_i.selu_out_shift, par_i.selu_out_zero_point};
   /* verilator lint_on UNUSEDSIGNAL */
-  if (MUL_LAT != 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 4) begin : G_BAD_LAT
-    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, 1 cycle, then four stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
+  if (MUL_LAT < 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 4) begin : G_BAD_LAT
+    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, LANE_MUL_LATENCY cycles, then four stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
            sienna_fmt_pkg::ACT_IN_LATENCY);
   end
   logic signed [15:0] d_q;
@@ -77,19 +77,35 @@ module gpnae_act_in
   int16Multiplier RESC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i), .a_i(d_q), .b_i(par_i.in_rescale_mantissa), .result_o(r),
                         .done_o(rm_done));
 
+  // The index, function and shift ride beside the product for its MUL_LAT cycles.
   logic          s_v;
   logic [IW-1:0] s_idx;
   logic [   1:0] s_fn;
   logic [   4:0] s_shx;
+  logic [MUL_LAT-1:0] sv_d;
+  logic [IW-1:0] idx_d[MUL_LAT];
+  logic [   1:0] fn_d[MUL_LAT];
+  logic [   4:0] shx_d[MUL_LAT];
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) s_v <= 1'b0;
-    else s_v <= valid_i;
-  always_ff @(posedge clk_i)
+    if (!rstn_i) sv_d <= '0;
+    else sv_d <= MUL_LAT'({sv_d, valid_i});
+  always_ff @(posedge clk_i) begin
     if (valid_i) begin
-      s_idx <= idx_i;
-      s_fn  <= fn_i;
-      s_shx <= par_i.in_rescale_shift;
+      idx_d[0] <= idx_i;
+      fn_d[0]  <= fn_i;
+      shx_d[0] <= par_i.in_rescale_shift;
     end
+    for (int i = 1; i < MUL_LAT; i++)
+      if (sv_d[i-1]) begin
+        idx_d[i] <= idx_d[i-1];
+        fn_d[i]  <= fn_d[i-1];
+        shx_d[i] <= shx_d[i-1];
+      end
+  end
+  assign s_v   = sv_d[MUL_LAT-1];
+  assign s_idx = idx_d[MUL_LAT-1];
+  assign s_fn  = fn_d[MUL_LAT-1];
+  assign s_shx = shx_d[MUL_LAT-1];
 
   // Stage R: r rounded half up by 2^shx (the variable shift and its round add alone: with the saturate it was the int8 lane's 1.9 ns path at 45 nm).
   logic signed [32:0] rw, xr;  // r plus the round bit fits 33 bits
@@ -196,7 +212,7 @@ module gpnae_act_in
   /* verilator lint_on UNUSEDSIGNAL */
 `else
   a_rescale_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) rm_done == s_v)
-    else $error("gpnae_act_in: a_rescale_latency: int16Multiplier is not 1 cycle");
+    else $error("gpnae_act_in: a_rescale_latency: int16Multiplier is not LANE_MUL_LATENCY = %0d cycles", MUL_LAT);
   a_mx_range: assert property (@(posedge clk_i) disable iff (!rstn_i) valid_i |-> !par_i.in_rescale_mantissa[15])
     else $error("gpnae_act_in: a_mx_range: the rescale mantissa %h is not below 2^15", par_i.in_rescale_mantissa);
 `endif

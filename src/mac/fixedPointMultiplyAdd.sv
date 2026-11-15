@@ -1,9 +1,7 @@
 `timescale 1ns / 100ps
 
-// The int8 lane's Horner step on Q4.11 words: result_o = sat16(floor(a_i * x_i / 2^(11 + frac_i)) + c_i); done_o two cycles after valid_i.
-// a_i, x_i and frac_i are taken with valid_i, c_i a cycle later, at the add stage (so a registered coefficient read lands straight on
-// the adder). ArithmeticLibrary's fxMac at FRAC = 11 + frac_i (proven equal at each), with the shift as an input; only the valid bits
-// reset (D-8).
+// Q4.11 multiply-add for the int8 Horner step: a_i * x_i over intMulPipe's two cycles, then the product shifted by 11 + frac_i, plus the
+// coefficient, saturated to 16 bits. c_i is sampled as the product lands, two cycles after valid_i. Three cycles from valid_i to done_o.
 module fixedPointMultiplyAdd #(
     localparam int DATA_WIDTH = 16
 ) (
@@ -12,40 +10,39 @@ module fixedPointMultiplyAdd #(
     input  logic                         valid_i,
     input  logic signed [DATA_WIDTH-1:0] a_i,
     input  logic signed [DATA_WIDTH-1:0] x_i,
-    input  logic signed [DATA_WIDTH-1:0] c_i,  // sampled the cycle after valid_i
+    input  logic signed [DATA_WIDTH-1:0] c_i,  // sampled two cycles after valid_i
     input  logic        [           1:0] frac_i,  // the product's fraction bits beyond Q4.11's 11
     output logic signed [DATA_WIDTH-1:0] result_o,
     output logic                         done_o
 );
   localparam int PW = 2 * DATA_WIDTH;
+  localparam int MUL_STAGES = 2;
 
-  // Stage 1: the exact product (|a x| <= 2^(2W-2)) and the shift.
-  logic                 s1_v;
-  logic signed [PW-1:0] s1_p;
-  logic [1:0]           s1_f;
+  logic                 p_v;
+  logic signed [PW-1:0] p;
+  intMulPipe #(.AW(DATA_WIDTH), .BW(DATA_WIDTH), .STAGES(MUL_STAGES)) MUL (
+      .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i), .a_i(a_i), .b_i(x_i), .result_o(p), .done_o(p_v));
 
+  // The fraction rides beside the product.
+  logic [MUL_STAGES-1:0] fv;
+  logic [1:0] f_d[MUL_STAGES];
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) s1_v <= 1'b0;
-    else s1_v <= valid_i;
+    if (!rstn_i) fv <= '0;
+    else fv <= {fv[MUL_STAGES-2:0], valid_i};
+  always_ff @(posedge clk_i) begin
+    if (valid_i) f_d[0] <= frac_i;
+    for (int i = 1; i < MUL_STAGES; i++) if (fv[i-1]) f_d[i] <= f_d[i-1];
+  end
 
-  always_ff @(posedge clk_i)
-    if (valid_i) begin
-      s1_p <= PW'(a_i) * PW'(x_i);
-      s1_f <= frac_i;
-    end
-
-  // Stage 2: the shifted product plus the coefficient (on c_i this cycle); the sum fits 2W bits, and fits W bits when its top W+1 bits
-  // agree, else it saturates.
   logic signed [PW-1:0] sum;
   logic                 fits;
-  assign sum  = (s1_p >>> (5'd11 + 5'(s1_f))) + PW'(c_i);
+  assign sum  = (p >>> (5'd11 + 5'(f_d[MUL_STAGES-1]))) + PW'(c_i);
   assign fits = (sum[PW-1:DATA_WIDTH-1] == '0) || (sum[PW-1:DATA_WIDTH-1] == '1);
 
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) done_o <= 1'b0;
-    else done_o <= s1_v;
-
+    else done_o <= p_v;
   always_ff @(posedge clk_i)
-    if (s1_v) result_o <= fits ? sum[DATA_WIDTH-1:0] : {sum[PW-1], {(DATA_WIDTH - 1) {~sum[PW-1]}}};
+    if (p_v) result_o <= fits ? sum[DATA_WIDTH-1:0] : {sum[PW-1], {(DATA_WIDTH - 1) {~sum[PW-1]}}};
 
 endmodule

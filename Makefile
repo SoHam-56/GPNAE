@@ -31,6 +31,7 @@ DESIGN_FILES = \
 	$(ARIL)/src/converters/fp32ToBf16.sv \
 	$(ARIL)/src/multipliers/int8Multiplier.sv \
 	$(ARIL)/src/adders/int32Adder.sv \
+	$(ARIL)/src/multipliers/intMulPipe.sv \
 	$(ARIL)/src/multipliers/int16Multiplier.sv \
 	$(ARIL)/src/multipliers/int24Multiplier.sv \
 	$(ARIL)/src/quantized/int8Requantizer.sv \
