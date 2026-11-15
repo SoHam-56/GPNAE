@@ -49,6 +49,23 @@ module gpnae_tail
   logic [1:0] k[C];  // Newton steps left
   logic issued[C];  // this context has an operation in a shared unit
   logic [IW-1:0] id[C];
+  // What each context wants from the shared units this cycle.
+  logic mreq[C], areq[C];
+  logic [31:0] ma[C], mb[C], aa[C], ab[C];
+  // The grants: the lowest requesting context wins each unit; the free and the finished context.
+  logic mgnt_v, agnt_v, free_v, out_v;
+  logic [CW-1:0] mgnt, agnt, free_c, out_c;
+  // The shared units' operands and results.
+  logic [31:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
+  logic mul_valid, mul_done, add_valid, add_done;
+  // k's split, on the multiplier's result.
+  logic [ 7:0] sp_n;
+  logic [31:0] sp_f;
+  logic        sp_under;
+  // In-order units: a FIFO of issuing contexts pairs each result with its owner, whatever the latency.
+  logic [CW-1:0] mq[C], aq[C];
+  logic [CW:0] mq_wr, mq_rd, aq_wr, aq_rd;
+  logic [CW-1:0] m_owner, a_owner;
 
   // E = P 2^-n by an exponent subtract: 0 where that leaves the normal range.
   /* verilator lint_off UNUSEDSIGNAL */
@@ -60,8 +77,6 @@ module gpnae_tail
   /* verilator lint_on UNUSEDSIGNAL */
 
   // What each context wants from the shared units this cycle.
-  logic mreq[C], areq[C];
-  logic [31:0] ma[C], mb[C], aa[C], ab[C];
   always_comb begin
     for (int c = 0; c < C; c++) begin
       mreq[c] = 1'b0;
@@ -88,8 +103,6 @@ module gpnae_tail
   end
 
   // The lowest requesting context wins each unit; a context asks again only after its result is back, so none starves.
-  logic mgnt_v, agnt_v, free_v, out_v;
-  logic [CW-1:0] mgnt, agnt, free_c, out_c;
   always_comb begin
     mgnt_v = 1'b0; mgnt = '0;
     agnt_v = 1'b0; agnt = '0;
@@ -104,8 +117,6 @@ module gpnae_tail
   end
   assign ready_o = free_v;
 
-  logic [31:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
-  logic mul_valid, mul_done, add_valid, add_done;
   /* verilator lint_off PINCONNECTEMPTY */
   fp32Multiplier TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
                        .overflow_o(), .underflow_o(), .invalid_o());
@@ -114,15 +125,9 @@ module gpnae_tail
   /* verilator lint_on PINCONNECTEMPTY */
 
   // k's split, on the multiplier's result.
-  logic [ 7:0] sp_n;
-  logic [31:0] sp_f;
-  logic        sp_under;
   gpnae_exp_split SPLIT (.k_i(mul_res), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
 
-  // In-order units: a FIFO of issuing contexts pairs each result with its owner, whatever the latency.
-  logic [CW-1:0] mq[C], aq[C];
-  logic [CW:0] mq_wr, mq_rd, aq_wr, aq_rd;
-  logic [CW-1:0] m_owner, a_owner;
+  // The in-order FIFOs' heads: the owner of each unit's next result.
   assign m_owner = mq[mq_rd[CW-1:0]];
   assign a_owner = aq[aq_rd[CW-1:0]];
 

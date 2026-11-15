@@ -41,19 +41,96 @@ module gpnae
   localparam int SW = $clog2(K);
   // Pop issued at cycle c -> rd_en at c+1 -> status clear visible c+2 -> data_o(t+2)=mem[rd_ptr(t)], so the word appears at c+3.
   localparam int CAP_LAG = 3;
-  logic [CAP_LAG-1:0] cap_v;  // the capture's lag line (declared here, before the link reads it)
   localparam int ACT_IN_LAT = sienna_fmt_pkg::ACT_IN_LATENCY;  // gpnae_act_in, valid_i to valid_o
   localparam int AL = sienna_fmt_pkg::LANE_ADD_LATENCY;  // gpnae_post's add path, before the second pass reads it
   localparam bit TAIL = sienna_fmt_pkg::HAS_FLOAT_TAIL;
   localparam int FN_SELU = 0, FN_SIG = 1, FN_TANH = 2;
 
-  if (ACT_IN_LAT < 2) begin : G_BAD_ACT_IN
-    $fatal(1, "gpnae: gpnae_act_in's latency %0d is below 2", ACT_IN_LAT);
-  end
+  typedef enum logic [3:0] {
+    G_IDLE,
+    G_CAP,
+    G_LDRAIN,
+    G_RUN,
+    G_RECV,
+    G_POST,
+    G_XWAIT,
+    G_POST2,
+    G_EMIT,
+    G_NEXT
+  } gstate_t;
 
+  // The group's state.
+  gstate_t gstate;
+  // The input FIFO.
   logic [DATA_WIDTH-1:0] fifo_data_o;
   logic                  fifo_rd_en;
   logic [ADDR_LINES:0]   fifo_count;
+  logic [CAP_LAG-1:0]    cap_v;  // the capture's lag line
+  // The link front end.
+  logic fifo_pop, last_pend, grp_go, out_ok, res_put;
+  logic [DATA_WIDTH-1:0] res_data;
+  logic [$clog2(OUT_MAX + 1)-1:0] out_cnt;  // output credits held, from lane_link
+  // The group's function and tier, taken as it starts.
+  logic [1:0] fn_q, tier_q;
+  logic       byp_q, relu_q;
+  logic [1:0] fn_c;
+  logic       byp_c, relu_c;
+  // The coefficient memory: its tier's descriptors and tail set, the MAC's read, the load path registered at the lane.
+  desc_t            desc[NUM_DESC];
+  tail_t            tset;
+  logic [COEF_ADDR_W-1:0] coef_raddr;
+  logic [ACT_W-1:0] coef_rdata;
+  logic             lane_idle, coef_we;  // a write lands only while the lane holds no element
+  logic                   coef_we_q;
+  logic [LOAD_ADDR_W-1:0] coef_addr_q;
+  logic [31:0]            coef_data_q;
+  // Per-element state.
+  logic [DATA_WIDTH-1:0] in_buf[K];  // the captured words
+  kind_t                 kind_buf[K];
+  logic [K-1:0]          neg_buf, under_buf;
+  logic [7:0]            n_buf[K];
+  logic [23:0]           aux_buf[K];
+  logic [ACT_W-1:0]      pol_buf[K];  // P from the MAC
+  logic [DATA_WIDTH-1:0] res_buf[K];
+  logic [K-1:0]          res_rdy;
+  logic                  has_exp;  // the group has a K_EXP element: a second post pass
+  logic [SW:0] n_elems, ld_idx, rx_idx, iss_idx, emit_idx;
+  logic [SW:0] pop_idx, grp_n;
+  logic [3:0]  drain_cnt;
+  logic        cap_now;
+  // The input stage's outputs.
+  logic                   ai_v;
+  logic [SW-1:0]          ai_idx;
+  logic [ACT_W-1:0]       ai_op;
+  logic [COEF_ADDR_W-1:0] ai_base;
+  logic [3:0]             ai_deg;
+  logic [1:0]             ai_frac;
+  kind_t                  ai_kind;
+  logic                   ai_neg, ai_under;
+  logic [7:0]             ai_n;
+  logic [23:0]            ai_aux;
+  // The barrel MAC.
+  logic             mac_start, mac_res_valid, mac_done;
+  logic [ACT_W-1:0] mac_res;
+  // The post stage.
+  logic                  post_issue, post_pass2;
+  logic                  pa_v, pb_v, pc_v;
+  logic [SW-1:0]         pa_idx, pb_idx, pc_idx;
+  logic [DATA_WIDTH-1:0] pa_data, pb_data, pc_data, byp_y;
+  logic [SW-1:0]         pi;
+  // bf16's fp32 tail: its elements, their results parked until emit.
+  logic [K-1:0]          tail_buf, tail_pend, trdy;
+  logic [DATA_WIDTH-1:0] tres_buf[K];
+  logic                  tail_start, tail_done, tail_ready, tail_busy;
+  logic [SW-1:0]         tail_idx, tail_next;
+  logic [DATA_WIDTH-1:0] tail_res;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_link;  // lane_link's own state: grp_go already holds it
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  if (ACT_IN_LAT < 2) begin : G_BAD_ACT_IN
+    $fatal(1, "gpnae: gpnae_act_in's latency %0d is below 2", ACT_IN_LAT);
+  end
 
   // A circular FIFO: credits let the producer write while the lane pops.
   lane_fifo #(
@@ -69,28 +146,8 @@ module gpnae
       .data_o (fifo_data_o)
   );
 
-  logic fifo_pop, last_pend, grp_go, out_ok, res_put;
-  logic [DATA_WIDTH-1:0] res_data;
-  logic [$clog2(OUT_MAX + 1)-1:0] out_cnt;  // output credits held, from lane_link
-  assign fifo_pop = fifo_rd_en && (fifo_count != '0);
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_link;
-  assign unused_link = last_pend ^ out_ok ^ ^out_cnt;  // lane_link's own state: grp_go already holds it
-  /* verilator lint_on UNUSEDSIGNAL */
-
-  typedef enum logic [3:0] {
-    G_IDLE,
-    G_CAP,
-    G_LDRAIN,
-    G_RUN,
-    G_RECV,
-    G_POST,
-    G_XWAIT,
-    G_POST2,
-    G_EMIT,
-    G_NEXT
-  } gstate_t;
-  gstate_t gstate;
+  assign fifo_pop    = fifo_rd_en && (fifo_count != '0);
+  assign unused_link = last_pend ^ out_ok ^ ^out_cnt;
 
   // The credit front end: input credits, the last bit, the K-credit group gate, output credits and the link checks.
   lane_link #(
@@ -119,24 +176,12 @@ module gpnae
   );
 
   // The group's function and tier, taken as it starts.
-  logic [1:0] fn_q, tier_q;
-  logic       byp_q, relu_q;
-  logic [1:0] fn_c;
-  logic       byp_c, relu_c;
   assign relu_c = (control_word_i == CONTROL_WIDTH'(3'b100));
   assign byp_c  = relu_c || (control_word_i == CONTROL_WIDTH'(3'b101));
   assign fn_c   = (control_word_i == CONTROL_WIDTH'(3'b001)) ? 2'(FN_SELU) : (control_word_i == CONTROL_WIDTH'(3'b010)) ? 2'(FN_SIG) : 2'(FN_TANH);
 
   // ── the coefficient memory ──
-  desc_t            desc[NUM_DESC];
-  tail_t            tset;
-  logic [COEF_ADDR_W-1:0] coef_raddr;
-  logic [ACT_W-1:0] coef_rdata;
-  logic             lane_idle, coef_we;  // a write lands only while the lane holds no element (set below)
   // A taken write is registered at the lane and lands a cycle later: the shared coef_* ports fan out to one register per lane, not to every table flop (timing).
-  logic                   coef_we_q;
-  logic [LOAD_ADDR_W-1:0] coef_addr_q;
-  logic [31:0]            coef_data_q;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) coef_we_q <= 1'b0;
     else coef_we_q <= coef_we;
@@ -147,42 +192,15 @@ module gpnae
   gpnae_coef_mem COEF (.clk_i(clk_i), .rstn_i(rstn_i), .wr_i(coef_we_q), .waddr_i(coef_addr_q), .wdata_i(coef_data_q), .raddr_i(coef_raddr),
                        .rdata_o(coef_rdata), .tier_i(tier_q), .desc_o(desc), .tail_o(tset));
 
-  // ── per-element state ──
-  logic [DATA_WIDTH-1:0] in_buf[K];  // the captured words
-  kind_t                 kind_buf[K];
-  logic [K-1:0]          neg_buf, under_buf;
-  logic [7:0]            n_buf[K];
-  logic [23:0]           aux_buf[K];
-  logic [ACT_W-1:0]      pol_buf[K];  // P from the MAC
-  logic [DATA_WIDTH-1:0] res_buf[K];
-  logic [K-1:0]          res_rdy;
-  logic                  has_exp;  // the group has a K_EXP element: a second post pass
-
-  logic [SW:0] n_elems, ld_idx, rx_idx, iss_idx, emit_idx;
-  logic [SW:0] pop_idx, grp_n;
-  logic [3:0]  drain_cnt;
-  logic        cap_now;
   assign cap_now = (gstate == G_CAP) && cap_v[CAP_LAG-1];
 
   // ── input stage: every non-bypass element as it is captured ──
-  logic                   ai_v;
-  logic [SW-1:0]          ai_idx;
-  logic [ACT_W-1:0]       ai_op;
-  logic [COEF_ADDR_W-1:0] ai_base;
-  logic [3:0]             ai_deg;
-  logic [1:0]             ai_frac;
-  kind_t                  ai_kind;
-  logic                   ai_neg, ai_under;
-  logic [7:0]             ai_n;
-  logic [23:0]            ai_aux;
   gpnae_act_in #(.IW(SW)) ACTIN (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(cap_now && !byp_q), .idx_i(ld_idx[SW-1:0]), .word_i(fifo_data_o),
                                  .fn_i(fn_q), .desc_i(desc), .par_i(par_i), .valid_o(ai_v), .idx_o(ai_idx), .op_o(ai_op), .base_o(ai_base),
                                  .deg_o(ai_deg), .frac_o(ai_frac), .kind_o(ai_kind), .neg_o(ai_neg), .n_o(ai_n), .under_o(ai_under),
                                  .aux_o(ai_aux));
 
   // ── the barrel MAC, loaded straight from the input stage ──
-  logic             mac_start, mac_res_valid, mac_done;
-  logic [ACT_W-1:0] mac_res;
   /* verilator lint_off PINCONNECTEMPTY */
   barrel_mac #(.K(K), .COEF_ADDR_W(COEF_ADDR_W)) barrel_mac_inst (
       .clk_i       (clk_i),
@@ -203,11 +221,6 @@ module gpnae
   /* verilator lint_on PINCONNECTEMPTY */
 
   // ── post stage ──
-  logic                  post_issue, post_pass2;
-  logic                  pa_v, pb_v, pc_v;
-  logic [SW-1:0]         pa_idx, pb_idx, pc_idx;
-  logic [DATA_WIDTH-1:0] pa_data, pb_data, pc_data, byp_y;
-  logic [SW-1:0]         pi;
   assign pi         = iss_idx[SW-1:0];
   assign post_issue = (gstate == G_POST);
   assign post_pass2 = (gstate == G_POST2) && (kind_buf[pi] == K_EXP);
@@ -218,11 +231,6 @@ module gpnae
                                       .b_v_o(pb_v), .b_idx_o(pb_idx), .b_data_o(pb_data), .c_v_o(pc_v), .c_idx_o(pc_idx), .c_data_o(pc_data));
 
   // ── bf16's fp32 tail for negative sigmoid past its Q set; its elements run beside the group, results parked until emit ──
-  logic [K-1:0]          tail_buf, tail_pend, trdy;
-  logic [DATA_WIDTH-1:0] tres_buf[K];
-  logic                  tail_start, tail_done, tail_ready, tail_busy;
-  logic [SW-1:0]         tail_idx, tail_next;
-  logic [DATA_WIDTH-1:0] tail_res;
   always_comb begin
     tail_next = '0;
     for (int ts = K - 1; ts >= 0; ts--) if (tail_pend[ts]) tail_next = SW'(ts);  // not i: bf16Adder's function loop would hide it (VARHIDDEN)
@@ -230,10 +238,10 @@ module gpnae
   assign tail_start = tail_ready && (|tail_pend);
 
   if (TAIL) begin : G_TAIL
+    logic [31:0] tail_res32;
     if (DATA_WIDTH != 16) begin : G_BAD_W
       $fatal(1, "gpnae: the fp32 tail narrows to bf16, not %0d bits", DATA_WIDTH);
     end
-    logic [31:0] tail_res32;
     gpnae_tail #(.CONTEXTS(TAIL_CONTEXTS), .IW(SW)) TAILU (
         .clk_i   (clk_i),
         .rstn_i  (rstn_i),
@@ -257,15 +265,15 @@ module gpnae
                   in_buf[tail_idx], TAILU.x_out);
 `endif
   end else begin : G_NO_TAIL
+    /* verilator lint_off UNUSEDSIGNAL */
+    tail_t unused_tset;
+    /* verilator lint_on UNUSEDSIGNAL */
     assign tail_ready = 1'b0;
     assign tail_done  = 1'b0;
     assign tail_busy  = 1'b0;
     assign tail_idx   = '0;
     assign tail_res   = '0;
-    /* verilator lint_off UNUSEDSIGNAL */
-    tail_t unused_tset;
     assign unused_tset = tset;
-    /* verilator lint_on UNUSEDSIGNAL */
   end
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -474,6 +482,9 @@ module gpnae
 `ifndef SYNTHESIS
   // No write reaches the memory while the lane holds an element. Both terms are registered.
   logic we_seen, idle_seen;
+  logic [ADDR_LINES+4:0] occ;  // elements put in, less results put out
+  logic occ_zero;  // registered: no element in the lane before this edge
+  logic start_seen;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) begin
       we_seen   <= 1'b0;
@@ -485,8 +496,6 @@ module gpnae
   a_load_idle: assert property (@(posedge clk_i) disable iff (!rstn_i) we_seen |-> idle_seen)
     else $error("gpnae: a_load_idle: a coefficient memory write landed while the lane is busy");
   // a_coef_quiet: the memory takes a write only while no element is in the lane, counted from the links apart from lane_idle.
-  logic [ADDR_LINES+4:0] occ;  // elements put in, less results put out
-  logic occ_zero;  // registered: no element in the lane before this edge
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) begin
       occ      <= '0;
@@ -498,7 +507,6 @@ module gpnae
   a_coef_quiet: assert property (@(posedge clk_i) disable iff (!rstn_i) we_seen |-> occ_zero)
     else $error("gpnae: a_coef_quiet: a coefficient memory write landed while %0d elements were in the lane", occ);
   // A group's tier is one of the three.
-  logic start_seen;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) start_seen <= 1'b0;
     else start_seen <= (gstate == G_IDLE || gstate == G_NEXT) && grp_go;

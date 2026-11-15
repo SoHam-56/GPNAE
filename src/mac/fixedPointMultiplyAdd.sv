@@ -18,14 +18,18 @@ module fixedPointMultiplyAdd #(
   localparam int PW = 2 * DATA_WIDTH;
   localparam int MUL_STAGES = 2;
 
+  // The product, and the fraction riding beside it.
   logic                 p_v;
   logic signed [PW-1:0] p;
+  logic [MUL_STAGES-1:0] fv;
+  logic [1:0] f_d[MUL_STAGES];
+  // The shifted product plus the coefficient, and whether it fits 16 bits.
+  logic signed [PW-1:0] sum;
+  logic                 fits;
+
   intMulPipe #(.AW(DATA_WIDTH), .BW(DATA_WIDTH), .STAGES(MUL_STAGES)) MUL (
       .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i), .a_i(a_i), .b_i(x_i), .result_o(p), .done_o(p_v));
 
-  // The fraction rides beside the product.
-  logic [MUL_STAGES-1:0] fv;
-  logic [1:0] f_d[MUL_STAGES];
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) fv <= '0;
     else fv <= {fv[MUL_STAGES-2:0], valid_i};
@@ -34,8 +38,6 @@ module fixedPointMultiplyAdd #(
     for (int i = 1; i < MUL_STAGES; i++) if (fv[i-1]) f_d[i] <= f_d[i-1];
   end
 
-  logic signed [PW-1:0] sum;
-  logic                 fits;
   assign sum  = (p >>> (5'd11 + 5'(f_d[MUL_STAGES-1]))) + PW'(c_i);
   assign fits = (sum[PW-1:DATA_WIDTH-1] == '0) || (sum[PW-1:DATA_WIDTH-1] == '1);
 

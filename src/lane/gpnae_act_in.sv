@@ -59,24 +59,10 @@ module gpnae_act_in
 
 `ifdef FMT_INT8
   // ── int8: rescale on int16Multiplier, then round (stage R), saturate (A), classify and center (B), the base (C) ──
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_desc;
-  assign unused_desc = ^{desc_i[0].exp_base, desc_i[0].exp_deg, desc_i[1].exp_base, desc_i[1].exp_deg, desc_i[2].exp_base,
-                         desc_i[2].exp_deg, desc_i[3].exp_base, desc_i[3].exp_deg, desc_i[0].reflect, desc_i[1].reflect, desc_i[3].reflect};
-  logic unused_par;
-  assign unused_par = ^{par_i.selu_out_mantissa, par_i.selu_out_shift, par_i.selu_out_zero_point};
-  /* verilator lint_on UNUSEDSIGNAL */
-  if (MUL_LAT < 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 4) begin : G_BAD_LAT
-    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, LANE_MUL_LATENCY cycles, then four stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
-           sienna_fmt_pkg::ACT_IN_LATENCY);
-  end
+  // The rescale: q - z_in, its product r.
   logic signed [15:0] d_q;
   logic signed [31:0] r;
   logic               rm_done;
-  assign d_q = 16'($signed(word_i)) - 16'($signed(par_i.in_zero_point));  // q - z_in
-  int16Multiplier RESC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i), .a_i(d_q), .b_i(par_i.in_rescale_mantissa), .result_o(r),
-                        .done_o(rm_done));
-
   // The index, function and shift ride beside the product for its MUL_LAT cycles.
   logic          s_v;
   logic [IW-1:0] s_idx;
@@ -86,6 +72,56 @@ module gpnae_act_in
   logic [IW-1:0] idx_d[MUL_LAT];
   logic [   1:0] fn_d[MUL_LAT];
   logic [   4:0] shx_d[MUL_LAT];
+  // Stage R: r rounded half up by 2^shx.
+  logic signed [32:0] rw, xr;  // r plus the round bit fits 33 bits
+  logic               r_v, r_r31;
+  logic [IW-1:0]      r_idx;
+  logic [1:0]         r_fn;
+  logic signed [32:0] r_xr;
+  logic [23:0]        r_aux;
+  // x = the rounded product saturated to Q4.11, its sign and magnitude.
+  logic signed [15:0] x;
+  logic        [14:0] mag;
+  logic               neg;
+  // Stage A: x, its sign and magnitude, r's sign and low bits.
+  logic               a_v, a_neg, a_r31;
+  logic [IW-1:0]      a_idx;
+  logic [1:0]         a_fn;
+  logic signed [15:0] a_x;
+  logic [14:0]        a_mag;
+  logic [23:0]        a_aux;
+  // Stage B: the descriptor's piece, kind, degree, fraction and base, and the centered operand.
+  logic                   b_v, b_neg;
+  logic [IW-1:0]          b_idx;
+  logic [2:0]             b_p;
+  kind_t                  b_kind;
+  logic [3:0]             b_deg;
+  logic [1:0]             b_frac;
+  logic [COEF_ADDR_W-1:0] b_base;
+  logic [15:0]            b_op;
+  logic [23:0]            b_aux;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_desc;
+  logic unused_par;
+`ifdef SYNTHESIS
+  logic unused_done;  // rm_done is checked in simulation only
+`endif
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  if (MUL_LAT < 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 4) begin : G_BAD_LAT
+    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, LANE_MUL_LATENCY cycles, then four stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
+           sienna_fmt_pkg::ACT_IN_LATENCY);
+  end
+
+  assign unused_desc = ^{desc_i[0].exp_base, desc_i[0].exp_deg, desc_i[1].exp_base, desc_i[1].exp_deg, desc_i[2].exp_base,
+                         desc_i[2].exp_deg, desc_i[3].exp_base, desc_i[3].exp_deg, desc_i[0].reflect, desc_i[1].reflect, desc_i[3].reflect};
+  assign unused_par = ^{par_i.selu_out_mantissa, par_i.selu_out_shift, par_i.selu_out_zero_point};
+
+  assign d_q = 16'($signed(word_i)) - 16'($signed(par_i.in_zero_point));  // q - z_in
+  int16Multiplier RESC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i), .a_i(d_q), .b_i(par_i.in_rescale_mantissa), .result_o(r),
+                        .done_o(rm_done));
+
+  // The index, function and shift ride beside the product for its MUL_LAT cycles.
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) sv_d <= '0;
     else sv_d <= MUL_LAT'({sv_d, valid_i});
@@ -108,14 +144,8 @@ module gpnae_act_in
   assign s_shx = shx_d[MUL_LAT-1];
 
   // Stage R: r rounded half up by 2^shx (the variable shift and its round add alone: with the saturate it was the int8 lane's 1.9 ns path at 45 nm).
-  logic signed [32:0] rw, xr;  // r plus the round bit fits 33 bits
   assign rw = 33'(r);
   assign xr = (s_shx == 5'd0) ? rw : ((rw + (33'sd1 <<< (s_shx - 5'd1))) >>> s_shx);
-  logic               r_v, r_r31;
-  logic [IW-1:0]      r_idx;
-  logic [1:0]         r_fn;
-  logic signed [32:0] r_xr;
-  logic [23:0]        r_aux;
   always_ff @(posedge clk_i)
     if (s_v) begin
       r_idx <= s_idx;
@@ -126,34 +156,15 @@ module gpnae_act_in
     end
 
   // x = the rounded product saturated to Q4.11.
-  logic signed [15:0] x;
-  logic        [14:0] mag;
-  logic               neg;
   assign x   = (r_xr > 33'sd32767) ? 16'sh7FFF : ((r_xr < -33'sd32768) ? -16'sh8000 : r_xr[15:0]);
   assign neg = x[15];
   assign mag = (x == -16'sh8000) ? 15'h7FFF : 15'(neg ? -x : x);
 
-  // Stage A: x, its sign and magnitude, r's sign and low bits.
-  logic               a_v, a_neg, a_r31;
-  logic [IW-1:0]      a_idx;
-  logic [1:0]         a_fn;
-  logic signed [15:0] a_x;
-  logic [14:0]        a_mag;
-  logic [23:0]        a_aux;
-  // Stage B: the descriptor's piece, kind, degree, fraction and base, and the centered operand.
-  logic                   b_v, b_neg;
-  logic [IW-1:0]          b_idx;
-  logic [2:0]             b_p;
-  kind_t                  b_kind;
-  logic [3:0]             b_deg;
-  logic [1:0]             b_frac;
-  logic [COEF_ADDR_W-1:0] b_base;
-  logic [15:0]            b_op;
-  logic [23:0]            b_aux;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) {r_v, a_v, b_v, valid_o} <= '0;
     else {r_v, a_v, b_v, valid_o} <= {s_v, r_v, a_v, b_v};
 
+  // Stage A: x, its sign and magnitude, r's sign and low bits.
   always_ff @(posedge clk_i)
     if (r_v) begin
       a_idx <= r_idx;
@@ -165,6 +176,7 @@ module gpnae_act_in
       a_aux <= r_aux;
     end
 
+  // Stage B: the descriptor's piece, kind, degree, fraction and base, and the centered operand.
   always_ff @(posedge clk_i)
     if (a_v) begin
       /* verilator lint_off UNUSEDSIGNAL */
@@ -191,6 +203,7 @@ module gpnae_act_in
       b_aux  <= a_aux;
     end
 
+  // Stage C: the base.
   always_ff @(posedge clk_i)
     if (b_v) begin
       idx_o   <= b_idx;
@@ -206,10 +219,7 @@ module gpnae_act_in
     end
 
 `ifdef SYNTHESIS
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_done;
-  assign unused_done = rm_done;  // checked below in simulation only
-  /* verilator lint_on UNUSEDSIGNAL */
+  assign unused_done = rm_done;
 `else
   a_rescale_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) rm_done == s_v)
     else $error("gpnae_act_in: a_rescale_latency: int16Multiplier is not LANE_MUL_LATENCY = %0d cycles", MUL_LAT);
@@ -227,36 +237,8 @@ module gpnae_act_in
   localparam logic [ACT_W-1:0] LOG2E = 32'h3FB8AA3B;
 `endif
   localparam bit EXP_ON_MAC = !sienna_fmt_pkg::HAS_FLOAT_TAIL;  // fp32: beyond its pieces, negative sigmoid is 2^-n P(f) on the MAC
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_in;
-  assign unused_in = ^{par_i, desc_i[0].center, desc_i[0].frac, desc_i[1].center, desc_i[1].frac, desc_i[2].center, desc_i[2].frac,
-                       desc_i[3].center, desc_i[3].frac};
-  /* verilator lint_on UNUSEDSIGNAL */
 
-  logic [ACT_W-2:0] mag;
-  logic             neg;
-  assign mag = word_i[ACT_W-2:0];
-  assign neg = word_i[ACT_W-1] && (mag != '0);
-
-  // The element's class takes the first three stages beside the multiply (timing): stage 0 the word and its descriptor, stage 1 its piece
-  // and kind, stage 2 its coefficient base; the multiply is at least that long in every float format.
-  if (MUL_LAT < 3) begin : G_BAD_LAT
-    $fatal(1, "gpnae_act_in: the class takes 3 stages beside the multiply, LANE_MUL_LATENCY is %0d", MUL_LAT);
-  end
-  /* verilator lint_off UNUSEDSIGNAL */
-  desc_t c_d;  // stage 0: the descriptor of the function and sign; floats leave center and frac
-  /* verilator lint_on UNUSEDSIGNAL */
-  logic [2:0] c_p;  // stage 1: the piece
-  logic [3:0] c_deg;
-  always_ff @(posedge clk_i) c_d <= desc_i[(fn_i == 2'(FN_SELU)) ? D_SELU : (fn_i == 2'(FN_SIG)) ? (neg ? D_SIGN : D_SIGP) : D_TANH];
-
-  // x^2 for tanh, |x| log2 e for sigmoid (fp32's exp elements take its split), nothing else.
-  logic [ACT_W-1:0] sq;
-  logic             sq_done;
-  fmt_mul #(.DATA_WIDTH(ACT_W), .EXT_DATA_WIDTH(ACT_W)) SQ (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i && fn_i != 2'(FN_SELU)),
-      .a_i(fn_i == 2'(FN_TANH) ? word_i : {1'b0, mag}), .b_i(fn_i == 2'(FN_TANH) ? word_i : LOG2E), .product_o(sq), .done_o(sq_done));
-
-  // The class rides beside the multiply.
+  // The class that rides beside the multiply.
   typedef struct packed {
     logic [IW-1:0]          idx;
     logic [1:0]             fn;
@@ -268,8 +250,53 @@ module gpnae_act_in
     kind_t                  kind;
     logic                   neg;
   } cls_t;
+
+  // The word's magnitude and sign.
+  logic [ACT_W-2:0] mag;
+  logic             neg;
+  // The class over the first three stages: the descriptor, then the piece and degree.
+  /* verilator lint_off UNUSEDSIGNAL */
+  desc_t c_d;  // stage 0: the descriptor of the function and sign; floats leave center and frac
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [2:0] c_p;  // stage 1: the piece
+  logic [3:0] c_deg;
+  // x^2 for tanh, |x| log2 e for sigmoid.
+  logic [ACT_W-1:0] sq;
+  logic             sq_done;
+  // The class beside the multiply, and the one that leaves.
   logic [MUL_LAT-1:0] p_v;
   cls_t               p_c[MUL_LAT];
+  cls_t               l;
+  // k's split, fp32's negative sigmoid beyond its pieces.
+  logic [      7:0] sp_n;
+  logic [ACT_W-1:0] sp_f;
+  logic             sp_under;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_in;
+`ifdef SYNTHESIS
+  logic unused_done;  // sq_done is checked in simulation only
+`endif
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  // The element's class takes the first three stages beside the multiply (timing): stage 0 the word and its descriptor, stage 1 its piece
+  // and kind, stage 2 its coefficient base; the multiply is at least that long in every float format.
+  if (MUL_LAT < 3) begin : G_BAD_LAT
+    $fatal(1, "gpnae_act_in: the class takes 3 stages beside the multiply, LANE_MUL_LATENCY is %0d", MUL_LAT);
+  end
+
+  assign unused_in = ^{par_i, desc_i[0].center, desc_i[0].frac, desc_i[1].center, desc_i[1].frac, desc_i[2].center, desc_i[2].frac,
+                       desc_i[3].center, desc_i[3].frac};
+
+  assign mag = word_i[ACT_W-2:0];
+  assign neg = word_i[ACT_W-1] && (mag != '0);
+
+  always_ff @(posedge clk_i) c_d <= desc_i[(fn_i == 2'(FN_SELU)) ? D_SELU : (fn_i == 2'(FN_SIG)) ? (neg ? D_SIGN : D_SIGP) : D_TANH];
+
+  // x^2 for tanh, |x| log2 e for sigmoid (fp32's exp elements take its split), nothing else.
+  fmt_mul #(.DATA_WIDTH(ACT_W), .EXT_DATA_WIDTH(ACT_W)) SQ (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i && fn_i != 2'(FN_SELU)),
+      .a_i(fn_i == 2'(FN_TANH) ? word_i : {1'b0, mag}), .b_i(fn_i == 2'(FN_TANH) ? word_i : LOG2E), .product_o(sq), .done_o(sq_done));
+
+  // The class rides beside the multiply.
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) p_v <= '0;
     else p_v <= {p_v[MUL_LAT-2:0], valid_i};
@@ -292,9 +319,6 @@ module gpnae_act_in
     for (int i = 3; i < MUL_LAT; i++) p_c[i] <= p_c[i-1];
   end
 
-  logic [      7:0] sp_n;
-  logic [ACT_W-1:0] sp_f;
-  logic             sp_under;
   if (EXP_ON_MAC) begin : G_SPLIT
     if (ACT_W != 32) begin : G_BAD_W
       $fatal(1, "gpnae_act_in: the exp split is fp32, not %0d bits", ACT_W);
@@ -306,7 +330,6 @@ module gpnae_act_in
     assign sp_under = 1'b0;
   end
 
-  cls_t l;
   assign l = p_c[MUL_LAT-1];
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) valid_o <= 1'b0;
@@ -327,10 +350,7 @@ module gpnae_act_in
     end
 
 `ifdef SYNTHESIS
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_done;
-  assign unused_done = sq_done;  // checked below in simulation only
-  /* verilator lint_on UNUSEDSIGNAL */
+  assign unused_done = sq_done;
 `else
   a_square_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) (p_v[MUL_LAT-1] && l.fn != 2'(FN_SELU)) == sq_done)
     else $error("gpnae_act_in: a_square_latency: the operand multiplier is not LANE_MUL_LATENCY = %0d cycles", MUL_LAT);

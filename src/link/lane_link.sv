@@ -27,6 +27,13 @@ module lane_link #(
     output logic                           last_pend_o,   // a last put waits for its group to start
     output logic [$clog2(OUT_MAX + 1)-1:0] out_cnt_o
 );
+  localparam int OCW = $clog2(OUT_MAX + 1);
+
+  // Input link: freed slots not yet credited, the credit, a last put waiting for its group.
+  logic [ADDR_LINES:0] in_owed;
+  logic in_cr, last_pend;
+  // Output link: the credits held.
+  logic [OCW-1:0] out_cnt;
 
   if (OUT_MAX < K) begin : G_BAD_OUT_MAX
     $fatal(1, "lane_link: OUT_MAX %0d is below K %0d, so no group could start", OUT_MAX, K);
@@ -39,14 +46,10 @@ module lane_link #(
 `endif
 
   // Input link: one credit per free FIFO slot, 2**ADDR_LINES after reset, then one per pop, at most one a cycle.
-  logic [ADDR_LINES:0] in_owed;  // freed slots not yet credited
-  logic in_cr, last_pend;
   assign in.credit   = in_cr;
   assign last_pend_o = last_pend;
 
   // Output link: a group of up to K starts only with K credits, so nothing in flight waits on the consumer mid-group.
-  localparam int OCW = $clog2(OUT_MAX + 1);
-  logic [OCW-1:0] out_cnt;
   credit_counter #(.MAX(OUT_MAX), .CRW(OUT_CRW)) out_cc (.clk_i(clk_i), .rstn_i(rstn_i), .put_i(res_put_i), .credit_i(out.credit),
                                                         .has_credit_o(), .count_o(out_cnt));
   assign out_cnt_o = out_cnt;

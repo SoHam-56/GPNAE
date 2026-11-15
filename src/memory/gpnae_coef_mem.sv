@@ -35,6 +35,26 @@ module gpnae_coef_mem
 `endif
   // ── end of the generated reset default ──
 
+  localparam int FA_W = $clog2(N_FIELDS + 1);  // a field word's index
+  localparam int BK_W = COEF_ADDR_W / 2;  // the read's bank bits
+  localparam int RW_W = COEF_ADDR_W - BK_W;  // its row bits
+
+  // The tables.
+  logic [ACT_W-1:0] words[COEF_WORDS];
+  desc_t            desc [NUM_TIERS][NUM_DESC];
+  // Which field a write hits.
+  logic             w_coef, w_desc, w_tail;
+  logic [      3:0] w_di;  // tier * NUM_DESC + descriptor
+  logic [      3:0] w_j;
+  logic [      1:0] w_t;
+  logic [      2:0] w_tj;
+  logic [ FA_W-1:0] fa;
+  // The read: stage 1 the row within every bank, stage 2 the bank.
+  logic [ACT_W-1:0] r1_word[1 << BK_W];
+  logic [ BK_W-1:0] r1_bank;
+  // The selected tier.
+  logic [1:0] tsel;
+
   if ($bits(DEF_WORDS) != COEF_WORDS * ACT_W || $bits(DEF_FIELDS) != N_FIELDS * 32) begin : G_BAD_DEFAULT
     $fatal(1, "gpnae_coef_mem: the default tables are %0d and %0d bits, the layout needs %0d and %0d", $bits(DEF_WORDS), $bits(DEF_FIELDS),
            COEF_WORDS * ACT_W, N_FIELDS * 32);
@@ -52,17 +72,6 @@ module gpnae_coef_mem
     return r;
   endfunction
 
-  logic [ACT_W-1:0] words[COEF_WORDS];
-  desc_t            desc [NUM_TIERS][NUM_DESC];
-
-  // Which field a write hits.
-  logic             w_coef, w_desc, w_tail;
-  logic [      3:0] w_di;  // tier * NUM_DESC + descriptor
-  logic [      3:0] w_j;
-  logic [      1:0] w_t;
-  logic [      2:0] w_tj;
-  localparam int FA_W = $clog2(N_FIELDS + 1);
-  logic [FA_W-1:0] fa;
   assign fa     = FA_W'(waddr_i - LOAD_ADDR_W'(A_DESC));
   assign w_coef = wr_i && (int'(waddr_i) < A_DESC);
   assign w_desc = wr_i && (int'(waddr_i) >= A_DESC) && (int'(waddr_i) < A_TAIL);
@@ -85,20 +94,15 @@ module gpnae_coef_mem
   end
 
   // The read: stage 1 picks the row within every bank, stage 2 the bank.
-  localparam int BK_W = COEF_ADDR_W / 2;  // bank bits
-  localparam int RW_W = COEF_ADDR_W - BK_W;  // row bits
   if (COEF_READ_LATENCY != 2) begin : G_BAD_READ
     $fatal(1, "gpnae_coef_mem: the read takes 2 cycles, COEF_READ_LATENCY says %0d", COEF_READ_LATENCY);
   end
-  logic [ACT_W-1:0] r1_word[1 << BK_W];
-  logic [ BK_W-1:0] r1_bank;
   always_ff @(posedge clk_i) begin
     for (int b = 0; b < (1 << BK_W); b++) r1_word[b] <= words[{b[BK_W-1:0], raddr_i[RW_W-1:0]}];
     r1_bank <= raddr_i[COEF_ADDR_W-1:RW_W];
     rdata_o <= r1_word[r1_bank];
   end
 
-  logic [1:0] tsel;
   assign tsel = (int'(tier_i) < NUM_TIERS) ? tier_i : 2'd0;  // tier 3 does not exist; gpnae flags it
   always_comb for (int d = 0; d < NUM_DESC; d++) desc_o[d] = desc[tsel][d];
 

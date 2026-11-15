@@ -37,6 +37,41 @@ module barrel_mac #(
   localparam int READ    = gpnae_pkg::COEF_READ_LATENCY;  // the memory's address-to-data cycles
   localparam int MIN_PER = LOOP + 1;  // write-back lands a cycle after that
   localparam int SW      = $clog2(K);
+  localparam int ADDR_AT = LAG - READ;  // cycles after the issue the address is on coeff_addr_o
+
+  typedef enum logic [1:0] {LOAD, RUN, DRAIN, EMIT} state_t;
+
+  // The slots.
+  logic [      ACT_W-1:0] xop  [K];  // operands, one per slot
+  logic [      ACT_W-1:0] acc  [K];  // accumulators, one per slot
+  logic [COEF_ADDR_W-1:0] sbase[K];
+  logic [            3:0] sdeg [K];
+  logic [            1:0] sfrac[K];
+  // The group.
+  logic [SW:0] n_elems;  // how many slots this group uses
+  logic [ 3:0] max_deg;  // the group's highest degree: it runs max_deg + 1 rounds
+  state_t state;
+  logic [SW:0]   slot;  // slot being issued this cycle
+  logic [SW+1:0] period;  // max(n_elems, LOOP + 1): a round never shortens below the recurrence
+  logic [   3:0] round;  // 0 .. max_deg; round r reads c_(max_deg - r)
+  logic [  SW:0] emit_idx;
+  logic [$clog2(LOOP+2):0] drain_cnt;
+  // Issue pipeline: slot, round and pad ride with each step, to address its coefficient READ cycles before stage LAG and write back at
+  // LOOP - 1.
+  logic          v_dly   [LOOP];
+  logic [SW-1:0] slot_dly[LOOP];
+  logic [   3:0] rnd_dly [LOOP];
+  logic          pad_dly [LOOP];  // the step is a round before the slot's own degree: its result is replaced by 0
+  // The step: its issue, pad, coefficient and result.
+  logic             step_valid, step_done;
+  logic [ACT_W-1:0] step_y, step_c;
+  logic             iss_pad;  // the issuing round's index is above the slot's degree
+  logic             c_pad;  // the coefficient's step is a pad, with the data at issue + LAG
+`ifdef SYNTHESIS
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_done;  // step_done is checked in simulation only
+  /* verilator lint_on UNUSEDSIGNAL */
+`endif
 
   if (K < MIN_PER) begin : G_BAD_K
     $fatal(1, "barrel_mac: K %0d is below %0d, so a slot's accumulator would not be back before its next round", K, MIN_PER);
@@ -45,36 +80,7 @@ module barrel_mac #(
     $fatal(1, "barrel_mac: the coefficient lag %0d must be %0d (the memory read) to %0d", LAG, READ, LOOP - 1);
   end
 
-  logic [      ACT_W-1:0] xop  [K];  // operands, one per slot
-  logic [      ACT_W-1:0] acc  [K];  // accumulators, one per slot
-  logic [COEF_ADDR_W-1:0] sbase[K];
-  logic [            3:0] sdeg [K];
-  logic [            1:0] sfrac[K];
-
-  logic [SW:0] n_elems;  // how many slots this group uses
-  logic [ 3:0] max_deg;  // the group's highest degree: it runs max_deg + 1 rounds
-
-  typedef enum logic [1:0] {LOAD, RUN, DRAIN, EMIT} state_t;
-  state_t state;
-
-  logic [SW:0]   slot;  // slot being issued this cycle
-  logic [SW+1:0] period;  // max(n_elems, LOOP + 1): a round never shortens below the recurrence
-  logic [   3:0] round;  // 0 .. max_deg; round r reads c_(max_deg - r)
-  logic [  SW:0] emit_idx;
-  logic [$clog2(LOOP+2):0] drain_cnt;
-
-  // Issue pipeline: slot, round and pad ride with each step, to address its coefficient READ cycles before stage LAG and write back at
-  // LOOP - 1.
-  logic          v_dly   [LOOP];
-  logic [SW-1:0] slot_dly[LOOP];
-  logic [   3:0] rnd_dly [LOOP];
-  logic          pad_dly [LOOP];  // the step is a round before the slot's own degree: its result is replaced by 0
-
-  logic             step_valid, step_done;
-  logic [ACT_W-1:0] step_y, step_c;
-
   // The issuing slot's coefficient index is max_deg - round; a round whose index is above the slot's degree is a pad.
-  logic iss_pad;
   assign step_valid = (state == RUN) && (slot < n_elems);
   assign iss_pad    = (max_deg - round) > sdeg[slot[SW-1:0]];
 
@@ -82,8 +88,6 @@ module barrel_mac #(
   // issue itself the address is combinational from the issue; otherwise it is registered the cycle before, from the issue when that is
   // the cycle before, else from the issue pipeline (the slot's base mux and the index add in one cycle with the memory's read mux was
   // the float lanes' worst path, so neither shares a cycle with the other).
-  localparam int ADDR_AT = LAG - READ;  // cycles after the issue the address is on coeff_addr_o
-  logic c_pad;
   if (ADDR_AT == 0) begin : G_ADDR_AT_ISSUE
     assign coeff_addr_o = sbase[slot[SW-1:0]] + COEF_ADDR_W'(max_deg - round);
   end else begin : G_ADDR_REGISTERED
@@ -207,10 +211,7 @@ module barrel_mac #(
   end
 
 `ifdef SYNTHESIS
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_done;
-  assign unused_done = step_done;  // checked below in simulation only
-  /* verilator lint_on UNUSEDSIGNAL */
+  assign unused_done = step_done;
 `else
   // The step's done is the write-back's valid: a step whose result landed on another cycle would pair it with the wrong slot.
   a_step_pairs: assert property (@(posedge clk_i) disable iff (!rstn_i) step_done == v_dly[LOOP-1])

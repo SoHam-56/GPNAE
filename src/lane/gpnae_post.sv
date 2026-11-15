@@ -54,12 +54,6 @@ module gpnae_post
   localparam int RQ_LAT = sienna_fmt_pkg::REQUANT_LATENCY;
   localparam int PM_LAT = sienna_fmt_pkg::POST_MUL_LATENCY;
   localparam int B_LAT = PM_LAT + RQ_LAT;  // after the operand register: int24Multiplier, then int8Requantizer
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_in;
-  assign unused_in = ^{pass2_i, n_i, under_i, x_i, par_i.in_rescale_mantissa, K};
-  /* verilator lint_on UNUSEDSIGNAL */
-
-  assign byp_y_o = byp_relu_i ? sienna_fmt_pkg::fmt_relu(byp_x_i, par_i.in_zero_point) : byp_x_i;  // ReLU: max(q, z_in)
 
   // sigmoid: round(256 y) - 128 = ((y + 4) >> 3) - 128 for y in Q4.11, clamped to int8.
   function automatic logic [7:0] quant_sig(input logic signed [16:0] y);
@@ -80,7 +74,29 @@ module gpnae_post
     return (m > 17'sd127) ? 8'h7F : m[7:0];
   endfunction
 
+  // A: P as a signed 17-bit value.
   logic signed [16:0] pe;
+  // B: SELU's product operands, the product, the requantize, and the tags riding beside them.
+  logic [23:0] pm_a, pm_b;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [47:0] pm;  // rq_acc takes [38:7] or [35:4]
+  logic unused_in;
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic        pm_v, pm_done, rq_done;
+  logic [31:0] rq_acc;
+  logic [ 7:0] rq_res;
+  logic [B_LAT:0] t_v;
+  logic [IW-1:0]  t_idx[B_LAT+1];
+  logic [PM_LAT:0] t_lin;
+`ifdef SYNTHESIS
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_done;  // rq_done is checked in simulation only
+  /* verilator lint_on UNUSEDSIGNAL */
+`endif
+
+  assign unused_in = ^{pass2_i, n_i, under_i, x_i, par_i.in_rescale_mantissa, K};
+  assign byp_y_o = byp_relu_i ? sienna_fmt_pkg::fmt_relu(byp_x_i, par_i.in_zero_point) : byp_x_i;  // ReLU: max(q, z_in)
+
   assign pe = 17'($signed(p_i));
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) a_v_o <= 1'b0;
@@ -93,16 +109,6 @@ module gpnae_post
     end
 
   // SELU: r lambda (x >= 0), r P, or -lambda*alpha 2^shx 1.0 past the last bound; then the output requantize.
-  logic [23:0] pm_a, pm_b;
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic [47:0] pm;  // rq_acc takes [38:7] or [35:4]
-  /* verilator lint_on UNUSEDSIGNAL */
-  logic        pm_v, pm_done, rq_done;
-  logic [31:0] rq_acc;
-  logic [ 7:0] rq_res;
-  logic [B_LAT:0] t_v;
-  logic [IW-1:0]  t_idx[B_LAT+1];
-  logic [PM_LAT:0] t_lin;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) begin
       pm_v <= 1'b0;
@@ -134,10 +140,7 @@ module gpnae_post
   assign c_data_o = '0;
 
 `ifdef SYNTHESIS
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_done;
-  assign unused_done = rq_done;  // checked below in simulation only
-  /* verilator lint_on UNUSEDSIGNAL */
+  assign unused_done = rq_done;
 `else
   a_selu_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) (pm_done == t_v[PM_LAT]) && (rq_done == t_v[B_LAT]))
     else $error("gpnae_post: a_selu_latency: int24Multiplier is not %0d cycles or int8Requantizer not %0d", PM_LAT, RQ_LAT);
@@ -160,16 +163,35 @@ module gpnae_post
   localparam int AL = sienna_fmt_pkg::LANE_ADD_LATENCY;
   localparam logic [ACT_W-1:0] S = {1'b1, {(ACT_W - 1) {1'b0}}};
   localparam int SW = $clog2(K);
+
+  // E = P 2^-n.
+  logic [ACT_W-1:0] e;
+  logic signed [9:0] ep;
+  // B: the multiply's operands, result, valid, and the tags riding beside it; d_buf holds fp32's 1 - E for the second pass.
+  logic [ACT_W-1:0] d_buf[K];
+  logic [ACT_W-1:0] m_a, m_b, m_y;
+  logic             m_v, m_done;
+  logic [ML:0]      mt_v;
+  logic [IW-1:0]    mt_idx[ML+1];
+  logic             m_go;
+  // C: the add's operands, result, valid, and the tags beside it.
+  logic [ACT_W-1:0] d_a, d_b, d_y;
+  logic             d_v, d_done, d_go;
+  logic [AL:0]      dt_v, dt_keep;  // dt_keep: the result is 1 - E for the second pass, not an output
+  logic [IW-1:0]    dt_idx[AL+1];
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_in;
-  assign unused_in = ^{aux_i, par_i, neg_i};
   /* verilator lint_on UNUSEDSIGNAL */
+`ifdef SYNTHESIS
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic unused_done;  // m_done and d_done are checked in simulation only
+  /* verilator lint_on UNUSEDSIGNAL */
+`endif
 
+  assign unused_in = ^{aux_i, par_i, neg_i};
   assign byp_y_o = byp_relu_i ? sienna_fmt_pkg::fmt_relu(byp_x_i, '0) : byp_x_i;  // ReLU: +0 for a negative word
 
   // E = P 2^-n by an exponent subtract (P > 0): 0 below the normal range or under.
-  logic [ACT_W-1:0] e;
-  logic signed [9:0] ep;
   assign ep = 10'(p_i[ACT_W-2-:8]) - 10'(n_i);
   assign e  = (under_i || ep <= 10'sd0) ? '0 : {1'b0, ep[7:0], p_i[ACT_W-10:0]};
 
@@ -184,12 +206,6 @@ module gpnae_post
     end
 
   // B: one multiply per issue, a cycle after it; the second pass multiplies E by the 1 - E its first pass left in d_buf.
-  logic [ACT_W-1:0] d_buf[K];
-  logic [ACT_W-1:0] m_a, m_b, m_y;
-  logic             m_v, m_done;
-  logic [ML:0]      mt_v;
-  logic [IW-1:0]    mt_idx[ML+1];
-  logic             m_go;
   assign m_go = (issue_i && (kind_i == K_LIN || kind_i == K_MUL || kind_i == K_ONE)) || pass2_i;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) begin
@@ -214,10 +230,6 @@ module gpnae_post
   assign b_data_o = m_y;
 
   // C: one add per issue, a cycle after it: P - 1 with the sign flipped (1 - P), or fp32's 1 - E into d_buf.
-  logic [ACT_W-1:0] d_a, d_b, d_y;
-  logic             d_v, d_done, d_go;
-  logic [AL:0]      dt_v, dt_keep;  // dt_keep: the result is 1 - E for the second pass, not an output
-  logic [IW-1:0]    dt_idx[AL+1];
   assign d_go = issue_i && (kind_i == K_REFL || kind_i == K_EXP);
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) begin
@@ -244,10 +256,7 @@ module gpnae_post
   assign c_data_o = d_y ^ S;  // -(P - 1)
 
 `ifdef SYNTHESIS
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic unused_done;
-  assign unused_done = m_done ^ d_done;  // checked below in simulation only
-  /* verilator lint_on UNUSEDSIGNAL */
+  assign unused_done = m_done ^ d_done;
 `else
   a_post_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) (m_done == mt_v[ML]) && (d_done == dt_v[AL]))
     else $error("gpnae_post: a_post_latency: the post multiply is not %0d cycles after its operands or the add not %0d", ML, AL);
