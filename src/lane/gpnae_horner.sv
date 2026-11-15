@@ -21,7 +21,7 @@ module gpnae_horner #(
   localparam int LOOP = sienna_fmt_pkg::HORNER_STEP_LATENCY;
 
 `ifdef FMT_INT8
-  // One register, then the fixed-point multiply-add, which takes the coefficient at its add stage, two cycles after valid_i.
+  // One register, then the fixed-point multiply-add, which takes the coefficient at its add stage, three cycles after valid_i.
   logic             r_v;
   logic [ACT_W-1:0] r_x, r_acc;
   logic [      1:0] r_f;
@@ -36,8 +36,8 @@ module gpnae_horner #(
     end
   fixedPointMultiplyAdd MAC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(r_v), .a_i(r_x), .x_i(r_acc), .c_i(c_i), .frac_i(r_f),
                              .result_o(y_o), .done_o(done_o));
-  if (LAG != 3 || LOOP != 4) begin : G_BAD_LATENCY
-    $fatal(1, "gpnae_horner: int8 is a register then fixedPointMultiplyAdd's 3 cycles with the coefficient at the third (lag 3, loop 4), not lag %0d loop %0d", LAG, LOOP);
+  if (LAG != 4 || LOOP != 5) begin : G_BAD_LATENCY
+    $fatal(1, "gpnae_horner: int8 is a register then fixedPointMultiplyAdd's 4 cycles with the coefficient at the fourth (lag 4, loop 5), not lag %0d loop %0d", LAG, LOOP);
   end
 `else
   // The product's done lines up with the coefficient: the add issues as the product lands.

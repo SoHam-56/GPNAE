@@ -2,8 +2,8 @@
 
 // The lane's input stage, one element per cycle: from its word and the tier's descriptors, the element's kind (the post stage's case),
 // its coefficient set (base, degree) and the barrel MAC's operand. Its outputs come sienna_fmt_pkg::ACT_IN_LATENCY cycles after valid_i.
-// Floats (LANE_MUL_LATENCY + 1): SELU x, sigmoid |x| (fp32 beyond its pieces for x < 0: f of k = |x| log2 e, with n), tanh x^2, on one fmt_mul.
-// int8 (LANE_MUL_LATENCY + 4): x = rescale(q) on int16Multiplier, then over four stages the product rounded by the shift, x saturated with its
+// Floats (LANE_MUL_LATENCY + 2): SELU x, sigmoid |x| (fp32 beyond its pieces for x < 0: f of k = |x| log2 e, with n), tanh x^2, on one fmt_mul.
+// int8 (LANE_MUL_LATENCY + 5): x = rescale(q) on int16Multiplier, then over four stages the product rounded by the shift, x saturated with its
 // sign and magnitude, the piece and kind with the centered operand x - c (SELU) or |x| - c, and the coefficient base, with the descriptor's
 // fraction shift.
 module gpnae_act_in
@@ -83,6 +83,14 @@ module gpnae_act_in
   logic signed [15:0] x;
   logic        [14:0] mag;
   logic               neg;
+  // Stage Q: q - z_in and the rescale words registered ahead of the multiply (the subtract into the multiplier's first tree stage was the
+  // int8 lane's input path).
+  logic               q_v;
+  logic signed [15:0] q_d;
+  logic        [15:0] q_mx;
+  logic [IW-1:0]      q_idx;
+  logic [1:0]         q_fn;
+  logic [4:0]         q_shx;
   // Stage A: x, its sign and magnitude, r's sign and low bits.
   logic               a_v, a_neg, a_r31;
   logic [IW-1:0]      a_idx;
@@ -108,8 +116,8 @@ module gpnae_act_in
 `endif
   /* verilator lint_on UNUSEDSIGNAL */
 
-  if (MUL_LAT < 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 4) begin : G_BAD_LAT
-    $fatal(1, "gpnae_act_in: int8's rescale is int16Multiplier, LANE_MUL_LATENCY cycles, then four stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
+  if (MUL_LAT < 1 || sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 5) begin : G_BAD_LAT
+    $fatal(1, "gpnae_act_in: int8's rescale is a register, int16Multiplier's LANE_MUL_LATENCY cycles, then four stages; LANE_MUL_LATENCY %0d, ACT_IN_LATENCY %0d", MUL_LAT,
            sienna_fmt_pkg::ACT_IN_LATENCY);
   end
 
@@ -118,18 +126,28 @@ module gpnae_act_in
   assign unused_par = ^{par_i.selu_out_mantissa, par_i.selu_out_shift, par_i.selu_out_zero_point};
 
   assign d_q = 16'($signed(word_i)) - 16'($signed(par_i.in_zero_point));  // q - z_in
-  int16Multiplier RESC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i), .a_i(d_q), .b_i(par_i.in_rescale_mantissa), .result_o(r),
-                        .done_o(rm_done));
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) q_v <= 1'b0;
+    else q_v <= valid_i;
+  always_ff @(posedge clk_i)
+    if (valid_i) begin
+      q_d   <= d_q;
+      q_mx  <= par_i.in_rescale_mantissa;
+      q_idx <= idx_i;
+      q_fn  <= fn_i;
+      q_shx <= par_i.in_rescale_shift;
+    end
+  int16Multiplier RESC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(q_v), .a_i(q_d), .b_i(q_mx), .result_o(r), .done_o(rm_done));
 
   // The index, function and shift ride beside the product for its MUL_LAT cycles.
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) sv_d <= '0;
-    else sv_d <= MUL_LAT'({sv_d, valid_i});
+    else sv_d <= MUL_LAT'({sv_d, q_v});
   always_ff @(posedge clk_i) begin
-    if (valid_i) begin
-      idx_d[0] <= idx_i;
-      fn_d[0]  <= fn_i;
-      shx_d[0] <= par_i.in_rescale_shift;
+    if (q_v) begin
+      idx_d[0] <= q_idx;
+      fn_d[0]  <= q_fn;
+      shx_d[0] <= q_shx;
     end
     for (int i = 1; i < MUL_LAT; i++)
       if (sv_d[i-1]) begin
@@ -260,13 +278,14 @@ module gpnae_act_in
   /* verilator lint_on UNUSEDSIGNAL */
   logic [2:0] c_p;  // stage 1: the piece
   logic [3:0] c_deg;
-  // x^2 for tanh, |x| log2 e for sigmoid.
-  logic [ACT_W-1:0] sq;
+  // x^2 for tanh, |x| log2 e for sigmoid; registered once more before the split and the operand mux (that mux after the split was the
+  // fp32 lane's path).
+  logic [ACT_W-1:0] sq, sq_q;
   logic             sq_done;
-  // The class beside the multiply, and the one that leaves.
-  logic [MUL_LAT-1:0] p_v;
-  cls_t               p_c[MUL_LAT];
-  cls_t               l;
+  // The class beside the multiply and its register, and the one that leaves.
+  logic [MUL_LAT:0] p_v;
+  cls_t             p_c[MUL_LAT+1];
+  cls_t             l;
   // k's split, fp32's negative sigmoid beyond its pieces.
   logic [      7:0] sp_n;
   logic [ACT_W-1:0] sp_f;
@@ -299,7 +318,9 @@ module gpnae_act_in
   // The class rides beside the multiply.
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) p_v <= '0;
-    else p_v <= {p_v[MUL_LAT-2:0], valid_i};
+    else p_v <= {p_v[MUL_LAT-1:0], valid_i};
+  always_ff @(posedge clk_i)
+    if (p_v[MUL_LAT-1]) sq_q <= sq;
   always_ff @(posedge clk_i) begin
     automatic logic [ACT_W-2:0] m1 = p_c[0].word[ACT_W-2:0];  // stage 1 reads stage 0's word
     automatic logic beyond1;
@@ -316,29 +337,29 @@ module gpnae_act_in
     c_deg <= c_d.deg;
     p_c[2] <= p_c[1];
     p_c[2].base <= p_c[1].base + COEF_ADDR_W'(int'(c_p) * (int'(c_deg) + 1));
-    for (int i = 3; i < MUL_LAT; i++) p_c[i] <= p_c[i-1];
+    for (int i = 3; i <= MUL_LAT; i++) p_c[i] <= p_c[i-1];
   end
 
   if (EXP_ON_MAC) begin : G_SPLIT
     if (ACT_W != 32) begin : G_BAD_W
       $fatal(1, "gpnae_act_in: the exp split is fp32, not %0d bits", ACT_W);
     end
-    gpnae_exp_split SPLIT (.k_i(32'(sq)), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
+    gpnae_exp_split SPLIT (.k_i(32'(sq_q)), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
   end else begin : G_NO_SPLIT
     assign sp_n = '0;
     assign sp_f = '0;
     assign sp_under = 1'b0;
   end
 
-  assign l = p_c[MUL_LAT-1];
+  assign l = p_c[MUL_LAT];
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) valid_o <= 1'b0;
-    else valid_o <= p_v[MUL_LAT-1];
+    else valid_o <= p_v[MUL_LAT];
   always_ff @(posedge clk_i)
-    if (p_v[MUL_LAT-1]) begin
+    if (p_v[MUL_LAT]) begin
       automatic logic ex = (l.kind == K_EXP);
       idx_o   <= l.idx;
-      op_o    <= (l.fn == 2'(FN_TANH)) ? sq : (ex ? sp_f : ((l.fn == 2'(FN_SIG)) ? {1'b0, l.word[ACT_W-2:0]} : l.word));
+      op_o    <= (l.fn == 2'(FN_TANH)) ? sq_q : (ex ? sp_f : ((l.fn == 2'(FN_SIG)) ? {1'b0, l.word[ACT_W-2:0]} : l.word));
       base_o  <= ex ? l.exp_base : l.base;
       deg_o   <= uses_p(l.kind) ? (ex ? l.exp_deg : l.deg) : 4'd0;
       frac_o  <= '0;
@@ -352,7 +373,7 @@ module gpnae_act_in
 `ifdef SYNTHESIS
   assign unused_done = sq_done;
 `else
-  a_square_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) (p_v[MUL_LAT-1] && l.fn != 2'(FN_SELU)) == sq_done)
+  a_square_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) (p_v[MUL_LAT-1] && p_c[MUL_LAT-1].fn != 2'(FN_SELU)) == sq_done)
     else $error("gpnae_act_in: a_square_latency: the operand multiplier is not LANE_MUL_LATENCY = %0d cycles", MUL_LAT);
 `endif
 `endif

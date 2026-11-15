@@ -74,7 +74,12 @@ module gpnae_post
     return (m > 17'sd127) ? 8'h7F : m[7:0];
   endfunction
 
-  // A: P as a signed 17-bit value.
+  // A: the issue's operand and class registered, P as a signed 17-bit value.
+  logic              pa_v, pa_neg;
+  logic [IW-1:0]     pa_idx;
+  kind_t             pa_kind;
+  logic [1:0]        pa_fn;
+  logic [ACT_W-1:0]  pa_p;
   logic signed [16:0] pe;
   // B: SELU's product operands, the product, the requantize, and the tags riding beside them.
   logic [23:0] pm_a, pm_b;
@@ -97,15 +102,24 @@ module gpnae_post
   assign unused_in = ^{pass2_i, n_i, under_i, x_i, par_i.in_rescale_mantissa, K};
   assign byp_y_o = byp_relu_i ? sienna_fmt_pkg::fmt_relu(byp_x_i, par_i.in_zero_point) : byp_x_i;  // ReLU: max(q, z_in)
 
-  assign pe = 17'($signed(p_i));
+  // A: the issue's operand and class registered (the P buffer's read mux into the quantize was the lane's path), then the quantize.
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) a_v_o <= 1'b0;
-    else a_v_o <= issue_i && fn_i != 2'(FN_SELU);
+    if (!rstn_i) {pa_v, a_v_o} <= '0;
+    else {pa_v, a_v_o} <= {issue_i && fn_i != 2'(FN_SELU), pa_v};
   always_ff @(posedge clk_i)
     if (issue_i) begin
-      a_idx_o  <= idx_i;
-      a_data_o <= (kind_i == K_SAT) ? (neg_i ? 8'h80 : 8'h7F)
-                : (fn_i == 2'(FN_SIG)) ? quant_sig((kind_i == K_REFL) ? (17'sd2048 - pe) : pe) : quant_tanh(p_i, neg_i);
+      pa_idx  <= idx_i;
+      pa_kind <= kind_i;
+      pa_neg  <= neg_i;
+      pa_fn   <= fn_i;
+      pa_p    <= p_i;
+    end
+  assign pe = 17'($signed(pa_p));
+  always_ff @(posedge clk_i)
+    if (pa_v) begin
+      a_idx_o  <= pa_idx;
+      a_data_o <= (pa_kind == K_SAT) ? (pa_neg ? 8'h80 : 8'h7F)
+                : (pa_fn == 2'(FN_SIG)) ? quant_sig((pa_kind == K_REFL) ? (17'sd2048 - pe) : pe) : quant_tanh(pa_p, pa_neg);
     end
 
   // SELU: r lambda (x >= 0), r P, or -lambda*alpha 2^shx 1.0 past the last bound; then the output requantize.

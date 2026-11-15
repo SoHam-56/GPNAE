@@ -1,7 +1,8 @@
 `timescale 1ns / 100ps
 
-// Q4.11 multiply-add for the int8 Horner step: a_i * x_i over intMulPipe's two cycles, then the product shifted by 11 + frac_i, plus the
-// coefficient, saturated to 16 bits. c_i is sampled as the product lands, two cycles after valid_i. Three cycles from valid_i to done_o.
+// Q4.11 multiply-add for the int8 Horner step: a_i * x_i over intMulPipe's three cycles (the 16-row carry-save tree registered halfway,
+// as int16Multiplier), then the product shifted by 11 + frac_i, plus the coefficient, saturated to 16 bits. c_i is sampled as the product
+// lands, three cycles after valid_i. Four cycles from valid_i to done_o.
 module fixedPointMultiplyAdd #(
     localparam int DATA_WIDTH = 16
 ) (
@@ -10,13 +11,13 @@ module fixedPointMultiplyAdd #(
     input  logic                         valid_i,
     input  logic signed [DATA_WIDTH-1:0] a_i,
     input  logic signed [DATA_WIDTH-1:0] x_i,
-    input  logic signed [DATA_WIDTH-1:0] c_i,  // sampled two cycles after valid_i
+    input  logic signed [DATA_WIDTH-1:0] c_i,  // sampled three cycles after valid_i
     input  logic        [           1:0] frac_i,  // the product's fraction bits beyond Q4.11's 11
     output logic signed [DATA_WIDTH-1:0] result_o,
     output logic                         done_o
 );
   localparam int PW = 2 * DATA_WIDTH;
-  localparam int MUL_STAGES = 2;
+  localparam int MUL_STAGES = 3;
 
   // The product, and the fraction riding beside it.
   logic                 p_v;
