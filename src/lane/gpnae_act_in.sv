@@ -98,6 +98,7 @@ module gpnae_act_in
   logic signed [15:0] a_x;
   logic [14:0]        a_mag;
   logic [23:0]        a_aux;
+  desc_t              a_d;  // the function's descriptor by the sign, registered (the tier select into the bound compares was 1.24 ns at 45 nm)
   // Stage B: the descriptor's piece, kind, degree, fraction and base, and the centered operand.
   logic                   b_v, b_neg;
   logic [IW-1:0]          b_idx;
@@ -192,13 +193,14 @@ module gpnae_act_in
       a_neg <= neg;
       a_r31 <= r_r31;
       a_aux <= r_aux;
+      a_d   <= desc_i[(r_fn == 2'(FN_SELU)) ? D_SELU : (r_fn == 2'(FN_SIG)) ? (neg ? D_SIGN : D_SIGP) : D_TANH];
     end
 
   // Stage B: the descriptor's piece, kind, degree, fraction and base, and the centered operand.
   always_ff @(posedge clk_i)
     if (a_v) begin
       /* verilator lint_off UNUSEDSIGNAL */
-      automatic desc_t d = desc_i[(a_fn == 2'(FN_SELU)) ? D_SELU : (a_fn == 2'(FN_SIG)) ? (a_neg ? D_SIGN : D_SIGP) : D_TANH];
+      automatic desc_t d = a_d;
       /* verilator lint_on UNUSEDSIGNAL */
       automatic logic beyond = beyond_of(d.bound, d.np, a_mag);
       automatic kind_t k;
@@ -255,6 +257,7 @@ module gpnae_act_in
   localparam logic [ACT_W-1:0] LOG2E = 32'h3FB8AA3B;
 `endif
   localparam bit EXP_ON_MAC = !sienna_fmt_pkg::HAS_FLOAT_TAIL;  // fp32: beyond its pieces, negative sigmoid is 2^-n P(f) on the MAC
+  localparam int SPLIT_LAT = EXP_ON_MAC ? 1 : 0;  // one more stage for the split's second register (its two shifts and priority find were 1.27 ns at 45 nm)
 
   // The class that rides beside the multiply.
   typedef struct packed {
@@ -280,11 +283,11 @@ module gpnae_act_in
   logic [3:0] c_deg;
   // x^2 for tanh, |x| log2 e for sigmoid; registered once more before the split and the operand mux (that mux after the split was the
   // fp32 lane's path).
-  logic [ACT_W-1:0] sq, sq_q;
+  logic [ACT_W-1:0] sq, sq_q, sq_op;  // the square, registered, and as the output mux reads it (a cycle later with the split)
   logic             sq_done;
   // The class beside the multiply and its register, and the one that leaves.
-  logic [MUL_LAT:0] p_v;
-  cls_t             p_c[MUL_LAT+1];
+  logic [MUL_LAT+SPLIT_LAT:0] p_v;
+  cls_t             p_c[MUL_LAT+SPLIT_LAT+1];
   cls_t             l;
   // k's split, fp32's negative sigmoid beyond its pieces.
   logic [      7:0] sp_n;
@@ -302,6 +305,9 @@ module gpnae_act_in
   if (MUL_LAT < 3) begin : G_BAD_LAT
     $fatal(1, "gpnae_act_in: the class takes 3 stages beside the multiply, LANE_MUL_LATENCY is %0d", MUL_LAT);
   end
+  if (sienna_fmt_pkg::ACT_IN_LATENCY != MUL_LAT + 2 + SPLIT_LAT) begin : G_BAD_ACT_LAT
+    $fatal(1, "gpnae_act_in: the float path is LANE_MUL_LATENCY + 2 + %0d, not ACT_IN_LATENCY %0d", SPLIT_LAT, sienna_fmt_pkg::ACT_IN_LATENCY);
+  end
 
   assign unused_in = ^{par_i, desc_i[0].center, desc_i[0].frac, desc_i[1].center, desc_i[1].frac, desc_i[2].center, desc_i[2].frac,
                        desc_i[3].center, desc_i[3].frac};
@@ -318,7 +324,7 @@ module gpnae_act_in
   // The class rides beside the multiply.
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) p_v <= '0;
-    else p_v <= {p_v[MUL_LAT-1:0], valid_i};
+    else p_v <= {p_v[MUL_LAT+SPLIT_LAT-1:0], valid_i};
   always_ff @(posedge clk_i)
     if (p_v[MUL_LAT-1]) sq_q <= sq;
   always_ff @(posedge clk_i) begin
@@ -337,29 +343,34 @@ module gpnae_act_in
     c_deg <= c_d.deg;
     p_c[2] <= p_c[1];
     p_c[2].base <= p_c[1].base + COEF_ADDR_W'(int'(c_p) * (int'(c_deg) + 1));
-    for (int i = 3; i <= MUL_LAT; i++) p_c[i] <= p_c[i-1];
+    for (int i = 3; i <= MUL_LAT + SPLIT_LAT; i++) p_c[i] <= p_c[i-1];
   end
 
   if (EXP_ON_MAC) begin : G_SPLIT
     if (ACT_W != 32) begin : G_BAD_W
       $fatal(1, "gpnae_act_in: the exp split is fp32, not %0d bits", ACT_W);
     end
-    gpnae_exp_split SPLIT (.k_i(32'(sq_q)), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
+    logic [ACT_W-1:0] sq_qq;  // the square held a cycle more, as the split's second stage lands
+    gpnae_exp_split SPLIT (.clk_i(clk_i), .k_i(32'(sq)), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));  // from the multiplier's register: lands at p_v[MUL_LAT+1]
+    always_ff @(posedge clk_i)
+      if (p_v[MUL_LAT]) sq_qq <= sq_q;
+    assign sq_op = sq_qq;
   end else begin : G_NO_SPLIT
     assign sp_n = '0;
     assign sp_f = '0;
     assign sp_under = 1'b0;
+    assign sq_op = sq_q;
   end
 
-  assign l = p_c[MUL_LAT];
+  assign l = p_c[MUL_LAT+SPLIT_LAT];
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) valid_o <= 1'b0;
-    else valid_o <= p_v[MUL_LAT];
+    else valid_o <= p_v[MUL_LAT+SPLIT_LAT];
   always_ff @(posedge clk_i)
-    if (p_v[MUL_LAT]) begin
+    if (p_v[MUL_LAT+SPLIT_LAT]) begin
       automatic logic ex = (l.kind == K_EXP);
       idx_o   <= l.idx;
-      op_o    <= (l.fn == 2'(FN_TANH)) ? sq_q : (ex ? sp_f : ((l.fn == 2'(FN_SIG)) ? {1'b0, l.word[ACT_W-2:0]} : l.word));
+      op_o    <= (l.fn == 2'(FN_TANH)) ? sq_op : (ex ? sp_f : ((l.fn == 2'(FN_SIG)) ? {1'b0, l.word[ACT_W-2:0]} : l.word));
       base_o  <= ex ? l.exp_base : l.base;
       deg_o   <= uses_p(l.kind) ? (ex ? l.exp_deg : l.deg) : 4'd0;
       frac_o  <= '0;

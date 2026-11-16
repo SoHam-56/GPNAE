@@ -58,9 +58,9 @@ module gpnae_tail
   // The shared units' operands and results.
   logic [31:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
   logic mul_valid, mul_done, add_valid, add_done;
-  logic [31:0] mul_res_q;  // the multiplier's result registered once more: its split into n and f, and the contexts, read this
-  logic mul_done_q;
-  // k's split, on the multiplier's result.
+  logic [31:0] mul_res_q, mul_res_qq;  // the multiplier's result registered twice more: the contexts read the second, with the split's outputs
+  logic mul_done_q, mul_done_qq;
+  // k's split, on the multiplier's result: two register stages inside, so it lands with mul_res_qq.
   logic [ 7:0] sp_n;
   logic [31:0] sp_f;
   logic        sp_under;
@@ -126,13 +126,15 @@ module gpnae_tail
                   .overflow_o(), .underflow_o(), .invalid_o());
   /* verilator lint_on PINCONNECTEMPTY */
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) mul_done_q <= 1'b0;
-    else mul_done_q <= mul_done;
+    if (!rstn_i) {mul_done_q, mul_done_qq} <= '0;
+    else {mul_done_q, mul_done_qq} <= {mul_done, mul_done_q};
   always_ff @(posedge clk_i)
     if (mul_done) mul_res_q <= mul_res;
+  always_ff @(posedge clk_i)
+    if (mul_done_q) mul_res_qq <= mul_res_q;
 
   // k's split, on the multiplier's result.
-  gpnae_exp_split SPLIT (.k_i(mul_res_q), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
+  gpnae_exp_split SPLIT (.clk_i(clk_i), .k_i(mul_res), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
 
   // The in-order FIFOs' heads: the owner of each unit's next result.
   assign m_owner = mq[mq_rd[CW-1:0]];
@@ -163,7 +165,7 @@ module gpnae_tail
         aq[aq_wr[CW-1:0]] <= agnt;
         aq_wr <= (aq_wr == (CW+1)'(C - 1)) ? '0 : aq_wr + 1'b1;
       end
-      if (mul_done_q) mq_rd <= (mq_rd == (CW+1)'(C - 1)) ? '0 : mq_rd + 1'b1;
+      if (mul_done_qq) mq_rd <= (mq_rd == (CW+1)'(C - 1)) ? '0 : mq_rd + 1'b1;
       if (add_done) aq_rd <= (aq_rd == (CW+1)'(C - 1)) ? '0 : aq_rd + 1'b1;
     end
   end
@@ -190,7 +192,7 @@ module gpnae_tail
         idx_o    <= id[out_c];
       end
       for (int c = 0; c < C; c++) begin
-        automatic logic mres = mul_done_q && (m_owner == CW'(c));
+        automatic logic mres = mul_done_qq && (m_owner == CW'(c));
         automatic logic ares = add_done && (a_owner == CW'(c));
         if ((mgnt_v && mgnt == CW'(c)) || (agnt_v && agnt == CW'(c))) issued[c] <= 1'b1;
         case (st[c])
@@ -213,7 +215,7 @@ module gpnae_tail
           end
 
           T_HMUL: if (mres) begin
-            tmp[c] <= mul_res_q; issued[c] <= 1'b0; st[c] <= T_HADD;
+            tmp[c] <= mul_res_qq; issued[c] <= 1'b0; st[c] <= T_HADD;
           end
 
           T_HADD: if (ares) begin
@@ -240,7 +242,7 @@ module gpnae_tail
           end
 
           T_NDY: if (mres) begin
-            tmp[c] <= mul_res_q; issued[c] <= 1'b0; st[c] <= T_NT;
+            tmp[c] <= mul_res_qq; issued[c] <= 1'b0; st[c] <= T_NT;
           end
 
           T_NT: if (ares) begin
@@ -248,14 +250,14 @@ module gpnae_tail
           end
 
           T_NYT: if (mres) begin
-            y[c]      <= mul_res_q;
+            y[c]      <= mul_res_qq;
             issued[c] <= 1'b0;
             k[c]      <= k[c] - 2'd1;
             st[c]     <= (k[c] == 2'd1) ? T_NS : T_NDY;
           end
 
           T_NS: if (mres) begin
-            res[c] <= mul_res_q; issued[c] <= 1'b0; st[c] <= T_DONE;
+            res[c] <= mul_res_qq; issued[c] <= 1'b0; st[c] <= T_DONE;
           end
 
           // One result leaves per cycle, lowest context first.

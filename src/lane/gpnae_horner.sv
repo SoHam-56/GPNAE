@@ -36,8 +36,8 @@ module gpnae_horner #(
     end
   fixedPointMultiplyAdd MAC (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(r_v), .a_i(r_x), .x_i(r_acc), .c_i(c_i), .frac_i(r_f),
                              .result_o(y_o), .done_o(done_o));
-  if (LAG != 4 || LOOP != 5) begin : G_BAD_LATENCY
-    $fatal(1, "gpnae_horner: int8 is a register then fixedPointMultiplyAdd's 4 cycles with the coefficient at the fourth (lag 4, loop 5), not lag %0d loop %0d", LAG, LOOP);
+  if (LAG != 5 || LOOP != 6) begin : G_BAD_LATENCY
+    $fatal(1, "gpnae_horner: int8 is a register then fixedPointMultiplyAdd's 5 cycles with the coefficient at the fifth (lag 5, loop 6), not lag %0d loop %0d", LAG, LOOP);
   end
 `else
   // The product's done lines up with the coefficient: the add issues as the product lands.
