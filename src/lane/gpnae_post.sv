@@ -29,6 +29,7 @@ module gpnae_post
     input sienna_fmt_pkg::lane_params_t par_i,
 
     input  logic [DATA_WIDTH-1:0] byp_x_i,
+    input  logic [DATA_WIDTH-1:0] byp_next_i,  // byp_x_i's word one cycle early (int8: its ReLU compare is registered)
     input  logic                  byp_relu_i,  // ReLU, else linear
     output logic [DATA_WIDTH-1:0] byp_y_o,
 
@@ -93,6 +94,7 @@ module gpnae_post
   logic [B_LAT:0] t_v;
   logic [IW-1:0]  t_idx[B_LAT+1];
   logic [PM_LAT:0] t_lin;
+  logic byp_lt_q;  // byp_x_i below the zero point, compared on byp_next_i a cycle early (the 8-bit compare into res_buf was the int8 top's 1.21 ns)
 `ifdef SYNTHESIS
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_done;  // rq_done is checked in simulation only
@@ -100,7 +102,8 @@ module gpnae_post
 `endif
 
   assign unused_in = ^{pass2_i, n_i, under_i, x_i, par_i.in_rescale_mantissa, K};
-  assign byp_y_o = byp_relu_i ? sienna_fmt_pkg::fmt_relu(byp_x_i, par_i.in_zero_point) : byp_x_i;  // ReLU: max(q, z_in)
+  always_ff @(posedge clk_i) byp_lt_q <= $signed(byp_next_i) < $signed(par_i.in_zero_point);  // no reset: read only beside byp_x_i
+  assign byp_y_o = (byp_relu_i && byp_lt_q) ? par_i.in_zero_point : byp_x_i;  // ReLU: max(q, z_in), as fmt_relu
 
   // A: the issue's operand and class registered (the P buffer's read mux into the quantize was the lane's path), then the quantize.
   always_ff @(posedge clk_i or negedge rstn_i)
@@ -202,7 +205,7 @@ module gpnae_post
   /* verilator lint_on UNUSEDSIGNAL */
 `endif
 
-  assign unused_in = ^{aux_i, par_i, neg_i};
+  assign unused_in = ^{aux_i, par_i, neg_i, byp_next_i};
   assign byp_y_o = byp_relu_i ? sienna_fmt_pkg::fmt_relu(byp_x_i, '0) : byp_x_i;  // ReLU: +0 for a negative word
 
   // E = P 2^-n by an exponent subtract (P > 0): 0 below the normal range or under.

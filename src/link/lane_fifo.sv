@@ -11,7 +11,8 @@ module lane_fifo #(
     input  logic                  rd_en_i,  // a pop while empty is ignored
     input  logic [DATA_WIDTH-1:0] data_i,
     output logic [  ADDR_LINES:0] count_o,
-    output logic [DATA_WIDTH-1:0] data_o    // the word at the read pointer two cycles earlier
+    output logic [DATA_WIDTH-1:0] data_o,   // the word at the read pointer two cycles earlier
+    output logic [DATA_WIDTH-1:0] next_o    // the word data_o shows at the next cycle
 );
   localparam int DEPTH = 1 << ADDR_LINES;
 
@@ -25,6 +26,7 @@ module lane_fifo #(
   assign wr      = wr_en_i && ((cnt != (ADDR_LINES + 1)'(DEPTH)) || rd);
   assign count_o = cnt;
   assign data_o  = dout_q;
+  assign next_o  = ram_q;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin

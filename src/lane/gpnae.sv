@@ -62,7 +62,7 @@ module gpnae
   // The group's state.
   gstate_t gstate;
   // The input FIFO.
-  logic [DATA_WIDTH-1:0] fifo_data_o;
+  logic [DATA_WIDTH-1:0] fifo_data_o, fifo_next;  // the FIFO's output word, and the word it shows next cycle
   logic                  fifo_rd_en;
   logic [ADDR_LINES:0]   fifo_count;
   logic [CAP_LAG-1:0]    cap_v;  // the capture's lag line
@@ -143,7 +143,8 @@ module gpnae
       .rd_en_i(fifo_rd_en),
       .count_o(fifo_count),
       .data_i (in.data[DATA_WIDTH-1:0]),
-      .data_o (fifo_data_o)
+      .data_o (fifo_data_o),
+      .next_o (fifo_next)
   );
 
   assign fifo_pop    = fifo_rd_en && (fifo_count != '0);
@@ -227,6 +228,7 @@ module gpnae
   gpnae_post #(.IW(SW), .K(K)) POSTS (.clk_i(clk_i), .rstn_i(rstn_i), .issue_i(post_issue), .pass2_i(post_pass2), .idx_i(pi),
                                       .kind_i(kind_buf[pi]), .neg_i(neg_buf[pi]), .fn_i(fn_q), .x_i(in_buf[pi]), .aux_i(aux_buf[pi]),
                                       .p_i(pol_buf[pi]), .n_i(n_buf[pi]), .under_i(under_buf[pi]), .par_i(par_i), .byp_x_i(fifo_data_o),
+                                      .byp_next_i(fifo_next),
                                       .byp_relu_i(relu_q), .byp_y_o(byp_y), .a_v_o(pa_v), .a_idx_o(pa_idx), .a_data_o(pa_data),
                                       .b_v_o(pb_v), .b_idx_o(pb_idx), .b_data_o(pb_data), .c_v_o(pc_v), .c_idx_o(pc_idx), .c_data_o(pc_data));
 
