@@ -33,6 +33,7 @@ module gpnae_tail
     T_K,     // k = t log2 e
     T_HMUL,  // tmp = f acc
     T_HADD,  // acc = c_j + tmp
+    T_SC,    // E = P 2^-n, from P registered (the adder's result into the subtract and the state's enable was bf16's 1.20 ns)
     T_ND,    // D = 1 + E
     T_NY0,   // y = 1.5 - D/2
     T_NDY,   // tmp = D y
@@ -221,13 +222,17 @@ module gpnae_tail
           T_HADD: if (ares) begin
             issued[c] <= 1'b0;
             if (j[c] == 3'd0) begin
-              e[c]  <= scale(add_res, n[c]);
-              st[c] <= T_ND;
+              e[c]  <= add_res;  // P, scaled in T_SC
+              st[c] <= T_SC;
             end else begin
               acc[c] <= add_res;
               j[c]   <= j[c] - 3'd1;
               st[c]  <= T_HMUL;
             end
+          end
+
+          T_SC: begin
+            e[c] <= scale(e[c], n[c]); st[c] <= T_ND;
           end
 
           T_ND: if (ares) begin
