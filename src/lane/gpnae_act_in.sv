@@ -73,7 +73,8 @@ module gpnae_act_in
   logic [   1:0] fn_d[MUL_LAT];
   logic [   4:0] shx_d[MUL_LAT];
   // Stage R: r rounded half up by 2^shx.
-  logic signed [32:0] rw, xr;  // r plus the round bit fits 33 bits
+  logic signed [32:0] rw, xr, xs;  // r plus the round bit fits 33 bits; xs = rw >>> shx
+  logic xb;  // rw's bit just below the cut: the round half up
   logic               r_v, r_r31;
   logic [IW-1:0]      r_idx;
   logic [1:0]         r_fn;
@@ -164,7 +165,9 @@ module gpnae_act_in
 
   // Stage R: r rounded half up by 2^shx (the variable shift and its round add alone: with the saturate it was the int8 lane's 1.9 ns path at 45 nm).
   assign rw = 33'(r);
-  assign xr = (s_shx == 5'd0) ? rw : ((rw + (33'sd1 <<< (s_shx - 5'd1))) >>> s_shx);
+  assign xs = rw >>> s_shx;
+  assign xb = (s_shx != 5'd0) && r[s_shx-5'd1];  // rw[s-1] is r[s-1] for s = 1 to 31
+  assign xr = xs + 33'(xb);  // (rw + 2^(s-1)) >>> s == (rw >>> s) + rw[s-1]: the shift, then an increment (the round constant and its add ahead of the shift were 1.27 ns)
   always_ff @(posedge clk_i)
     if (s_v) begin
       r_idx <= s_idx;
