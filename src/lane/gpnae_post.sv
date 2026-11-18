@@ -24,8 +24,7 @@ module gpnae_post
     input logic [       DATA_WIDTH-1:0] x_i,  // the element's word as captured
     input logic [                 23:0] aux_i,  // int8: the rescale product r
     input logic [            ACT_W-1:0] p_i,  // P from the barrel MAC
-    input logic [                  7:0] n_i,  // fp32 K_EXP: E = P 2^-n
-    input logic                         under_i,
+    input logic [            ACT_W-1:0] e_i,  // fp32 K_EXP: E = P 2^-n, made as P was buffered
     input sienna_fmt_pkg::lane_params_t par_i,
 
     input  logic [DATA_WIDTH-1:0] byp_x_i,
@@ -101,7 +100,7 @@ module gpnae_post
   /* verilator lint_on UNUSEDSIGNAL */
 `endif
 
-  assign unused_in = ^{pass2_i, n_i, under_i, x_i, par_i.in_rescale_mantissa, K};
+  assign unused_in = ^{pass2_i, e_i, x_i, par_i.in_rescale_mantissa, K};
   always_ff @(posedge clk_i) byp_lt_q <= $signed(byp_next_i) < $signed(par_i.in_zero_point);  // no reset: read only beside byp_x_i
   assign byp_y_o = (byp_relu_i && byp_lt_q) ? par_i.in_zero_point : byp_x_i;  // ReLU: max(q, z_in), as fmt_relu
 
@@ -181,9 +180,6 @@ module gpnae_post
   localparam logic [ACT_W-1:0] S = {1'b1, {(ACT_W - 1) {1'b0}}};
   localparam int SW = $clog2(K);
 
-  // E = P 2^-n.
-  logic [ACT_W-1:0] e;
-  logic signed [9:0] ep;
   // B: the multiply's operands, result, valid, and the tags riding beside it; d_buf holds fp32's 1 - E for the second pass.
   logic [ACT_W-1:0] d_buf[K];
   logic [ACT_W-1:0] m_a, m_b, m_y;
@@ -208,10 +204,6 @@ module gpnae_post
   assign unused_in = ^{aux_i, par_i, neg_i, byp_next_i};
   assign byp_y_o = byp_relu_i ? sienna_fmt_pkg::fmt_relu(byp_x_i, '0) : byp_x_i;  // ReLU: +0 for a negative word
 
-  // E = P 2^-n by an exponent subtract (P > 0): 0 below the normal range or under.
-  assign ep = 10'(p_i[ACT_W-2-:8]) - 10'(n_i);
-  assign e  = (under_i || ep <= 10'sd0) ? '0 : {1'b0, ep[7:0], p_i[ACT_W-10:0]};
-
   // A: P, or the limit.
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) a_v_o <= 1'b0;
@@ -234,7 +226,7 @@ module gpnae_post
     end
   always_ff @(posedge clk_i) begin
     if (m_go) begin
-      m_a <= pass2_i ? e : x_i;
+      m_a <= pass2_i ? e_i : x_i;
       m_b <= pass2_i ? d_buf[idx_i[SW-1:0]] : (kind_i == K_LIN) ? LAMBDA : (kind_i == K_ONE) ? ONE : p_i;
     end
     mt_idx[0] <= idx_i;
@@ -261,7 +253,7 @@ module gpnae_post
   always_ff @(posedge clk_i) begin
     if (d_go) begin
       d_a <= (kind_i == K_EXP) ? ONE : p_i;
-      d_b <= (kind_i == K_EXP) ? (e ^ S) : NEG_ONE;
+      d_b <= (kind_i == K_EXP) ? (e_i ^ S) : NEG_ONE;
     end
     dt_idx[0] <= idx_i;
     for (int i = 1; i <= AL; i++) dt_idx[i] <= dt_idx[i-1];

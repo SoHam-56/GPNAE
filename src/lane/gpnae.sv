@@ -91,6 +91,7 @@ module gpnae
   logic [7:0]            n_buf[K];
   logic [23:0]           aux_buf[K];
   logic [ACT_W-1:0]      pol_buf[K];  // P from the MAC
+  logic [ACT_W-1:0]      e_buf[K];  // fp32 K_EXP: E = P 2^-n, made as P lands (its subtract at the post issue was fp32's 1.08 ns iss_idx path)
   logic [DATA_WIDTH-1:0] res_buf[K];
   logic [K-1:0]          res_rdy;
   logic                  has_exp;  // the group has a K_EXP element: a second post pass
@@ -126,6 +127,15 @@ module gpnae
   logic [DATA_WIDTH-1:0] tail_res;
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_link;  // lane_link's own state: grp_go already holds it
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  // E = P 2^-n by an exponent subtract (P > 0): 0 below the normal range or under (was gpnae_post's, at the issue).
+  /* verilator lint_off UNUSEDSIGNAL */  // P > 0: its sign is not read
+  function automatic logic [ACT_W-1:0] exp_scale(input logic [ACT_W-1:0] p, input logic [7:0] n, input logic under);
+    logic signed [9:0] ep;
+    ep = 10'(p[ACT_W-2-:8]) - 10'(n);
+    return (under || ep <= 10'sd0) ? '0 : {1'b0, ep[7:0], p[ACT_W-10:0]};
+  endfunction
   /* verilator lint_on UNUSEDSIGNAL */
 
   if (ACT_IN_LAT < 2) begin : G_BAD_ACT_IN
@@ -227,7 +237,7 @@ module gpnae
   assign post_pass2 = (gstate == G_POST2) && (kind_buf[pi] == K_EXP);
   gpnae_post #(.IW(SW), .K(K)) POSTS (.clk_i(clk_i), .rstn_i(rstn_i), .issue_i(post_issue), .pass2_i(post_pass2), .idx_i(pi),
                                       .kind_i(kind_buf[pi]), .neg_i(neg_buf[pi]), .fn_i(fn_q), .x_i(in_buf[pi]), .aux_i(aux_buf[pi]),
-                                      .p_i(pol_buf[pi]), .n_i(n_buf[pi]), .under_i(under_buf[pi]), .par_i(par_i), .byp_x_i(fifo_data_o),
+                                      .p_i(pol_buf[pi]), .e_i(e_buf[pi]), .par_i(par_i), .byp_x_i(fifo_data_o),
                                       .byp_next_i(fifo_next),
                                       .byp_relu_i(relu_q), .byp_y_o(byp_y), .a_v_o(pa_v), .a_idx_o(pa_idx), .a_data_o(pa_data),
                                       .b_v_o(pb_v), .b_idx_o(pb_idx), .b_data_o(pb_data), .c_v_o(pc_v), .c_idx_o(pc_idx), .c_data_o(pc_data));
@@ -469,7 +479,10 @@ module gpnae
       n_buf[ai_idx]     <= ai_n;
       aux_buf[ai_idx]   <= ai_aux;
     end
-    if ((gstate == G_RUN || gstate == G_RECV) && mac_res_valid) pol_buf[rx_idx[SW-1:0]] <= mac_res;
+    if ((gstate == G_RUN || gstate == G_RECV) && mac_res_valid) begin
+      pol_buf[rx_idx[SW-1:0]] <= mac_res;
+      e_buf[rx_idx[SW-1:0]]   <= exp_scale(mac_res, n_buf[rx_idx[SW-1:0]], under_buf[rx_idx[SW-1:0]]);  // n and under land first, from act_in
+    end
     if (pa_v) res_buf[pa_idx] <= pa_data;
     if (pb_v) res_buf[pb_idx] <= pb_data;
     if (pc_v) res_buf[pc_idx] <= pc_data;
