@@ -83,17 +83,21 @@ module gpnae_act_in
   logic [   1:0] fn_d[MUL_LAT];
   logic [   4:0] shx_d[MUL_LAT];
   // Stage R: r rounded half up by 2^shx.
-  logic signed [32:0] rw, xr, xs;  // r plus the round bit fits 33 bits; xs = rw >>> shx
+  logic signed [32:0] rw, xs;  // r plus the round bit fits 33 bits; xs = rw >>> shx
   logic xb;  // rw's bit just below the cut: the round half up
   logic               r_v, r_r31;
   logic [IW-1:0]      r_idx;
   logic [1:0]         r_fn;
-  logic signed [32:0] r_xr;
+  logic signed [32:0] r_xs;  // the shift alone; its round bit r_xb is added in stage A, inside the saturate and the magnitude
+  logic               r_xb;
   logic [23:0]        r_aux;
   // x = the rounded product saturated to Q4.11, its sign and magnitude.
   logic signed [15:0] x;
   logic        [14:0] mag;
   logic               neg;
+  logic               x_ovf, x_unf, x_min;  // r_xs + r_xb above 32767, below -32768, equal to -32768: compares on r_xs, no add
+  logic        [15:0] x_inc;  // r_xs + r_xb in 16 bits
+  logic        [14:0] x_neg;  // the magnitude bits of -(r_xs + r_xb), beside it
   // Stage Q: q - z_in and the rescale words registered ahead of the multiply (the subtract into the multiplier's first tree stage was the
   // int8 lane's input path).
   logic               q_v;
@@ -178,20 +182,28 @@ module gpnae_act_in
   assign rw = 33'(r);
   assign xs = rw >>> s_shx;
   assign xb = (s_shx != 5'd0) && r[s_shx-5'd1];  // rw[s-1] is r[s-1] for s = 1 to 31
-  assign xr = xs + 33'(xb);  // (rw + 2^(s-1)) >>> s == (rw >>> s) + rw[s-1]: the shift, then an increment (the round constant and its add ahead of the shift were 1.27 ns)
+  // (rw + 2^(s-1)) >>> s == (rw >>> s) + rw[s-1]: stage R registers the shift and the round bit, stage A adds them (the 33-bit increment after the
+  // shift was int8's 1.03-1.18 ns, shx_d -> r_xr; the round constant and its add ahead of the shift were 1.27 ns).
   always_ff @(posedge clk_i)
     if (s_v) begin
       r_idx <= s_idx;
       r_fn  <= s_fn;
-      r_xr  <= xr;
+      r_xs  <= xs;
+      r_xb  <= xb;
       r_r31 <= r[31];
       r_aux <= r[23:0];  // |q - z_in| <= 255 and mx < 2^15 keep r below 2^23
     end
 
-  // x = the rounded product saturated to Q4.11.
-  assign x   = (r_xr > 33'sd32767) ? 16'sh7FFF : ((r_xr < -33'sd32768) ? -16'sh8000 : r_xr[15:0]);
-  assign neg = x[15];
-  assign mag = (x == -16'sh8000) ? 15'h7FFF : 15'(neg ? -x : x);
+  // x = the rounded product (r_xs + r_xb) saturated to Q4.11, its sign and magnitude; the saturate's bounds move by r_xb, and the magnitude of a
+  // negative x is ~r_xs + !r_xb, so each output is one 16-bit add at most.
+  assign x_ovf = (r_xs > 33'sd32767) || (r_xb && r_xs == 33'sd32767);
+  assign x_unf = r_xb ? (r_xs < -33'sd32769) : (r_xs < -33'sd32768);
+  assign x_min = r_xb ? (r_xs == -33'sd32769) : (r_xs == -33'sd32768);
+  assign x_inc = r_xs[15:0] + 16'(r_xb);
+  assign x_neg = ~r_xs[14:0] + 15'(!r_xb);
+  assign neg   = x_unf || (!x_ovf && r_xs[32] && !(r_xb && r_xs == -33'sd1));
+  assign x     = x_ovf ? 16'sh7FFF : (x_unf ? -16'sh8000 : x_inc);
+  assign mag   = (x_unf || x_min) ? 15'h7FFF : (x_ovf ? 15'h7FFF : (neg ? x_neg : x_inc[14:0]));
 
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) {r_v, a_v, b_v, valid_o} <= '0;
