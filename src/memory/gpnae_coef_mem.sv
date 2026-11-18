@@ -35,7 +35,6 @@ module gpnae_coef_mem
 `endif
   // ── end of the generated reset default ──
 
-  localparam int FA_W = $clog2(N_FIELDS + 1);  // a field word's index
   localparam int BK_W = COEF_ADDR_W / 2;  // the read's bank bits
   localparam int RW_W = COEF_ADDR_W - BK_W;  // its row bits
 
@@ -43,12 +42,9 @@ module gpnae_coef_mem
   logic [ACT_W-1:0] words[COEF_WORDS];
   desc_t            desc [NUM_TIERS][NUM_DESC];
   // Which field a write hits.
-  logic             w_coef, w_desc, w_tail;
-  logic [      3:0] w_di;  // tier * NUM_DESC + descriptor
-  logic [      3:0] w_j;
+  logic             w_coef, w_tail;
   logic [      1:0] w_t;
   logic [      2:0] w_tj;
-  logic [ FA_W-1:0] fa;
   // The read: stage 1 the row within every bank, stage 2 the bank.
   logic [ACT_W-1:0] r1_word[1 << BK_W];
   logic [ BK_W-1:0] r1_bank;
@@ -72,12 +68,8 @@ module gpnae_coef_mem
     return r;
   endfunction
 
-  assign fa     = FA_W'(waddr_i - LOAD_ADDR_W'(A_DESC));
   assign w_coef = wr_i && (int'(waddr_i) < A_DESC);
-  assign w_desc = wr_i && (int'(waddr_i) >= A_DESC) && (int'(waddr_i) < A_TAIL);
   assign w_tail = wr_i && (int'(waddr_i) >= A_TAIL) && (int'(waddr_i) < A_TAIL + NUM_TIERS * TAIL_STRIDE);
-  assign w_di   = 4'(int'(fa) / DESC_STRIDE);
-  assign w_j    = 4'(int'(fa) % DESC_STRIDE);
   assign w_t    = 2'((int'(waddr_i) - A_TAIL) / TAIL_STRIDE);
   assign w_tj   = 3'((int'(waddr_i) - A_TAIL) % TAIL_STRIDE);
 
@@ -89,7 +81,11 @@ module gpnae_coef_mem
       /* verilator lint_on UNUSEDLOOP */
     end else begin
       if (w_coef) words[waddr_i[COEF_ADDR_W-1:0]] <= wdata_i[ACT_W-1:0];
-      if (w_desc) desc[int'(w_di)/NUM_DESC][int'(w_di)%NUM_DESC] <= desc_field(desc[int'(w_di)/NUM_DESC][int'(w_di)%NUM_DESC], int'(w_j), wdata_i);
+      // Each descriptor field matches its own address (waddr - A_DESC, then its decode, was bf16's 1.17 ns path into the bounds).
+      for (int t = 0; t < NUM_TIERS; t++)
+        for (int d = 0; d < NUM_DESC; d++)
+          for (int j = 0; j < DESC_STRIDE; j++)
+            if (wr_i && waddr_i == LOAD_ADDR_W'(A_DESC + (t * NUM_DESC + d) * DESC_STRIDE + j)) desc[t][d] <= desc_field(desc[t][d], j, wdata_i);
     end
   end
 
