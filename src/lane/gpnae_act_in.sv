@@ -96,6 +96,7 @@ module gpnae_act_in
   logic               a_v, a_neg, a_r31;
   logic [IW-1:0]      a_idx;
   logic [1:0]         a_fn;
+  logic               a_selu;  // a_fn == FN_SELU, decoded a stage early (its decode into the operand select began int8's 1.18 ns a_fn -> b_op path)
   logic signed [15:0] a_x;
   logic [14:0]        a_mag;
   logic [23:0]        a_aux;
@@ -108,7 +109,7 @@ module gpnae_act_in
   logic [3:0]             b_deg;
   logic [1:0]             b_frac;
   logic [COEF_ADDR_W-1:0] b_base;
-  logic [15:0]            b_op;
+  logic signed [16:0]     b_t;  // the centered operand before its saturate to 16 bits, which stage C does (centre subtract and saturate in one stage were 1.18 ns)
   logic [23:0]            b_aux;
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_desc;
@@ -191,6 +192,7 @@ module gpnae_act_in
     if (r_v) begin
       a_idx <= r_idx;
       a_fn  <= r_fn;
+      a_selu <= r_fn == 2'(FN_SELU);
       a_x   <= x;
       a_mag <= mag;
       a_neg <= neg;
@@ -208,7 +210,7 @@ module gpnae_act_in
       automatic logic beyond = beyond_of(d.bound, d.np, a_mag);
       automatic kind_t k;
       automatic logic signed [16:0] t;
-      if (a_fn == 2'(FN_SELU)) begin
+      if (a_selu) begin
         k = !a_r31 ? K_LIN : ((beyond && a_neg) ? K_SAT : K_MUL);  // SELU's sign is r's: an x < 0 that rounds to 0 stays negative
         t = 17'(a_x) - 17'($signed(d.center));
       end else begin
@@ -221,7 +223,7 @@ module gpnae_act_in
       b_deg  <= d.deg;
       b_frac <= d.frac;
       b_base <= d.base;
-      b_op   <= (t > 17'sd32767) ? 16'h7FFF : ((t < -17'sd32768) ? 16'h8000 : t[15:0]);
+      b_t    <= t;
       b_neg  <= a_neg;
       b_aux  <= a_aux;
     end
@@ -230,7 +232,7 @@ module gpnae_act_in
   always_ff @(posedge clk_i)
     if (b_v) begin
       idx_o   <= b_idx;
-      op_o    <= b_op;
+      op_o    <= (b_t > 17'sd32767) ? 16'h7FFF : ((b_t < -17'sd32768) ? 16'h8000 : b_t[15:0]);
       base_o  <= b_base + COEF_ADDR_W'(int'(b_p) * (int'(b_deg) + 1));
       deg_o   <= uses_p(b_kind) ? b_deg : 4'd0;
       frac_o  <= b_frac;
