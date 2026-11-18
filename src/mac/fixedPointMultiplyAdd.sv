@@ -29,8 +29,14 @@ module fixedPointMultiplyAdd #(
   logic                 s_v;
   logic signed [PW-1:0] s_p;
   // The shifted product plus the coefficient, and whether it fits 16 bits.
-  logic signed [PW-1:0] sum;
-  logic                 fits;
+  localparam int HW = PW - DATA_WIDTH + 1;  // the bits that must all equal the sign for the sum to fit
+  // s_p + c split at bit DATA_WIDTH - 1: the low add's carry k and c's sign make the high part H + d, d in {-1, 0, 1}, so whether it fits, its
+  // bit DATA_WIDTH - 1 and its sign come from flags on H that need no add (the 32-bit add, fit compare and saturate were int8's 1.10 ns).
+  logic [DATA_WIDTH-1:0] lo;  // the low add: carry k and the result's low DATA_WIDTH - 1 bits
+  logic [HW-1:0]         hp;  // H, s_p's high part
+  logic                  h0, h1, hm1, hm2, hmax, hmin;  // H is 0, 1, -1, -2, the largest positive, the most negative
+  logic                  dn, dp;  // d = -1, d = +1
+  logic                  fits, b_top, sg;  // the sum fits; its bit DATA_WIDTH - 1 when it does; its sign when it does not
 
   intMulPipe #(.AW(DATA_WIDTH), .BW(DATA_WIDTH), .STAGES(MUL_STAGES)) MUL (
       .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i), .a_i(a_i), .b_i(x_i), .result_o(p), .done_o(p_v));
@@ -49,13 +55,24 @@ module fixedPointMultiplyAdd #(
   always_ff @(posedge clk_i)
     if (p_v) s_p <= p >>> (5'd11 + 5'(f_d[MUL_STAGES-1]));
 
-  assign sum  = s_p + PW'(c_i);
-  assign fits = (sum[PW-1:DATA_WIDTH-1] == '0) || (sum[PW-1:DATA_WIDTH-1] == '1);
+  assign lo    = {1'b0, s_p[DATA_WIDTH-2:0]} + {1'b0, c_i[DATA_WIDTH-2:0]};
+  assign hp    = s_p[PW-1:DATA_WIDTH-1];
+  assign h0    = hp == '0;
+  assign h1    = hp == HW'(1);
+  assign hm1   = hp == '1;
+  assign hm2   = hp == {{(HW - 1) {1'b1}}, 1'b0};
+  assign hmax  = hp == {1'b0, {(HW - 1) {1'b1}}};
+  assign hmin  = hp == {1'b1, {(HW - 1) {1'b0}}};
+  assign dn    = !lo[DATA_WIDTH-1] && c_i[DATA_WIDTH-1];
+  assign dp    = lo[DATA_WIDTH-1] && !c_i[DATA_WIDTH-1];
+  assign fits  = dn ? (h0 || h1) : (dp ? (hm1 || hm2) : (h0 || hm1));
+  assign b_top = dn ? h0 : (dp ? hm2 : hm1);
+  assign sg    = dn ? (hp[HW-1] && !hmin) : (dp ? (hp[HW-1] || hmax) : hp[HW-1]);
 
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) done_o <= 1'b0;
     else done_o <= s_v;
   always_ff @(posedge clk_i)
-    if (s_v) result_o <= fits ? sum[DATA_WIDTH-1:0] : {sum[PW-1], {(DATA_WIDTH - 1) {~sum[PW-1]}}};
+    if (s_v) result_o <= fits ? {b_top, lo[DATA_WIDTH-2:0]} : {sg, {(DATA_WIDTH - 1) {~sg}}};
 
 endmodule
