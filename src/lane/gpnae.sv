@@ -410,7 +410,7 @@ module gpnae
 
         // One post issue per cycle; results land in res_buf out of order.
         G_POST: begin
-          if (iss_idx + 1 == n_elems) begin
+          if (iss_idx == n_elems - 1) begin  // n_elems - 1 is off the path: idx + 1 == n_elems ahead of gstate and emit_idx was fp32's 1.08 ns
             iss_idx   <= '0;
             drain_cnt <= '0;
             gstate    <= has_exp ? G_XWAIT : G_EMIT;
@@ -424,7 +424,7 @@ module gpnae
         end
 
         G_POST2: begin
-          if (iss_idx + 1 == n_elems) gstate <= G_EMIT;
+          if (iss_idx == n_elems - 1) gstate <= G_EMIT;
           else iss_idx <= iss_idx + 1;
         end
 
@@ -434,13 +434,13 @@ module gpnae
             if (trdy[emit_idx[SW-1:0]]) begin
               res_data <= tres_buf[emit_idx[SW-1:0]];
               res_put  <= 1'b1;
-              if (emit_idx + 1 == n_elems) gstate <= G_NEXT;
+              if (emit_idx == n_elems - 1) gstate <= G_NEXT;
               else emit_idx <= emit_idx + 1;
             end
           end else if (res_rdy[emit_idx[SW-1:0]]) begin
             res_data <= res_buf[emit_idx[SW-1:0]];
             res_put  <= 1'b1;
-            if (emit_idx + 1 == n_elems) gstate <= G_NEXT;
+            if (emit_idx == n_elems - 1) gstate <= G_NEXT;
             else emit_idx <= emit_idx + 1;
           end
         end
