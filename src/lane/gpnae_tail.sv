@@ -56,6 +56,8 @@ module gpnae_tail
   // The grants: the lowest requesting context wins each unit; the free and the finished context.
   logic mgnt_v, agnt_v, free_v, out_v;
   logic [CW-1:0] mgnt, agnt, free_c, out_c;
+  logic [C-1:0] mgoh, agoh;  // the same grants one-hot, so each unit's operands are an AND-OR beside the grant, not a mux after it
+  logic [31:0] mul_a_n, mul_b_n, add_a_n, add_b_n;  // the granted context's operands (st -> encoded grant -> mux into add_a was bf16's 1.17 ns)
   // The shared units' operands and results.
   logic [31:0] mul_a, mul_b, mul_res, add_a, add_b, add_res;
   logic mul_valid, mul_done, add_valid, add_done;
@@ -120,6 +122,22 @@ module gpnae_tail
   end
   assign ready_o = free_v;
 
+  // The same lowest-requesting grants, one-hot, and the granted context's operands.
+  always_comb begin
+    automatic logic mtaken = 1'b0, ataken = 1'b0;
+    mul_a_n = '0; mul_b_n = '0; add_a_n = '0; add_b_n = '0;
+    for (int c = 0; c < C; c++) begin
+      mgoh[c] = mreq[c] && !mtaken;
+      agoh[c] = areq[c] && !ataken;
+      mtaken  = mtaken || mreq[c];
+      ataken  = ataken || areq[c];
+      mul_a_n |= {32{mgoh[c]}} & ma[c];
+      mul_b_n |= {32{mgoh[c]}} & mb[c];
+      add_a_n |= {32{agoh[c]}} & aa[c];
+      add_b_n |= {32{agoh[c]}} & ab[c];
+    end
+  end
+
   /* verilator lint_off PINCONNECTEMPTY */
   fp32Multiplier TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
                        .overflow_o(), .underflow_o(), .invalid_o());
@@ -155,14 +173,14 @@ module gpnae_tail
       mul_valid <= mgnt_v;
       add_valid <= agnt_v;
       if (mgnt_v) begin
-        mul_a <= ma[mgnt];
-        mul_b <= mb[mgnt];
+        mul_a <= mul_a_n;
+        mul_b <= mul_b_n;
         mq[mq_wr[CW-1:0]] <= mgnt;
         mq_wr <= (mq_wr == (CW+1)'(C - 1)) ? '0 : mq_wr + 1'b1;
       end
       if (agnt_v) begin
-        add_a <= aa[agnt];
-        add_b <= ab[agnt];
+        add_a <= add_a_n;
+        add_b <= add_b_n;
         aq[aq_wr[CW-1:0]] <= agnt;
         aq_wr <= (aq_wr == (CW+1)'(C - 1)) ? '0 : aq_wr + 1'b1;
       end
