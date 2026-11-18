@@ -47,10 +47,20 @@ module gpnae_act_in
     for (int j = 0; j < PMAX - 1; j++) if (j < n - 1 && mag >= bound[j][ACT_W-2:0]) p = p + 3'd1;
     return p;
   endfunction
+  // piece_idx's compares, uncounted: bit j is set where the magnitude reaches bound j, j below np - 1.
+  function automatic logic [PMAX-2:0] piece_ge(input logic [PMAX-1:0][ACT_W-1:0] bound, input logic [2:0] np, input logic [ACT_W-2:0] mag);
+    int n;
+    logic [PMAX-2:0] g;
+    n = (np == 3'd0) ? 1 : ((int'(np) > PMAX) ? PMAX : int'(np));
+    for (int j = 0; j < PMAX - 1; j++) g[j] = (j < n - 1) && (mag >= bound[j][ACT_W-2:0]);
+    return g;
+  endfunction
   function automatic logic beyond_of(input logic [PMAX-1:0][ACT_W-1:0] bound, input logic [2:0] np, input logic [ACT_W-2:0] mag);
     int n;
+    logic [PMAX-1:0] gt;  // every bound compared at once, then the last one picked: np's select ahead of the compare was fp32's 1.08 ns
     n = (np == 3'd0) ? 1 : ((int'(np) > PMAX) ? PMAX : int'(np));
-    return mag > bound[n-1][ACT_W-2:0];
+    for (int j = 0; j < PMAX; j++) gt[j] = mag > bound[j][ACT_W-2:0];
+    return gt[n-1];
   endfunction
 
   function automatic logic uses_p(input kind_t k);
@@ -284,8 +294,8 @@ module gpnae_act_in
   /* verilator lint_off UNUSEDSIGNAL */
   desc_t c_d;  // stage 0: the descriptor of the function and sign; floats leave center and frac
   /* verilator lint_on UNUSEDSIGNAL */
-  logic [2:0] c_p;  // stage 1: the piece
-  logic [3:0] c_deg;
+  logic [PMAX-2:0] c_ge;  // stage 1: the bounds the magnitude reaches; stage 2 counts them into the piece (compares and count in one stage were bf16's 1.18 ns)
+  logic [COEF_ADDR_W-1:0] c_base[PMAX];  // stage 1: base + k (deg + 1) for each piece k, so stage 2 is the count and a select
   // x^2 for tanh, |x| log2 e for sigmoid; registered once more before the split and the operand mux (that mux after the split was the
   // fp32 lane's path).
   logic [ACT_W-1:0] sq, sq_q, sq_op;  // the square, registered, and as the output mux reads it (a cycle later with the split)
@@ -344,10 +354,10 @@ module gpnae_act_in
     else k1 = (m1 < T_TINY[ACT_W-2:0]) ? K_ONE : (beyond1 ? K_SAT : K_MUL);
     p_c[1] <= '{idx: p_c[0].idx, fn: p_c[0].fn, word: p_c[0].word, base: c_d.base, deg: c_d.deg, exp_base: c_d.exp_base, exp_deg: c_d.exp_deg,
                 kind: k1, neg: p_c[0].neg};
-    c_p   <= piece_idx(c_d.bound, c_d.np, m1);
-    c_deg <= c_d.deg;
+    c_ge  <= piece_ge(c_d.bound, c_d.np, m1);
+    for (int q = 0; q < PMAX; q++) c_base[q] <= c_d.base + COEF_ADDR_W'(q * (int'(c_d.deg) + 1));
     p_c[2] <= p_c[1];
-    p_c[2].base <= p_c[1].base + COEF_ADDR_W'(int'(c_p) * (int'(c_deg) + 1));
+    p_c[2].base <= c_base[$countones(c_ge)];  // p_c[1].base is c_d.base; the count is at most PMAX - 1
     for (int i = 3; i <= MUL_LAT + SPLIT_LAT; i++) p_c[i] <= p_c[i-1];
   end
 
