@@ -36,7 +36,7 @@ module TB_barrel_mac;
 
   barrel_mac #(.K(K), .COEF_ADDR_W(AW)) dut (
       .clk_i(clk), .rstn_i(rstn), .ld_valid_i(ld_valid), .ld_data_i(ld_data), .ld_base_i(ld_base), .ld_deg_i(ld_deg), .ld_frac_i(ld_frac),
-      .start_i(start), .coeff_addr_o(caddr), .coeff_data_i(cdata), .res_valid_o(res_valid), .res_data_o(res_data), .busy_o(busy),
+      .start_i(start), .coeff_addr_o(caddr), .coeff_zero_o(), .coeff_data_i(cdata), .res_valid_o(res_valid), .res_data_o(res_data), .busy_o(busy),
       .done_o(done)
   );
 

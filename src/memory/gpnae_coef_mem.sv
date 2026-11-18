@@ -16,6 +16,7 @@ module gpnae_coef_mem
     input logic [           31:0] wdata_i,
 
     input  logic [COEF_ADDR_W-1:0] raddr_i,
+    input  logic                   rzero_i,  // with the read's last stage: give 0 for this word (a pad step's coefficient)
     output logic [      ACT_W-1:0] rdata_o,  // the word at raddr_i, COEF_READ_LATENCY cycles later
 
     input  logic [1:0] tier_i,
@@ -96,7 +97,7 @@ module gpnae_coef_mem
   always_ff @(posedge clk_i) begin
     for (int b = 0; b < (1 << BK_W); b++) r1_word[b] <= words[{b[BK_W-1:0], raddr_i[RW_W-1:0]}];
     r1_bank <= raddr_i[COEF_ADDR_W-1:RW_W];
-    rdata_o <= r1_word[r1_bank];
+    rdata_o <= rzero_i ? '0 : r1_word[r1_bank];
   end
 
   assign tsel = (int'(tier_i) < NUM_TIERS) ? tier_i : 2'd0;  // tier 3 does not exist; gpnae flags it

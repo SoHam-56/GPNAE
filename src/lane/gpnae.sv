@@ -80,6 +80,7 @@ module gpnae
   tail_t            tset;
   logic [COEF_ADDR_W-1:0] coef_raddr;
   logic [ACT_W-1:0] coef_rdata;
+  logic             coef_rzero;  // the MAC's pad flag for the word in the read's last stage
   logic             lane_idle, coef_we;  // a write lands only while the lane holds no element
   logic                   coef_we_q;
   logic [LOAD_ADDR_W-1:0] coef_addr_q;
@@ -201,7 +202,7 @@ module gpnae
     coef_data_q <= coef_data_i;
   end
   gpnae_coef_mem COEF (.clk_i(clk_i), .rstn_i(rstn_i), .wr_i(coef_we_q), .waddr_i(coef_addr_q), .wdata_i(coef_data_q), .raddr_i(coef_raddr),
-                       .rdata_o(coef_rdata), .tier_i(tier_q), .desc_o(desc), .tail_o(tset));
+                       .rzero_i(coef_rzero), .rdata_o(coef_rdata), .tier_i(tier_q), .desc_o(desc), .tail_o(tset));
 
   assign cap_now = (gstate == G_CAP) && cap_v[CAP_LAG-1];
 
@@ -223,6 +224,7 @@ module gpnae
       .ld_frac_i   (ai_frac),
       .start_i     (mac_start),
       .coeff_addr_o(coef_raddr),
+      .coeff_zero_o(coef_rzero),
       .coeff_data_i(coef_rdata),
       .res_valid_o (mac_res_valid),
       .res_data_o  (mac_res),

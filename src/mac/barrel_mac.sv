@@ -24,6 +24,7 @@ module barrel_mac #(
 
     // Coefficient memory read: the word at coeff_addr_o is on coeff_data_i READ cycles later.
     output logic [COEF_ADDR_W-1:0] coeff_addr_o,
+    output logic                   coeff_zero_o,  // with the read's last stage: the word lands as a pad step's coefficient, so the memory gives 0
     input  logic [      ACT_W-1:0] coeff_data_i,
 
     // Result phase: one per cycle, in load order.
@@ -66,7 +67,6 @@ module barrel_mac #(
   logic             step_valid, step_done;
   logic [ACT_W-1:0] step_y, step_c;
   logic             iss_pad;  // the issuing round's index is above the slot's degree
-  logic             c_pad;  // the coefficient's step is a pad, with the data at issue + LAG
 `ifdef SYNTHESIS
   /* verilator lint_off UNUSEDSIGNAL */
   logic unused_done;  // step_done is checked in simulation only
@@ -102,8 +102,10 @@ module barrel_mac #(
     end
     always_ff @(posedge clk_i) coeff_addr_o <= sbase[a_slot] + COEF_ADDR_W'(max_deg - a_round);
   end
-  always_ff @(posedge clk_i) c_pad <= pad_dly[LAG-2];  // with the data, at issue + LAG
-  assign step_c = c_pad ? '0 : coeff_data_i;
+  // A pad step's coefficient is 0: the memory's output register zeroes it (coeff_zero_o, loaded with the data at issue + LAG), so the
+  // step's add starts from a flop (the zeroing mux here, ahead of the add's stage 1, was bf16's 1.061 ns lane limit).
+  assign coeff_zero_o = pad_dly[LAG-2];
+  assign step_c       = coeff_data_i;
 
   gpnae_horner STEP (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(step_valid), .x_i(xop[slot[SW-1:0]]), .acc_i(acc[slot[SW-1:0]]),
                      .frac_i(sfrac[slot[SW-1:0]]), .c_i(step_c), .y_o(step_y), .done_o(step_done));
