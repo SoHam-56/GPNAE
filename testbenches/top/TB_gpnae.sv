@@ -285,7 +285,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
     int guard;
     guard = 0;
     tick();
-    while (!(int'(in_cnt) == IN_SLOTS && owed == 0 && !ocred && int'(lane_ocnt) == out_slots) && guard < 4 * OUT_CAP) begin
+    while (!(in_cnt == IN_SLOTS && owed == 0 && !ocred && lane_ocnt == out_slots) && guard < 4 * OUT_CAP) begin  // no casts in a loop condition: Vivado xsim 2025.2 evaluates them stale
       tick();
       guard++;
     end
@@ -343,7 +343,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
 
         // FAULT 2: a credited put once the lane has popped part of the batch; it must come out after the batch, in order.
         if (FAULT == 2 && b == 0 && act_name == "selu") begin
-          while (!(lane_gs == GS_CAP && int'(lane_cnt) < SIGNALS_PER_BATCH && in_has)) tick();
+          while (!(lane_gs == GS_CAP && lane_cnt < SIGNALS_PER_BATCH && in_has)) tick();  // no cast: as the drain loop
           put_in(stim[base], 1'b0);
         end
         // FAULT 4: coefficient writes while the lane works on the batch: words 0 and 1 and SELU's descriptor, which would change its words.
