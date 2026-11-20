@@ -779,7 +779,7 @@ class LaneSpec(regress.Spec):
 
     def not_applicable(self, name):
         if self.sim == "vcs" and name == "check-hier":
-            return "it reads the hierarchy Verilator's --xml-only writes"
+            return "it reads the hierarchy Verilator's --json-only writes"
         return None
 
     def gated(self, name):
