@@ -50,9 +50,19 @@ module gpnae_tail
   logic [1:0] k[C];  // Newton steps left
   logic issued[C];  // this context has an operation in a shared unit
   logic [IW-1:0] id[C];
-  // What each context wants from the shared units this cycle.
+  // What each context wants from the shared units this cycle: registered as the context enters a state, decoded from the values its
+  // registers load (st -> request and operand decode, with the coefficient select, -> grant -> add_a was bf16's LANE path, 1.05-1.12 ns).
   logic mreq[C], areq[C];
   logic [31:0] ma[C], mb[C], aa[C], ab[C];
+  logic mreq_r[C], areq_r[C];  // the state's request, before issued
+  // Each context's registers as they load this edge.
+  tstate_t st_n[C];
+  logic [31:0] x_n[C], f_n[C], acc_n[C], e_n[C], d_n[C], y_n[C], tmp_n[C], res_n[C];
+  logic [7:0] n_n[C];
+  logic [2:0] j_n[C];
+  logic [1:0] k_n[C];
+  logic issued_n[C];
+  logic [IW-1:0] id_n[C];
   // The grants: the lowest requesting context wins each unit; the free and the finished context.
   logic mgnt_v, agnt_v, free_v, out_v;
   logic [CW-1:0] mgnt, agnt, free_c, out_c;
@@ -81,31 +91,32 @@ module gpnae_tail
   endfunction
   /* verilator lint_on UNUSEDSIGNAL */
 
-  // What each context wants from the shared units this cycle.
-  always_comb begin
+  // A state's request and operands from the context's registers: {mreq, areq, ma, mb, aa, ab}.
+  function automatic logic [129:0] request(input tstate_t st_v, input logic [31:0] x_v, f_v, acc_v, e_v, d_v, y_v, tmp_v, input logic [2:0] j_v);
+    logic mr, ar;
+    logic [31:0] mav, mbv, aav, abv;
+    {mr, ar, mav, mbv, aav, abv} = '0;
+    case (st_v)
+      T_K:    begin mr = 1'b1; mav = x_v; mbv = LOG2E; end
+      T_HMUL: begin mr = 1'b1; mav = f_v; mbv = acc_v; end
+      T_HADD: begin ar = 1'b1; aav = set_i.coef[j_v]; abv = tmp_v; end  // set_i is held while busy_o (a_set_stable)
+      T_ND:   begin ar = 1'b1; aav = ONE; abv = e_v; end
+      T_NY0:  begin ar = 1'b1; aav = Y0; abv = {1'b1, d_v[30:23] - 8'd1, d_v[22:0]}; end  // -D/2, D >= 1
+      T_NDY:  begin mr = 1'b1; mav = d_v; mbv = y_v; end
+      T_NT:   begin ar = 1'b1; aav = TWO; abv = tmp_v ^ S; end
+      T_NYT:  begin mr = 1'b1; mav = y_v; mbv = tmp_v; end
+      T_NS:   begin mr = 1'b1; mav = e_v; mbv = y_v; end
+      default: ;
+    endcase
+    return {mr, ar, mav, mbv, aav, abv};
+  endfunction
+
+  // What each context wants this cycle: its state's registered request, until issued.
+  always_comb
     for (int c = 0; c < C; c++) begin
-      mreq[c] = 1'b0;
-      areq[c] = 1'b0;
-      ma[c] = '0;
-      mb[c] = '0;
-      aa[c] = '0;
-      ab[c] = '0;
-      if (!issued[c]) begin
-        case (st[c])
-          T_K:    begin mreq[c] = 1'b1; ma[c] = x[c]; mb[c] = LOG2E; end
-          T_HMUL: begin mreq[c] = 1'b1; ma[c] = f[c]; mb[c] = acc[c]; end
-          T_HADD: begin areq[c] = 1'b1; aa[c] = set_i.coef[j[c]]; ab[c] = tmp[c]; end
-          T_ND:   begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = e[c]; end
-          T_NY0:  begin areq[c] = 1'b1; aa[c] = Y0; ab[c] = {1'b1, d[c][30:23] - 8'd1, d[c][22:0]}; end  // -D/2, D >= 1
-          T_NDY:  begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = y[c]; end
-          T_NT:   begin areq[c] = 1'b1; aa[c] = TWO; ab[c] = tmp[c] ^ S; end
-          T_NYT:  begin mreq[c] = 1'b1; ma[c] = y[c]; mb[c] = tmp[c]; end
-          T_NS:   begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = y[c]; end
-          default: ;
-        endcase
-      end
+      mreq[c] = mreq_r[c] && !issued[c];
+      areq[c] = areq_r[c] && !issued[c];
     end
-  end
 
   // The lowest requesting context wins each unit; a context asks again only after its result is back, so none starves.
   always_comb begin
@@ -189,6 +200,90 @@ module gpnae_tail
     end
   end
 
+  // Each context's next registers: the states' updates, on the registers as they are now.
+  always_comb
+    for (int c = 0; c < C; c++) begin
+      automatic logic mres = mul_done_qq && (m_owner == CW'(c));
+      automatic logic ares = add_done && (a_owner == CW'(c));
+      {st_n[c], x_n[c], f_n[c], acc_n[c], e_n[c], d_n[c], y_n[c], tmp_n[c], res_n[c]} = {st[c], x[c], f[c], acc[c], e[c], d[c], y[c], tmp[c], res[c]};
+      {n_n[c], j_n[c], k_n[c], issued_n[c], id_n[c]} = {n[c], j[c], k[c], issued[c], id[c]};
+      if ((mgnt_v && mgnt == CW'(c)) || (agnt_v && agnt == CW'(c))) issued_n[c] = 1'b1;
+      case (st[c])
+        T_IDLE:
+          if (start_i && free_v && free_c == CW'(c)) begin
+            x_n[c] = x_i;
+            id_n[c] = idx_i;
+            issued_n[c] = 1'b0;
+            st_n[c] = T_K;
+          end
+
+        T_K: if (mres) begin
+          issued_n[c] = 1'b0;
+          n_n[c] = sp_n;
+          f_n[c] = sp_f;
+          acc_n[c] = '0;
+          j_n[c] = set_i.deg;
+          e_n[c] = '0;
+          st_n[c] = sp_under ? T_ND : T_HMUL;  // E below every normal value: 0
+        end
+
+        T_HMUL: if (mres) begin
+          tmp_n[c] = mul_res_qq; issued_n[c] = 1'b0; st_n[c] = T_HADD;
+        end
+
+        T_HADD: if (ares) begin
+          issued_n[c] = 1'b0;
+          if (j[c] == 3'd0) begin
+            e_n[c] = add_res;  // P, scaled in T_SC
+            st_n[c] = T_SC;
+          end else begin
+            acc_n[c] = add_res;
+            j_n[c] = j[c] - 3'd1;
+            st_n[c] = T_HMUL;
+          end
+        end
+
+        T_SC: begin
+          e_n[c] = scale(e[c], n[c]); st_n[c] = T_ND;
+        end
+
+        T_ND: if (ares) begin
+          d_n[c] = add_res; issued_n[c] = 1'b0; st_n[c] = T_NY0;
+        end
+
+        T_NY0: if (ares) begin
+          y_n[c] = add_res;
+          k_n[c] = set_i.newton;
+          issued_n[c] = 1'b0;
+          st_n[c] = (set_i.newton == 2'd0) ? T_NS : T_NDY;
+        end
+
+        T_NDY: if (mres) begin
+          tmp_n[c] = mul_res_qq; issued_n[c] = 1'b0; st_n[c] = T_NT;
+        end
+
+        T_NT: if (ares) begin
+          tmp_n[c] = add_res; issued_n[c] = 1'b0; st_n[c] = T_NYT;
+        end
+
+        T_NYT: if (mres) begin
+          y_n[c] = mul_res_qq;
+          issued_n[c] = 1'b0;
+          k_n[c] = k[c] - 2'd1;
+          st_n[c] = (k[c] == 2'd1) ? T_NS : T_NDY;
+        end
+
+        T_NS: if (mres) begin
+          res_n[c] = mul_res_qq; issued_n[c] = 1'b0; st_n[c] = T_DONE;
+        end
+
+        // One result leaves per cycle, lowest context first.
+        T_DONE: if (out_v && out_c == CW'(c)) st_n[c] = T_IDLE;
+
+        default: st_n[c] = T_IDLE;
+      endcase
+    end
+
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       done_o   <= 1'b0;
@@ -202,6 +297,7 @@ module gpnae_tail
         j[c]  <= '0;
         k[c]  <= '0;
         id[c] <= '0;
+        {mreq_r[c], areq_r[c], ma[c], mb[c], aa[c], ab[c]} <= '0;  // T_IDLE's request: none
       end
     end else begin
       done_o <= 1'b0;
@@ -211,83 +307,9 @@ module gpnae_tail
         idx_o    <= id[out_c];
       end
       for (int c = 0; c < C; c++) begin
-        automatic logic mres = mul_done_qq && (m_owner == CW'(c));
-        automatic logic ares = add_done && (a_owner == CW'(c));
-        if ((mgnt_v && mgnt == CW'(c)) || (agnt_v && agnt == CW'(c))) issued[c] <= 1'b1;
-        case (st[c])
-          T_IDLE:
-            if (start_i && free_v && free_c == CW'(c)) begin
-              x[c]      <= x_i;
-              id[c]     <= idx_i;
-              issued[c] <= 1'b0;
-              st[c]     <= T_K;
-            end
-
-          T_K: if (mres) begin
-            issued[c] <= 1'b0;
-            n[c]      <= sp_n;
-            f[c]      <= sp_f;
-            acc[c]    <= '0;
-            j[c]      <= set_i.deg;
-            e[c]      <= '0;
-            st[c]     <= sp_under ? T_ND : T_HMUL;  // E below every normal value: 0
-          end
-
-          T_HMUL: if (mres) begin
-            tmp[c] <= mul_res_qq; issued[c] <= 1'b0; st[c] <= T_HADD;
-          end
-
-          T_HADD: if (ares) begin
-            issued[c] <= 1'b0;
-            if (j[c] == 3'd0) begin
-              e[c]  <= add_res;  // P, scaled in T_SC
-              st[c] <= T_SC;
-            end else begin
-              acc[c] <= add_res;
-              j[c]   <= j[c] - 3'd1;
-              st[c]  <= T_HMUL;
-            end
-          end
-
-          T_SC: begin
-            e[c] <= scale(e[c], n[c]); st[c] <= T_ND;
-          end
-
-          T_ND: if (ares) begin
-            d[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NY0;
-          end
-
-          T_NY0: if (ares) begin
-            y[c]      <= add_res;
-            k[c]      <= set_i.newton;
-            issued[c] <= 1'b0;
-            st[c]     <= (set_i.newton == 2'd0) ? T_NS : T_NDY;
-          end
-
-          T_NDY: if (mres) begin
-            tmp[c] <= mul_res_qq; issued[c] <= 1'b0; st[c] <= T_NT;
-          end
-
-          T_NT: if (ares) begin
-            tmp[c] <= add_res; issued[c] <= 1'b0; st[c] <= T_NYT;
-          end
-
-          T_NYT: if (mres) begin
-            y[c]      <= mul_res_qq;
-            issued[c] <= 1'b0;
-            k[c]      <= k[c] - 2'd1;
-            st[c]     <= (k[c] == 2'd1) ? T_NS : T_NDY;
-          end
-
-          T_NS: if (mres) begin
-            res[c] <= mul_res_qq; issued[c] <= 1'b0; st[c] <= T_DONE;
-          end
-
-          // One result leaves per cycle, lowest context first.
-          T_DONE: if (out_v && out_c == CW'(c)) st[c] <= T_IDLE;
-
-          default: st[c] <= T_IDLE;
-        endcase
+        {st[c], x[c], f[c], acc[c], e[c], d[c], y[c], tmp[c], res[c]} <= {st_n[c], x_n[c], f_n[c], acc_n[c], e_n[c], d_n[c], y_n[c], tmp_n[c], res_n[c]};
+        {n[c], j[c], k[c], issued[c], id[c]} <= {n_n[c], j_n[c], k_n[c], issued_n[c], id_n[c]};
+        {mreq_r[c], areq_r[c], ma[c], mb[c], aa[c], ab[c]} <= request(st_n[c], x_n[c], f_n[c], acc_n[c], e_n[c], d_n[c], y_n[c], tmp_n[c], j_n[c]);
       end
     end
   end
