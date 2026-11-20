@@ -66,7 +66,15 @@ def run_make(fmt, sim_args="", extra=""):
     if extra:
         cmd.append(f"EXTRA_FLAGS={extra}")
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    return r.stdout + r.stderr, time.time() - t0
+    raw = r.stdout + r.stderr
+    # An assertion's error fails the run even when every word matched (a fault point fires its own on purpose and counts them).
+    errs = [] if "-GFAULT" in extra else [l for l in raw.splitlines() if RUNTIME_ERR.match(l)]
+    if errs and "RESULT: PASSED" in raw:
+        raw = raw.replace("RESULT: PASSED", f"RESULT: FAILED ({len(errs)} runtime error lines; first: {errs[0].strip()[:160]})")
+    return raw, time.time() - t0
+
+
+RUNTIME_ERR = re.compile(r"^\s*(Error:|%Error:)")  # xsim's and Verilator's $error lines
 
 
 BUILD_ERROR_LINES = 12  # a failed build's error lines printed in the point's log; the whole output is kept in <run>.build_error.log
