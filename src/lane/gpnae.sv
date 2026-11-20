@@ -96,6 +96,11 @@ module gpnae
   logic [K-1:0]          res_rdy;
   logic                  has_exp;  // the group has a K_EXP element: a second post pass
   logic [SW:0] n_elems, ld_idx, rx_idx, iss_idx, emit_idx;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [SW:0] rx_idx_n;  // rx_idx as it loads this edge (its top bit only in a_rx_next)
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [7:0]  n_rx;  // n_buf and under_buf at rx_idx, as registers (rx_idx -> the 16:1 selects -> exp_scale -> e_buf was fp32's 0.96 ns lane path)
+  logic        under_rx;
   logic [SW:0] pop_idx, grp_n;
   logic [3:0]  drain_cnt;
   logic        cap_now;
@@ -287,6 +292,28 @@ module gpnae
     assign tail_res   = '0;
     assign unused_tset = tset;
   end
+
+  // rx_idx's next value, as the state register below loads it (a_rx_next checks the two agree), and the buffers' entries there: the
+  // entry act_in writes this edge, or the one already held.
+  always_comb begin
+    rx_idx_n = rx_idx;
+    if (gstate == G_LDRAIN && drain_cnt == 4'(ACT_IN_LAT - 2)) rx_idx_n = '0;
+    if ((gstate == G_RUN || gstate == G_RECV) && mac_res_valid) rx_idx_n = rx_idx + 1;
+  end
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) {n_rx, under_rx} <= '0;
+    else if (ai_v && ai_idx == rx_idx_n[SW-1:0]) {n_rx, under_rx} <= {ai_n, ai_under};
+    else {n_rx, under_rx} <= {n_buf[rx_idx_n[SW-1:0]], under_buf[rx_idx_n[SW-1:0]]};
+`ifndef SYNTHESIS
+  logic [SW:0] rx_idx_n_q;  // last cycle's rx_idx_n (a register: xsim cannot clock a $past in the message)
+  always_ff @(posedge clk_i) rx_idx_n_q <= rx_idx_n;
+  a_rx_next: assert property (@(posedge clk_i) disable iff (!rstn_i) rx_idx == rx_idx_n_q)
+    else $error("gpnae: a_rx_next: rx_idx %0d is not the %0d rx_idx_n predicted", rx_idx, rx_idx_n_q);
+  a_rx_entry: assert property (@(posedge clk_i) disable iff (!rstn_i)
+      ((gstate == G_RUN || gstate == G_RECV) && mac_res_valid) |-> (n_rx == n_buf[rx_idx[SW-1:0]] && under_rx == under_buf[rx_idx[SW-1:0]]))
+    else $error("gpnae: a_rx_entry: n_rx/under_rx %h/%b differ from the buffers' %h/%b at rx_idx %0d", n_rx, under_rx,
+                n_buf[rx_idx[SW-1:0]], under_buf[rx_idx[SW-1:0]], rx_idx);
+`endif
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -481,7 +508,7 @@ module gpnae
     end
     if ((gstate == G_RUN || gstate == G_RECV) && mac_res_valid) begin
       pol_buf[rx_idx[SW-1:0]] <= mac_res;
-      e_buf[rx_idx[SW-1:0]]   <= exp_scale(mac_res, n_buf[rx_idx[SW-1:0]], under_buf[rx_idx[SW-1:0]]);  // n and under land first, from act_in
+      e_buf[rx_idx[SW-1:0]]   <= exp_scale(mac_res, n_rx, under_rx);  // n and under land first, from act_in
     end
     if (pa_v) res_buf[pa_idx] <= pa_data;
     if (pb_v) res_buf[pb_idx] <= pb_data;
