@@ -310,7 +310,7 @@ module gpnae_act_in
   logic [COEF_ADDR_W-1:0] c_base[PMAX];  // stage 1: base + k (deg + 1) for each piece k, so stage 2 is the count and a select
   // x^2 for tanh, |x| log2 e for sigmoid; registered once more before the split and the operand mux (that mux after the split was the
   // fp32 lane's path).
-  logic [ACT_W-1:0] sq, sq_q, sq_op;  // the square, registered, and as the output mux reads it (a cycle later with the split)
+  logic [ACT_W-1:0] sq_y, sq_q, sq_op;  // the square, registered, and as the output mux reads it (a cycle later with the split)
   logic             sq_done;
   // The class beside the multiply and its register, and the one that leaves.
   logic [MUL_LAT+SPLIT_LAT:0] p_v;
@@ -346,14 +346,14 @@ module gpnae_act_in
 
   // x^2 for tanh, |x| log2 e for sigmoid (fp32's exp elements take its split), nothing else.
   fmt_mul #(.DATA_WIDTH(ACT_W), .EXT_DATA_WIDTH(ACT_W)) SQ (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(valid_i && fn_i != 2'(FN_SELU)),
-      .a_i(fn_i == 2'(FN_TANH) ? word_i : {1'b0, mag}), .b_i(fn_i == 2'(FN_TANH) ? word_i : LOG2E), .product_o(sq), .done_o(sq_done));
+      .a_i(fn_i == 2'(FN_TANH) ? word_i : {1'b0, mag}), .b_i(fn_i == 2'(FN_TANH) ? word_i : LOG2E), .product_o(sq_y), .done_o(sq_done));
 
   // The class rides beside the multiply.
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) p_v <= '0;
     else p_v <= {p_v[MUL_LAT+SPLIT_LAT-1:0], valid_i};
   always_ff @(posedge clk_i)
-    if (p_v[MUL_LAT-1]) sq_q <= sq;
+    if (p_v[MUL_LAT-1]) sq_q <= sq_y;
   always_ff @(posedge clk_i) begin
     automatic logic [ACT_W-2:0] m1 = p_c[0].word[ACT_W-2:0];  // stage 1 reads stage 0's word
     automatic logic beyond1;
@@ -378,7 +378,7 @@ module gpnae_act_in
       $fatal(1, "gpnae_act_in: the exp split is fp32, not %0d bits", ACT_W);
     end
     logic [ACT_W-1:0] sq_qq;  // the square held a cycle more, as the split's second stage lands
-    gpnae_exp_split SPLIT (.clk_i(clk_i), .k_i(32'(sq)), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));  // from the multiplier's register: lands at p_v[MUL_LAT+1]
+    gpnae_exp_split SPLIT (.clk_i(clk_i), .k_i(32'(sq_y)), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));  // from the multiplier's register: lands at p_v[MUL_LAT+1]
     always_ff @(posedge clk_i)
       if (p_v[MUL_LAT]) sq_qq <= sq_q;
     assign sq_op = sq_qq;
