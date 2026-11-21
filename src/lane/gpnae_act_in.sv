@@ -270,7 +270,9 @@ module gpnae_act_in
 `else
   a_rescale_latency: assert property (@(posedge clk_i) disable iff (!rstn_i) rm_done == s_v)
     else $error("gpnae_act_in: a_rescale_latency: int16Multiplier is not LANE_MUL_LATENCY = %0d cycles", MUL_LAT);
-  a_mx_range: assert property (@(posedge clk_i) disable iff (!rstn_i) valid_i |-> !par_i.in_rescale_mantissa[15])
+  logic mx_top;  // the mantissa's top bit as a plain net: xsim 2025.2 sampled the struct port's field wrongly in the property (D14)
+  assign mx_top = par_i.in_rescale_mantissa[15];
+  a_mx_range: assert property (@(posedge clk_i) disable iff (!rstn_i) valid_i |-> !mx_top)
     else $error("gpnae_act_in: a_mx_range: the rescale mantissa %h is not below 2^15", par_i.in_rescale_mantissa);
 `endif
 
