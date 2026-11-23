@@ -25,7 +25,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
   localparam int ADDR_LINES = 5;
   localparam int CONTROL_WIDTH = 3;  // as SIENNA drives the lane: 001 SELU .. 101 linear
   localparam int IN_SLOTS = 1 << ADDR_LINES;  // the lane advertises its FIFO
-  localparam int LANE_K = 16;  // the lane's group size: it needs that many output credits to start one
+  localparam int LANE_K = 32;  // the lane's group size (passed to it as K): it needs that many output credits to start one
   localparam int LOADS = 1024;  // the most load-path writes in coef_load.mem
 
   reg clk;
@@ -175,6 +175,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
   gpnae #(
       .ADDR_LINES(ADDR_LINES),
       .CONTROL_WIDTH(CONTROL_WIDTH),
+      .K(LANE_K),
       .OUT_MAX(OUT_CAP),
       .OUT_CRW(1)
   ) dut (
@@ -198,12 +199,12 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
   localparam logic [3:0] GS_IDLE = 4'd0, GS_CAP = 4'd1, GS_NEXT = 4'd9;  // gpnae's gstate_t encoding
   logic [3:0] lane_gs;  // the lane's state, FIFO count and group size
   logic [ADDR_LINES:0] lane_cnt;
-  logic [4:0] lane_grp;
+  logic [5:0] lane_grp;  // a group's size, up to LANE_K = 32
   logic [$clog2(OUT_CAP + 1)-1:0] lane_ocnt;  // the lane's output credits
   logic lane_pend, lane_ook;  // a last put waits, and K output credits are held
   assign lane_gs   = dut.gstate;
   assign lane_cnt  = dut.fifo_count;
-  assign lane_grp  = 5'(dut.grp_n);
+  assign lane_grp  = 6'(dut.grp_n);
   assign lane_ocnt = dut.out_cnt;
   assign lane_pend = dut.last_pend;
   assign lane_ook  = dut.out_ok;
@@ -436,7 +437,7 @@ module TB_gpnae #(parameter int FAULT = 0, parameter int OUT_CAP = 64);  // OUT_
     gs_q <= lane_gs;
     if (s_clear) s_nobs <= 0;
     else if (s_on && lane_gs == GS_CAP && gs_q != GS_CAP && s_nobs < S_BND) begin
-      s_obs[s_nobs] <= {4'd0, gs_q, 3'd0, lane_grp};
+      s_obs[s_nobs] <= {4'd0, gs_q, 2'd0, lane_grp};  // state << 8 | size
       s_nobs        <= s_nobs + 1;
     end
   end

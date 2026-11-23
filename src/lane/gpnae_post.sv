@@ -8,8 +8,8 @@
 module gpnae_post
   import gpnae_pkg::*;
 #(
-    parameter int  IW         = 4,
-    parameter int  K          = 16,
+    parameter int  IW         = 5,  // the element tag's width: $clog2(gpnae's K)
+    parameter int  K          = 32,
     localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH
 ) (
     input logic clk_i,

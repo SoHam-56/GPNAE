@@ -5,7 +5,7 @@
 // gpnae_coef_mem reads.
 module TB_barrel_mac;
   localparam int NG = 256;  // groups, as the vector script writes them
-  localparam int K = 16;
+  localparam int K = 32;  // gpnae's K (at least the Horner loop + 1)
   localparam int W = sienna_fmt_pkg::ACTIVATION_DATA_WIDTH;
   localparam int AW = 7;
   localparam string FMT = sienna_fmt_pkg::FORMAT_NAME;

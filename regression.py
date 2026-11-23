@@ -188,7 +188,11 @@ STREAM_POLY = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 16), (2, 16), (2, 5), (1, 
                (0, 16), (2, 1))  # (mode, elements): 0 puts with last on the final one, 1 the final put held back, 2 puts while busy
 STREAM_BYP = ((0, 20), (0, 17), (0, 1), (0, 16), (2, 8), (1, 16), (1, 5), (1, 1), (1, 32), (0, 32), (1, 2), (0, 16),
               (2, 1))  # ReLU and linear emit soon after capture, so a busy group is at most 8
-S_IDLE, S_NEXT, LANE_K = 0, 9, 16  # gpnae's G_IDLE and G_NEXT encodings, and its group size
+S_IDLE, S_NEXT = 0, 9  # gpnae's G_IDLE and G_NEXT encodings
+_K = re.search(r"parameter int\s+K\s*=\s*(\d+)", open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "lane", "gpnae.sv")).read())
+if not _K:
+    raise RuntimeError("regression.py: gpnae's K not found in src/lane/gpnae.sv")
+LANE_K = int(_K.group(1))  # gpnae's group size
 
 
 def rand_params_int8(rng, code, sat):
@@ -531,10 +535,10 @@ def do_held(fmt, tier, seed):
 
 
 def do_protocol(fmt, seed):
-    """Random batches of 30 at every tier, under output back-pressure (16 slots, 25% of returns stalled) and without; ReLU and linear too."""
+    """Random batches of 30 at every tier, under output back-pressure (one group's LANE_K slots, 25% of returns stalled) and without; ReLU and linear too."""
     ok, L = True, []
     for tier in range(gm.NUM_TIERS):
-        for args in ("+out_slots=16 +stall_pct=25", "+out_slots=64 +stall_pct=0"):
+        for args in (f"+out_slots={LANE_K} +stall_pct=25", "+out_slots=64 +stall_pct=0"):
             if fmt == "int8":
                 sets = {a: [s for s in v if s[0] in ("case", "random")][:8] for a, v in int8_sets(seed).items()}
                 o, lines, _ = run_int8(tier, sets=sets, sim_args=args, label="protocol", stream=False, seed=seed)

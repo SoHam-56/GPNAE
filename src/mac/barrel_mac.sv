@@ -7,7 +7,7 @@
 // result never depends on its group. Coefficients come from the lane's memory on coeff_addr_o, read back on coeff_data_i
 // gpnae_pkg::COEF_READ_LATENCY cycles later. No format here: the step's latency and coefficient lag are the package's.
 module barrel_mac #(
-    parameter int  K           = 16,
+    parameter int  K           = 32,
     parameter int  COEF_ADDR_W = 7,
     localparam int ACT_W       = sienna_fmt_pkg::ACTIVATION_DATA_WIDTH
 ) (

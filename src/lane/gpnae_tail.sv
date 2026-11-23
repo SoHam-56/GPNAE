@@ -8,7 +8,7 @@ module gpnae_tail
   import gpnae_pkg::*;
 #(
     parameter int CONTEXTS = 8,
-    parameter int IW       = 4  // width of the caller's element tag
+    parameter int IW       = 5  // width of the caller's element tag: $clog2(gpnae's K)
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -139,7 +139,8 @@ module gpnae_tail
   end
 
   /* verilator lint_off PINCONNECTEMPTY */
-  fp32Multiplier TMUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
+  fp32Multiplier #(.BOOTH_SUM_STAGES(2), .MID_SPLIT(1'b1)) TMUL (  // the lanes' fp32 multiply (LANE_MUL_LATENCY), as tail_ops counts it
+                 .clk_i(clk_i), .rstn_i(rstn_i), .valid_i(mul_valid), .A(mul_a), .B(mul_b), .result_o(mul_res), .done_o(mul_done),
                        .overflow_o(), .underflow_o(), .invalid_o());
   fp32Adder TADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(add_valid), .A(add_a), .B(add_b), .result_o(add_res), .done_o(add_done),
                   .overflow_o(), .underflow_o(), .invalid_o());

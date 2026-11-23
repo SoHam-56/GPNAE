@@ -4,7 +4,7 @@
 module lane_link #(
     parameter int DATA_WIDTH = 32,
     parameter int ADDR_LINES = 5,
-    parameter int K          = 16,
+    parameter int K          = 32,
     parameter int OUT_MAX    = 64,  // the most output credits the downstream consumer may advertise
     parameter int OUT_CRW    = 1    // out.credit width
 ) (

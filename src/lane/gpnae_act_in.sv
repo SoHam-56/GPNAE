@@ -9,7 +9,7 @@
 module gpnae_act_in
   import gpnae_pkg::*;
 #(
-    parameter int  IW         = 4,  // the element tag's width
+    parameter int  IW         = 5,  // the element tag's width: $clog2(gpnae's K)
     localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH
 ) (
     input logic                          clk_i,

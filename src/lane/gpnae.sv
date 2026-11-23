@@ -15,7 +15,7 @@ module gpnae
 #(
     parameter int ADDR_LINES    = 5,
     parameter int CONTROL_WIDTH = 3,   // 001 SELU, 010 sigmoid, 100 ReLU, 101 linear; every other word runs tanh
-    parameter int K             = 16,
+    parameter int K             = 32,  // elements per barrel group: at least the Horner loop + 1 (barrel_mac's MIN_PER, 18 in fp32)
     parameter int TAIL_CONTEXTS = 8,   // bf16: elements the fp32 tail works on at once
     parameter int OUT_MAX       = 64,  // the most output credits the downstream consumer may advertise
     parameter int OUT_CRW       = 1    // out.credit width
