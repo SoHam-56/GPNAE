@@ -122,15 +122,20 @@ module gpnae_tail
   end
   assign ready_o = free_v;
 
-  // The same lowest-requesting grants, one-hot, and the granted context's operands.
+  // The same lowest-requesting grants, one-hot, and the granted context's operands. Each grant is its request and no lower one, in
+  // parallel (a running 'taken' through the contexts was a chain of C gates into the operand select: the bf16 top's 1.086 ns).
   always_comb begin
-    automatic logic mtaken = 1'b0, ataken = 1'b0;
     mul_a_n = '0; mul_b_n = '0; add_a_n = '0; add_b_n = '0;
     for (int c = 0; c < C; c++) begin
-      mgoh[c] = mreq[c] && !mtaken;
-      agoh[c] = areq[c] && !ataken;
-      mtaken  = mtaken || mreq[c];
-      ataken  = ataken || areq[c];
+      automatic logic mlow, alow;  // any lower context requesting: its own OR, not a running one (assigned, not initialized: xsim)
+      mlow = 1'b0;
+      alow = 1'b0;
+      for (int lo = 0; lo < c; lo++) begin
+        mlow |= mreq[lo];
+        alow |= areq[lo];
+      end
+      mgoh[c] = mreq[c] && !mlow;
+      agoh[c] = areq[c] && !alow;
       mul_a_n |= {32{mgoh[c]}} & ma[c];
       mul_b_n |= {32{mgoh[c]}} & mb[c];
       add_a_n |= {32{agoh[c]}} & aa[c];
@@ -157,6 +162,7 @@ module gpnae_tail
   gpnae_exp_split SPLIT (.clk_i(clk_i), .k_i(mul_res), .n_o(sp_n), .f_o(sp_f), .under_o(sp_under));
 
   // The in-order FIFOs' heads: the owner of each unit's next result.
+  always_ff @(posedge clk_i) {mul_a, mul_b, add_a, add_b} <= {mul_a_n, mul_b_n, add_a_n, add_b_n};  // read only with mul_valid / add_valid
   assign m_owner = mq[mq_rd[CW-1:0]];
   assign a_owner = aq[aq_rd[CW-1:0]];
 
@@ -164,7 +170,6 @@ module gpnae_tail
     if (!rstn_i) begin
       mul_valid <= 1'b0;
       add_valid <= 1'b0;
-      mul_a <= '0; mul_b <= '0; add_a <= '0; add_b <= '0;
       mq_wr <= '0; mq_rd <= '0; aq_wr <= '0; aq_rd <= '0;
       for (int c = 0; c < C; c++) begin
         mq[c] <= '0;
@@ -174,14 +179,10 @@ module gpnae_tail
       mul_valid <= mgnt_v;
       add_valid <= agnt_v;
       if (mgnt_v) begin
-        mul_a <= mul_a_n;
-        mul_b <= mul_b_n;
         mq[mq_wr[CW-1:0]] <= mgnt;
         mq_wr <= (mq_wr == (CW+1)'(C - 1)) ? '0 : mq_wr + 1'b1;
       end
       if (agnt_v) begin
-        add_a <= add_a_n;
-        add_b <= add_b_n;
         aq[aq_wr[CW-1:0]] <= agnt;
         aq_wr <= (aq_wr == (CW+1)'(C - 1)) ? '0 : aq_wr + 1'b1;
       end
