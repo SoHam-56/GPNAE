@@ -237,12 +237,33 @@ module gpnae
   /* verilator lint_on PINCONNECTEMPTY */
 
   // ── post stage ──
+  // The issuing element's words, read a cycle early: element 0 in the cycle a pass begins, then iss_idx + 1 while iss_idx issues (the
+  // K:1 selects off iss_idx in front of the post unit were the K = 32 lanes' limit at 3798aec: iss_idx -> POSTS m_a / m_b / pm_a,
+  // 1.14-1.18). A one-element group's P and E land as its post pass begins: forwarded.
+  logic [SW-1:0]    pf_idx;
+  logic             pf_first, pf_land;
+  kind_t            q_kind;
+  logic             q_neg;
+  logic [DATA_WIDTH-1:0] q_in;
+  logic [23:0]      q_aux;
+  logic [ACT_W-1:0] q_pol, q_e;
+  assign pf_first = ((gstate == G_RUN || gstate == G_RECV) && mac_done) || (gstate == G_XWAIT && drain_cnt == 4'(AL + 1));
+  assign pf_idx   = pf_first ? '0 : SW'(iss_idx + 1);
+  assign pf_land  = (gstate == G_RUN || gstate == G_RECV) && mac_res_valid && rx_idx[SW-1:0] == pf_idx;
+  always_ff @(posedge clk_i) begin  // no reset: read only with post_issue / post_pass2
+    q_kind <= kind_buf[pf_idx];
+    q_neg  <= neg_buf[pf_idx];
+    q_in   <= in_buf[pf_idx];
+    q_aux  <= aux_buf[pf_idx];
+    q_pol  <= pf_land ? mac_res : pol_buf[pf_idx];
+    q_e    <= pf_land ? exp_scale(mac_res, n_rx, under_rx) : e_buf[pf_idx];
+  end
   assign pi         = iss_idx[SW-1:0];
   assign post_issue = (gstate == G_POST);
-  assign post_pass2 = (gstate == G_POST2) && (kind_buf[pi] == K_EXP);
+  assign post_pass2 = (gstate == G_POST2) && (q_kind == K_EXP);
   gpnae_post #(.IW(SW), .K(K)) POSTS (.clk_i(clk_i), .rstn_i(rstn_i), .issue_i(post_issue), .pass2_i(post_pass2), .idx_i(pi),
-                                      .kind_i(kind_buf[pi]), .neg_i(neg_buf[pi]), .fn_i(fn_q), .x_i(in_buf[pi]), .aux_i(aux_buf[pi]),
-                                      .p_i(pol_buf[pi]), .e_i(e_buf[pi]), .par_i(par_i), .byp_x_i(fifo_data_o),
+                                      .kind_i(q_kind), .neg_i(q_neg), .fn_i(fn_q), .x_i(q_in), .aux_i(q_aux),
+                                      .p_i(q_pol), .e_i(q_e), .par_i(par_i), .byp_x_i(fifo_data_o),
                                       .byp_next_i(fifo_next),
                                       .byp_relu_i(relu_q), .byp_y_o(byp_y), .a_v_o(pa_v), .a_idx_o(pa_idx), .a_data_o(pa_data),
                                       .b_v_o(pb_v), .b_idx_o(pb_idx), .b_data_o(pb_data), .c_v_o(pc_v), .c_idx_o(pc_idx), .c_data_o(pc_data));
@@ -522,6 +543,10 @@ module gpnae
   assign idle_o    = lane_idle;
 
 `ifndef SYNTHESIS
+  // The post prefetch: every issue, either pass, carries the issuing element's own words.
+  a_post_prefetch: assert property (@(posedge clk_i) disable iff (!rstn_i) (gstate == G_POST || gstate == G_POST2) |->
+      q_kind == kind_buf[pi] && q_neg == neg_buf[pi] && q_in == in_buf[pi] && q_aux == aux_buf[pi] && q_pol == pol_buf[pi] && q_e == e_buf[pi])
+    else $error("gpnae: a_post_prefetch: element %0d issued with prefetched words that are not its own", pi);
   // No write reaches the memory while the lane holds an element. Both terms are registered.
   logic we_seen, idle_seen;
   logic [ADDR_LINES+4:0] occ;  // elements put in, less results put out
