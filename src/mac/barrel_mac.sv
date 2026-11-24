@@ -52,6 +52,13 @@ module barrel_mac #(
   logic [ 3:0] max_deg;  // the group's highest degree: it runs max_deg + 1 rounds
   state_t state;
   logic [SW:0]   slot;  // slot being issued this cycle
+  // The issuing slot's operands and degree, read a cycle early from slot_ahead (the next slot, a register): the K:1 selects off the
+  // counter in front of the step were the K = 32 lanes' limit (fp32 top 1.02, s1_man_a). A write-back landing in that cycle for that
+  // slot is forwarded, so a round stays max(n, LOOP + 1) cycles; the group's start forwards a word loaded in its own cycle.
+  logic [SW:0]        slot_ahead;
+  logic [ACT_W-1:0]   p_x, p_acc;
+  logic [      1:0]   p_frac;
+  logic [      3:0]   p_deg;
   logic [SW+1:0] period;  // max(n_elems, LOOP + 1): a round never shortens below the recurrence
   logic [   3:0] round;  // 0 .. max_deg; round r reads c_(max_deg - r)
   logic [  SW:0] emit_idx;
@@ -82,7 +89,7 @@ module barrel_mac #(
 
   // The issuing slot's coefficient index is max_deg - round; a round whose index is above the slot's degree is a pad.
   assign step_valid = (state == RUN) && (slot < n_elems);
-  assign iss_pad    = (max_deg - round) > sdeg[slot[SW-1:0]];
+  assign iss_pad    = (max_deg - round) > p_deg;
 
   // The coefficient for the step issued LAG cycles ago: the address goes out READ cycles before, at issue + LAG - READ. When that is the
   // issue itself the address is combinational from the issue; otherwise it is registered the cycle before, from the issue when that is
@@ -105,8 +112,8 @@ module barrel_mac #(
   always_ff @(posedge clk_i) c_pad <= pad_dly[LAG-2];  // with the data, at issue + LAG
   assign step_c = c_pad ? '0 : coeff_data_i;
 
-  gpnae_horner STEP (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(step_valid), .x_i(xop[slot[SW-1:0]]), .acc_i(acc[slot[SW-1:0]]),
-                     .frac_i(sfrac[slot[SW-1:0]]), .c_i(step_c), .y_o(step_y), .done_o(step_done));
+  gpnae_horner STEP (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(step_valid), .x_i(p_x), .acc_i(p_acc), .frac_i(p_frac), .c_i(step_c),
+                     .y_o(step_y), .done_o(step_done));
 
   assign busy_o = (state != LOAD);
   assign period = (n_elems >= MIN_PER[SW:0]) ? {1'b0, n_elems} : MIN_PER[SW+1:0];
@@ -117,6 +124,8 @@ module barrel_mac #(
       n_elems     <= '0;
       max_deg     <= '0;
       slot        <= '0;
+      slot_ahead  <= '0;
+      {p_x, p_acc, p_frac, p_deg} <= '0;
       round       <= '0;
       emit_idx    <= '0;
       drain_cnt   <= '0;
@@ -167,13 +176,25 @@ module barrel_mac #(
             if (n_elems == '0 || ld_deg_i > max_deg) max_deg <= ld_deg_i;
           end
           if (start_i && (n_elems != '0 || ld_valid_i)) begin
-            state <= RUN;
-            slot  <= '0;
-            round <= '0;
+            state      <= RUN;
+            slot       <= '0;
+            slot_ahead <= (SW + 1)'(1);  // a round is at least MIN_PER > 1 slots
+            round      <= '0;
+            // slot 0's operands for the first issue: round 0's accumulator is 0; a group of one loads its word in this cycle
+            p_x    <= (ld_valid_i && n_elems == '0) ? ld_data_i : xop[0];
+            p_acc  <= '0;
+            p_frac <= (ld_valid_i && n_elems == '0) ? ld_frac_i : sfrac[0];
+            p_deg  <= (ld_valid_i && n_elems == '0) ? ld_deg_i : sdeg[0];
           end
         end
 
         RUN: begin
+          // Next cycle's slot and its operands, the write-back landing now forwarded.
+          slot_ahead <= ({1'b0, slot_ahead} == period - 1) ? '0 : slot_ahead + 1;
+          p_x    <= xop[slot_ahead[SW-1:0]];
+          p_acc  <= (v_dly[LOOP-1] && slot_dly[LOOP-1] == slot_ahead[SW-1:0]) ? (pad_dly[LOOP-1] ? '0 : step_y) : acc[slot_ahead[SW-1:0]];
+          p_frac <= sfrac[slot_ahead[SW-1:0]];
+          p_deg  <= sdeg[slot_ahead[SW-1:0]];
           // One slot per cycle, padded to `period` so a round is never shorter than the recurrence.
           if ({1'b0, slot} == period - 1) begin
             slot <= '0;
@@ -219,5 +240,12 @@ module barrel_mac #(
   // A load comes only while loading, and a group never takes more than K slots.
   a_load_room: assert property (@(posedge clk_i) disable iff (!rstn_i) ld_valid_i |-> (state == LOAD && int'(n_elems) < K))
     else $error("barrel_mac: a_load_room: a load while busy or into a full group (%0d slots)", n_elems);
+  // The prefetch: slot_ahead is the next slot, and every issue's operands are what the slot holds when it issues.
+  a_slot_ahead: assert property (@(posedge clk_i) disable iff (!rstn_i) state == RUN |->
+      int'(slot_ahead) == ((int'(slot) == int'(period) - 1) ? 0 : int'(slot) + 1))
+    else $error("barrel_mac: a_slot_ahead: slot_ahead %0d is not the slot after %0d (period %0d)", slot_ahead, slot, period);
+  a_prefetch: assert property (@(posedge clk_i) disable iff (!rstn_i) step_valid |->
+      p_x == xop[slot[SW-1:0]] && p_acc == acc[slot[SW-1:0]] && p_frac == sfrac[slot[SW-1:0]] && p_deg == sdeg[slot[SW-1:0]])
+    else $error("barrel_mac: a_prefetch: slot %0d issued with prefetched operands that are not its own", slot);
 `endif
 endmodule
