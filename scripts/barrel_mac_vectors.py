@@ -2,14 +2,19 @@
 """Vectors for TB_barrel_mac in a format: a random coefficient memory, 256 groups of slots each with its own set (base, degree) and, in
 int8, fraction shift, and each slot's Horner result on gpnae_model's step (fpu in floats, fixedPointMultiplyAdd in int8). Usage: FMT [SEED]."""
 import os
+import re
 import sys
 
 import numpy as np
 
 import gpnae_model as gm
 
-K, NG = 16, 256
+NG = 256
 OUT = os.path.join(gm.ROOT, "testbenches", "stimulus")
+_K = re.search(r"localparam int K = (\d+);", open(os.path.join(gm.ROOT, "testbenches", "units", "TB_barrel_mac.sv")).read())
+if not _K:
+    raise RuntimeError("barrel_mac_vectors.py: TB_barrel_mac's K not found")
+K = int(_K.group(1))  # the bench's group size, so the vectors always fill the barrel it builds
 
 
 def main():
@@ -27,7 +32,7 @@ def main():
             np.asarray(np.float32(v)).view(np.uint32).astype(np.int64)
         words[:4] = [0, gm.fpu.from_fp32(0x3F800000, f.m), gm.fpu.from_fp32(0xBF800000, f.m), 1 << (w - 1)]  # +0, 1.0, -1.0, -0
         step = lambda a, acc, c, fr: gm.fpu.add(f, c, gm.fpu.mul(f, a, acc)[0])[0]
-    sizes = [1, 2, 3, 4, 5, 8, 9, 13, 14, 15, 16]  # below, at and above the minimum round in every format, and a full barrel
+    sizes = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 17, 18, 19, 31, K]  # below, at and above the minimum round in every format (MIN_PER: int8 7, bf16 12, fp32 18), and a full barrel
     hdr, slots, exp = [], [], []
     for g in range(NG):
         n = sizes[g] if g < len(sizes) else int(rs.randint(1, K + 1))

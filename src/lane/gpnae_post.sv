@@ -8,8 +8,8 @@
 module gpnae_post
   import gpnae_pkg::*;
 #(
-    parameter int  IW         = 4,
-    parameter int  K          = 16,
+    parameter int  IW         = 5,  // the element tag's width: $clog2(gpnae's K)
+    parameter int  K          = 32,
     localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH
 ) (
     input logic clk_i,
@@ -55,22 +55,29 @@ module gpnae_post
   localparam int PM_LAT = sienna_fmt_pkg::POST_MUL_LATENCY;
   localparam int B_LAT = PM_LAT + RQ_LAT;  // after the operand register: int24Multiplier, then int8Requantizer
 
-  // sigmoid: round(256 y) - 128 = ((y + 4) >> 3) - 128 for y in Q4.11, clamped to int8.
-  function automatic logic [7:0] quant_sig(input logic signed [16:0] y);
+  // sigmoid: round(256 y) - 128 = ((y + 4) >> 3) - 128 for y in Q4.11, clamped to int8. 128 * 8 = 1024 exactly, so that is
+  // (y - 1020) >>> 3, and for the reflected half (y = 2048 - pe) (1028 - pe) >>> 3: one add or subtract on pe (the subtract, the
+  // round's add and the - 128 in a row, then the clamp, were the int8 top's 1.05 ns, pa_kind -> a_data_o).
+  function automatic logic [7:0] quant_sig(input logic signed [16:0] pe, input logic refl);
     logic signed [16:0] r;
-    r = ((y + 17'sd4) >>> 3) - 17'sd128;
+    r = (refl ? (17'sd1028 - pe) : (pe - 17'sd1020)) >>> 3;
     if (r > 17'sd127) return 8'h7F;
     if (r < -17'sd128) return 8'h80;
     return r[7:0];
   endfunction
 
-  // tanh from P ~ tanh(|x|) in Q4.11: m = round(128 P) = (P + 8) >> 4 in [0, 128], the sign restored, clamped to int8.
+  // tanh from P ~ tanh(|x|) in Q4.11: m = round(128 P) = (P + 8) >> 4 in [0, 128], the sign restored, clamped to int8. The negative
+  // side is -floor((P + 8) / 16) = floor((7 - P) / 16) clamped to [-128, 0]: one subtract, no negate after the clamp.
   function automatic logic [7:0] quant_tanh(input logic signed [15:0] p, input logic neg);
     logic signed [16:0] m;
+    if (neg) begin
+      m = (17'sd7 - 17'(p)) >>> 4;
+      if (m > 17'sd0) m = 17'sd0;
+      if (m < -17'sd128) m = -17'sd128;
+      return m[7:0];
+    end
     m = (17'(p) + 17'sd8) >>> 4;
-    if (m < 17'sd0) m = 17'sd0;
-    if (m > 17'sd128) m = 17'sd128;
-    if (neg) return 8'(-m);
+    if (m < 17'sd0) return 8'h00;
     return (m > 17'sd127) ? 8'h7F : m[7:0];
   endfunction
 
@@ -121,7 +128,7 @@ module gpnae_post
     if (pa_v) begin
       a_idx_o  <= pa_idx;
       a_data_o <= (pa_kind == K_SAT) ? (pa_neg ? 8'h80 : 8'h7F)
-                : (pa_fn == 2'(FN_SIG)) ? quant_sig((pa_kind == K_REFL) ? (17'sd2048 - pe) : pe) : quant_tanh(pa_p, pa_neg);
+                : (pa_fn == 2'(FN_SIG)) ? quant_sig(pe, pa_kind == K_REFL) : quant_tanh(pa_p, pa_neg);
     end
 
   // SELU: r lambda (x >= 0), r P, or -lambda*alpha 2^shx 1.0 past the last bound; then the output requantize.
