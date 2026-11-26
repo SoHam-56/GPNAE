@@ -59,6 +59,7 @@ module barrel_mac #(
   logic [ACT_W-1:0]   p_x, p_acc;
   logic [      1:0]   p_frac;
   logic [      3:0]   p_deg;
+  logic [COEF_ADDR_W-1:0] p_base;  // the issuing slot's coefficient base, read a cycle early with the operands
   logic [SW+1:0] period;  // max(n_elems, LOOP + 1): a round never shortens below the recurrence
   logic [   3:0] round;  // 0 .. max_deg; round r reads c_(max_deg - r)
   logic [  SW:0] emit_idx;
@@ -95,19 +96,21 @@ module barrel_mac #(
   // issue itself the address is combinational from the issue; otherwise it is registered the cycle before, from the issue when that is
   // the cycle before, else from the issue pipeline (the slot's base mux and the index add in one cycle with the memory's read mux was
   // the float lanes' worst path, so neither shares a cycle with the other).
+  // The address from the prefetched base: computed once at the issue, then delayed to the address cycle (a K:1 base select off the
+  // issue pipeline's slot, then the index add, was the int8 K = 32 top's 0.95, slot_dly -> coeff_addr_o).
+  logic [COEF_ADDR_W-1:0] iss_addr;
+  assign iss_addr = p_base + COEF_ADDR_W'(max_deg - round);
   if (ADDR_AT == 0) begin : G_ADDR_AT_ISSUE
-    assign coeff_addr_o = sbase[slot[SW-1:0]] + COEF_ADDR_W'(max_deg - round);
+    assign coeff_addr_o = iss_addr;
+  end else if (ADDR_AT == 1) begin : G_ADDR_NEXT
+    always_ff @(posedge clk_i) coeff_addr_o <= iss_addr;
   end else begin : G_ADDR_REGISTERED
-    logic [SW-1:0] a_slot;
-    logic [   3:0] a_round;
-    if (ADDR_AT == 1) begin : G_FROM_ISSUE
-      assign a_slot  = slot[SW-1:0];
-      assign a_round = round;
-    end else begin : G_FROM_PIPE
-      assign a_slot  = slot_dly[ADDR_AT-2];
-      assign a_round = rnd_dly[ADDR_AT-2];
+    logic [COEF_ADDR_W-1:0] adr_dly[ADDR_AT-1];
+    always_ff @(posedge clk_i) begin
+      adr_dly[0] <= iss_addr;
+      for (int i = 1; i < ADDR_AT - 1; i++) adr_dly[i] <= adr_dly[i-1];
+      coeff_addr_o <= adr_dly[ADDR_AT-2];
     end
-    always_ff @(posedge clk_i) coeff_addr_o <= sbase[a_slot] + COEF_ADDR_W'(max_deg - a_round);
   end
   always_ff @(posedge clk_i) c_pad <= pad_dly[LAG-2];  // with the data, at issue + LAG
   assign step_c = c_pad ? '0 : coeff_data_i;
@@ -125,7 +128,7 @@ module barrel_mac #(
       max_deg     <= '0;
       slot        <= '0;
       slot_ahead  <= '0;
-      {p_x, p_acc, p_frac, p_deg} <= '0;
+      {p_x, p_acc, p_frac, p_deg, p_base} <= '0;
       round       <= '0;
       emit_idx    <= '0;
       drain_cnt   <= '0;
@@ -185,6 +188,7 @@ module barrel_mac #(
             p_acc  <= '0;
             p_frac <= (ld_valid_i && n_elems == '0) ? ld_frac_i : sfrac[0];
             p_deg  <= (ld_valid_i && n_elems == '0) ? ld_deg_i : sdeg[0];
+            p_base <= (ld_valid_i && n_elems == '0) ? ld_base_i : sbase[0];
           end
         end
 
@@ -195,6 +199,7 @@ module barrel_mac #(
           p_acc  <= (v_dly[LOOP-1] && slot_dly[LOOP-1] == slot_ahead[SW-1:0]) ? (pad_dly[LOOP-1] ? '0 : step_y) : acc[slot_ahead[SW-1:0]];
           p_frac <= sfrac[slot_ahead[SW-1:0]];
           p_deg  <= sdeg[slot_ahead[SW-1:0]];
+          p_base <= sbase[slot_ahead[SW-1:0]];
           // One slot per cycle, padded to `period` so a round is never shorter than the recurrence.
           if ({1'b0, slot} == period - 1) begin
             slot <= '0;
@@ -245,7 +250,8 @@ module barrel_mac #(
       int'(slot_ahead) == ((int'(slot) == int'(period) - 1) ? 0 : int'(slot) + 1))
     else $error("barrel_mac: a_slot_ahead: slot_ahead %0d is not the slot after %0d (period %0d)", slot_ahead, slot, period);
   a_prefetch: assert property (@(posedge clk_i) disable iff (!rstn_i) step_valid |->
-      p_x == xop[slot[SW-1:0]] && p_acc == acc[slot[SW-1:0]] && p_frac == sfrac[slot[SW-1:0]] && p_deg == sdeg[slot[SW-1:0]])
+      p_x == xop[slot[SW-1:0]] && p_acc == acc[slot[SW-1:0]] && p_frac == sfrac[slot[SW-1:0]] && p_deg == sdeg[slot[SW-1:0]] &&
+      p_base == sbase[slot[SW-1:0]])
     else $error("barrel_mac: a_prefetch: slot %0d issued with prefetched operands that are not its own", slot);
 `endif
 endmodule
