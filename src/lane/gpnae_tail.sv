@@ -50,9 +50,15 @@ module gpnae_tail
   logic [1:0] k[C];  // Newton steps left
   logic issued[C];  // this context has an operation in a shared unit
   logic [IW-1:0] id[C];
-  // What each context wants from the shared units this cycle.
-  logic mreq[C], areq[C];
+  // What each context wants from the shared units, decided from its state (rq_* below), then registered (mreq / ma ...): the grant ANDs
+  // registered operands, not the state's case through them (TAILU/st -> mul_a / mul_b was the bf16 top's 1.09-1.11 at 4200cb3). A request
+  // reaches the grant a cycle after the state that makes it (Soham, 2026-11-26: +1 cycle per tail operation, tail_ops' latency + 3); a
+  // context's state holds while it requests, and its issued flag masks the registered request the cycle after its grant.
+  logic rq_m[C], rq_a[C];  // what each context's state asks this cycle
+  logic [31:0] rq_ma[C], rq_mb[C], rq_aa[C], rq_ab[C];
+  logic mreq[C], areq[C];  // those registered: the grant's inputs
   logic [31:0] ma[C], mb[C], aa[C], ab[C];
+  logic mreq_v[C], areq_v[C];  // a registered request not yet granted
   // The grants: the lowest requesting context wins each unit; the free and the finished context.
   logic mgnt_v, agnt_v, free_v, out_v;
   logic [CW-1:0] mgnt, agnt, free_c, out_c;
@@ -81,31 +87,41 @@ module gpnae_tail
   endfunction
   /* verilator lint_on UNUSEDSIGNAL */
 
-  // What each context wants from the shared units this cycle.
+  // What each context wants from the shared units, decided from its state (rq_* below), then registered (mreq / ma ...): the grant ANDs
+  // registered operands, not the state's case through them (TAILU/st -> mul_a / mul_b was the bf16 top's 1.09-1.11 at 4200cb3). A request
+  // reaches the grant a cycle after the state that makes it (Soham, 2026-11-26: +1 cycle per tail operation, tail_ops' latency + 3); a
+  // context's state holds while it requests, and its issued flag masks the registered request the cycle after its grant.
   always_comb begin
     for (int c = 0; c < C; c++) begin
-      mreq[c] = 1'b0;
-      areq[c] = 1'b0;
-      ma[c] = '0;
-      mb[c] = '0;
-      aa[c] = '0;
-      ab[c] = '0;
+      rq_m[c] = 1'b0;
+      rq_a[c] = 1'b0;
+      rq_ma[c] = '0;
+      rq_mb[c] = '0;
+      rq_aa[c] = '0;
+      rq_ab[c] = '0;
       if (!issued[c]) begin
         case (st[c])
-          T_K:    begin mreq[c] = 1'b1; ma[c] = x[c]; mb[c] = LOG2E; end
-          T_HMUL: begin mreq[c] = 1'b1; ma[c] = f[c]; mb[c] = acc[c]; end
-          T_HADD: begin areq[c] = 1'b1; aa[c] = set_i.coef[j[c]]; ab[c] = tmp[c]; end
-          T_ND:   begin areq[c] = 1'b1; aa[c] = ONE; ab[c] = e[c]; end
-          T_NY0:  begin areq[c] = 1'b1; aa[c] = Y0; ab[c] = {1'b1, d[c][30:23] - 8'd1, d[c][22:0]}; end  // -D/2, D >= 1
-          T_NDY:  begin mreq[c] = 1'b1; ma[c] = d[c]; mb[c] = y[c]; end
-          T_NT:   begin areq[c] = 1'b1; aa[c] = TWO; ab[c] = tmp[c] ^ S; end
-          T_NYT:  begin mreq[c] = 1'b1; ma[c] = y[c]; mb[c] = tmp[c]; end
-          T_NS:   begin mreq[c] = 1'b1; ma[c] = e[c]; mb[c] = y[c]; end
+          T_K:    begin rq_m[c] = 1'b1; rq_ma[c] = x[c]; rq_mb[c] = LOG2E; end
+          T_HMUL: begin rq_m[c] = 1'b1; rq_ma[c] = f[c]; rq_mb[c] = acc[c]; end
+          T_HADD: begin rq_a[c] = 1'b1; rq_aa[c] = set_i.coef[j[c]]; rq_ab[c] = tmp[c]; end
+          T_ND:   begin rq_a[c] = 1'b1; rq_aa[c] = ONE; rq_ab[c] = e[c]; end
+          T_NY0:  begin rq_a[c] = 1'b1; rq_aa[c] = Y0; rq_ab[c] = {1'b1, d[c][30:23] - 8'd1, d[c][22:0]}; end  // -D/2, D >= 1
+          T_NDY:  begin rq_m[c] = 1'b1; rq_ma[c] = d[c]; rq_mb[c] = y[c]; end
+          T_NT:   begin rq_a[c] = 1'b1; rq_aa[c] = TWO; rq_ab[c] = tmp[c] ^ S; end
+          T_NYT:  begin rq_m[c] = 1'b1; rq_ma[c] = y[c]; rq_mb[c] = tmp[c]; end
+          T_NS:   begin rq_m[c] = 1'b1; rq_ma[c] = e[c]; rq_mb[c] = y[c]; end
           default: ;
         endcase
       end
     end
   end
+
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) for (int c = 0; c < C; c++) {mreq[c], areq[c]} <= '0;
+    else for (int c = 0; c < C; c++) {mreq[c], areq[c]} <= {rq_m[c], rq_a[c]};
+  always_ff @(posedge clk_i)  // no reset: read only with mreq / areq
+    for (int c = 0; c < C; c++) {ma[c], mb[c], aa[c], ab[c]} <= {rq_ma[c], rq_mb[c], rq_aa[c], rq_ab[c]};
+  always_comb for (int c = 0; c < C; c++) {mreq_v[c], areq_v[c]} = {mreq[c] && !issued[c], areq[c] && !issued[c]};
 
   // The lowest requesting context wins each unit; a context asks again only after its result is back, so none starves.
   always_comb begin
@@ -114,8 +130,8 @@ module gpnae_tail
     free_v = 1'b0; free_c = '0;
     out_v  = 1'b0; out_c = '0;
     for (int c = C - 1; c >= 0; c--) begin
-      if (mreq[c]) begin mgnt_v = 1'b1; mgnt = CW'(c); end
-      if (areq[c]) begin agnt_v = 1'b1; agnt = CW'(c); end
+      if (mreq_v[c]) begin mgnt_v = 1'b1; mgnt = CW'(c); end
+      if (areq_v[c]) begin agnt_v = 1'b1; agnt = CW'(c); end
       if (st[c] == T_IDLE) begin free_v = 1'b1; free_c = CW'(c); end
       if (st[c] == T_DONE) begin out_v = 1'b1; out_c = CW'(c); end
     end
@@ -131,11 +147,11 @@ module gpnae_tail
       mlow = 1'b0;
       alow = 1'b0;
       for (int lo = 0; lo < c; lo++) begin
-        mlow |= mreq[lo];
-        alow |= areq[lo];
+        mlow |= mreq_v[lo];
+        alow |= areq_v[lo];
       end
-      mgoh[c] = mreq[c] && !mlow;
-      agoh[c] = areq[c] && !alow;
+      mgoh[c] = mreq_v[c] && !mlow;
+      agoh[c] = areq_v[c] && !alow;
       mul_a_n |= {32{mgoh[c]}} & ma[c];
       mul_b_n |= {32{mgoh[c]}} & mb[c];
       add_a_n |= {32{agoh[c]}} & aa[c];
