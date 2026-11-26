@@ -278,9 +278,23 @@ module gpnae
                                       .b_v_o(pb_v), .b_idx_o(pb_idx), .b_data_o(pb_data), .c_v_o(pc_v), .c_idx_o(pc_idx), .c_data_o(pc_data));
 
   // ── bf16's fp32 tail for negative sigmoid past its Q set; its elements run beside the group, results parked until emit ──
+  // The lowest pending element as a one-hot (each bit its own OR of the bits below), its word an AND-OR on it and its index encoded
+  // beside: no priority encode, then decode, then K:1 select in a row (tail_pend -> TAILU/x was the bf16 K = 32 lane's 0.995 at 4200cb3).
+  logic [K-1:0]          tail_oh;
+  logic [DATA_WIDTH-1:0] tail_word;
   always_comb begin
+    for (int ts = 0; ts < K; ts++) begin  // not i: bf16Adder's function loop would hide it (VARHIDDEN)
+      automatic logic lower;
+      lower = 1'b0;
+      for (int tl = 0; tl < ts; tl++) lower |= tail_pend[tl];
+      tail_oh[ts] = tail_pend[ts] && !lower;
+    end
     tail_next = '0;
-    for (int ts = K - 1; ts >= 0; ts--) if (tail_pend[ts]) tail_next = SW'(ts);  // not i: bf16Adder's function loop would hide it (VARHIDDEN)
+    tail_word = '0;
+    for (int ts = 0; ts < K; ts++) begin
+      if (tail_oh[ts]) tail_next |= SW'(ts);
+      tail_word |= {DATA_WIDTH{tail_oh[ts]}} & in_buf[ts];
+    end
   end
   assign tail_start = tail_ready && (|tail_pend);
 
@@ -293,7 +307,7 @@ module gpnae
         .clk_i   (clk_i),
         .rstn_i  (rstn_i),
         .start_i (tail_start),
-        .x_i     ({1'b0, in_buf[tail_next][DATA_WIDTH-2:0], {(32 - DATA_WIDTH) {1'b0}}}),  // |x| widened exactly
+        .x_i     ({1'b0, tail_word[DATA_WIDTH-2:0], {(32 - DATA_WIDTH) {1'b0}}}),  // |x| widened exactly
         .idx_i   (tail_next),
         .set_i   (tset),
         .ready_o (tail_ready),
