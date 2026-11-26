@@ -237,27 +237,36 @@ module gpnae
   /* verilator lint_on PINCONNECTEMPTY */
 
   // ── post stage ──
-  // The issuing element's words, read a cycle early: element 0 in the cycle a pass begins, then iss_idx + 1 while iss_idx issues (the
-  // K:1 selects off iss_idx in front of the post unit were the K = 32 lanes' limit at 3798aec: iss_idx -> POSTS m_a / m_b / pm_a,
-  // 1.14-1.18). A one-element group's P and E land as its post pass begins: forwarded.
-  logic [SW-1:0]    pf_idx;
-  logic             pf_first, pf_land;
+  // The issuing element's words, read a cycle early: rn_* is element iss_idx + 1, addressed from the iss_idx register alone, and the first
+  // issue of a pass takes element 0's own registers (buf[0] needs no select, and is written by then even in a one-element group). The
+  // K:1 selects off iss_idx in front of the post unit were the K = 32 lanes' limit at 3798aec (1.14-1.18); a prefetch whose index the
+  // state decoded (pf_first ? 0 : iss_idx + 1), with a forward of P and E, was 4200cb3's (gstate -> q_e / q_pol, 1.08-1.16).
+  logic             first_q;  // this cycle's issue is a pass's first: element 0
+  kind_t            rn_kind;
+  logic             rn_neg;
+  logic [DATA_WIDTH-1:0] rn_in;
+  logic [23:0]      rn_aux;
+  logic [ACT_W-1:0] rn_pol, rn_e;
   kind_t            q_kind;
   logic             q_neg;
   logic [DATA_WIDTH-1:0] q_in;
   logic [23:0]      q_aux;
   logic [ACT_W-1:0] q_pol, q_e;
-  assign pf_first = ((gstate == G_RUN || gstate == G_RECV) && mac_done) || (gstate == G_XWAIT && drain_cnt == 4'(AL + 1));
-  assign pf_idx   = pf_first ? '0 : SW'(iss_idx + 1);
-  assign pf_land  = (gstate == G_RUN || gstate == G_RECV) && mac_res_valid && rx_idx[SW-1:0] == pf_idx;
   always_ff @(posedge clk_i) begin  // no reset: read only with post_issue / post_pass2
-    q_kind <= kind_buf[pf_idx];
-    q_neg  <= neg_buf[pf_idx];
-    q_in   <= in_buf[pf_idx];
-    q_aux  <= aux_buf[pf_idx];
-    q_pol  <= pf_land ? mac_res : pol_buf[pf_idx];
-    q_e    <= pf_land ? exp_scale(mac_res, n_rx, under_rx) : e_buf[pf_idx];
+    first_q <= ((gstate == G_RUN || gstate == G_RECV) && mac_done) || (gstate == G_XWAIT && drain_cnt == 4'(AL + 1));
+    rn_kind <= kind_buf[SW'(iss_idx + 1)];
+    rn_neg  <= neg_buf[SW'(iss_idx + 1)];
+    rn_in   <= in_buf[SW'(iss_idx + 1)];
+    rn_aux  <= aux_buf[SW'(iss_idx + 1)];
+    rn_pol  <= pol_buf[SW'(iss_idx + 1)];
+    rn_e    <= e_buf[SW'(iss_idx + 1)];
   end
+  assign q_kind = first_q ? kind_buf[0] : rn_kind;
+  assign q_neg  = first_q ? neg_buf[0] : rn_neg;
+  assign q_in   = first_q ? in_buf[0] : rn_in;
+  assign q_aux  = first_q ? aux_buf[0] : rn_aux;
+  assign q_pol  = first_q ? pol_buf[0] : rn_pol;
+  assign q_e    = first_q ? e_buf[0] : rn_e;
   assign pi         = iss_idx[SW-1:0];
   assign post_issue = (gstate == G_POST);
   assign post_pass2 = (gstate == G_POST2) && (q_kind == K_EXP);
